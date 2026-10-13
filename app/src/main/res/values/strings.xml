@@ -1,0 +1,74 @@
+<resources>
+    <!--
+      融合后的字符串表：动效层（Test）的文案 + NFC 层（nfc_tap_demo）的 HCE 描述 + 两边接起来之后新增的几条。
+      分工：动效页里的文案由 ui/OverlayView 取，主页/通知由 HomeActivity / service/OverlayService 取，
+      NFC 联调页与常驻服务的文案在 Java 侧（com.pri.nfctouchdemo.nfc）现写，不在这里。
+    -->
+    <string name="app_name">一碰互联</string>
+
+    <!-- ================= 动效页（Canvas 自绘）内的文案 =================
+         卡片标题 / 副标题在选了照片之后会被真文件名和大小替换；
+         NFC 流程里由 OverlayService 用 peer_title_* / swipe_tip_count / card_meta_count 覆盖 -->
+    <string name="panel_receiver">发送给 fazd9</string>
+    <string name="card_title">海边的黄昏</string>
+    <string name="card_meta">JPG · 4.8 MB · 1 张照片</string>
+    <string name="panel_swipe_tip">上滑发送 1 张照片</string>
+
+    <!--
+      带参数的那几条：NFC 层拿到了真实的对端标识 / 张数就换成这些。
+      peer 为空（或张数 <= 0）时不动效层不换，继续用上面那几条默认文案 —— 保留单独演示的能力。
+    -->
+    <string name="peer_title_send">发送给 %1$s</string>
+    <string name="peer_title_receive">来自 %1$s的分享</string>
+    <string name="swipe_tip_count">上滑发送 %1$d 张照片</string>
+    <string name="card_meta_count">%1$s · %2$d 张照片</string>
+    <string name="receive_accept_count">接收 %1$d 张照片</string>
+
+    <!-- 张数拿不到（<= 0）时的裸文案：接收按钮就写两个字 -->
+    <string name="receive_accept">接收</string>
+    <string name="receive_reject">拒绝</string>
+
+    <!-- ================= 启动页 ================= -->
+    <string name="home_title">一碰互联 · 融合 Demo</string>
+    <string name="home_sub">动效层（GL 水波 + 白线 + 卡片上滑发送）+ NFC「一碰互联」（HCE 碰触交换 + Wi-Fi 直连传图）合并在一个 app 里。选好一张要发送的照片，点下面的按钮交给常驻服务，两台手机碰一碰就走完整流程。</string>
+    <string name="home_state_running">悬浮演示：运行中</string>
+    <string name="home_state_stopped">悬浮演示：未运行</string>
+    <string name="home_state_animating"> · 演示中</string>
+    <string name="home_btn_overlay">开启悬浮窗权限</string>
+    <string name="home_slot_photo">要发送的照片 · 卡片里那张</string>
+    <string name="home_slot_photo_picked">要发送的照片 · %1$s</string>
+    <string name="home_btn_pick">选择图片</string>
+    <string name="home_btn_exit">退出常驻服务</string>
+    <string name="home_hint">两台手机碰一碰时，动效会盖在当前屏幕之上（所以下面的应用看不到了，这是有意的）。正常流程里它自己会收起来：发送端上滑发出后、或对方点「接收」/「拒绝」之后就消失。注意：页面停住时（连上了还没上滑、或者连接失败）页面上没有退出按钮，只能强制停止应用；「退出常驻服务」要等窗口摘掉之后才点得到。</string>
+
+    <!-- 主页上的一碰互联入口 -->
+    <string name="home_nfc_title">一碰互联</string>
+    <string name="home_nfc_idle">NFC 可用 · 还没有把照片交给常驻服务</string>
+    <string name="home_nfc_ready">NFC 可用 · 已交给常驻服务 %1$d 张</string>
+    <string name="home_nfc_unavailable">本机没有 NFC 硬件，一碰互联用不了</string>
+    <string name="home_btn_push">把选中的照片交给一碰互联</string>
+    <string name="home_btn_nfc_debug">打开 NFC 联调页</string>
+    <string name="home_nfc_hint">两台手机碰一碰：发送方（这台，已选好照片）会直接弹出发送确认页，上滑即发送；接收方会弹出接收确认页，点「接收」后图片存进相册并自动打开。接收方停在「NFC 联调页」时走 reader 模式，停在其它界面时由透明跳板接管，两种都能收到。</string>
+
+    <!-- ================= 常驻服务的通知 ================= -->
+    <string name="notif_channel">一碰互联演示</string>
+    <string name="notif_title">一碰互联 · 动效演示</string>
+    <string name="notif_text_idle">待命中：回主页把要发送的照片交给一碰互联</string>
+    <string name="notif_text_pending">5 秒后重播…（再点一次重新计时）</string>
+    <string name="notif_text_animating">正在演示，触摸穿透已关闭</string>
+    <string name="notif_text_through">正在演示，下层应用可正常操作</string>
+    <string name="notif_action_replay">重播动画</string>
+    <string name="notif_action_hide">关闭悬浮窗</string>
+    <string name="notif_action_touch_on">开触摸穿透</string>
+    <string name="notif_action_touch_off">关触摸穿透</string>
+
+    <!-- ================= 提示 ================= -->
+    <string name="toast_need_overlay">请先开启悬浮窗权限，动效才能盖在别的应用上</string>
+    <string name="toast_need_images">先在主页选好要发送的那张照片</string>
+    <string name="toast_pushed">已交给常驻服务（%1$d 张），现在碰一碰即可</string>
+    <string name="toast_push_failed">常驻服务没起来，稍后再试</string>
+
+    <!-- ================= HCE 卡模拟（原 nfc_tap_demo 的 res/values/strings.xml） ================= -->
+    <string name="hce_service_desc">NFC Tap Demo card emulation</string>
+    <string name="aid_group_desc">NFC Tap Demo AID</string>
+</resources>

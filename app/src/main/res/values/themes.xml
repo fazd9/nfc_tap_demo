@@ -1,0 +1,30 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!--
+      融合后统一用动效层（Test）那套深色主题：整套动效都在深色底上呈现，
+      日间/夜间保持一致（values-night/themes.xml 里是同一份 Base）。
+    -->
+    <style name="Base.Theme.NFCTouchDemo" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="android:windowBackground">@color/demo_background</item>
+
+        <!-- 系统栏全透明：悬浮窗的整屏画面能从状态栏 / 导航栏后面直接透出来。
+             背景图是黑的时这条尤其关键 —— 不透明的话顶上 / 底下各一条黑边，
+             白线的顶边和底边就正好被压在下面。 -->
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+
+        <!-- 关键，API 29+ 才有：系统默认会在"透明系统栏"后面再补一层不透明 scrim
+             来保证对比度（深色主题下就是纯黑），于是上面那两行 transparent 等于白写。
+             必须显式关掉，否则黑底照片 + 黑状态栏就是一团黑。 -->
+        <item name="android:enforceStatusBarContrast" tools:targetApi="q">false</item>
+        <item name="android:enforceNavigationBarContrast" tools:targetApi="q">false</item>
+
+        <!-- 系统栏图标 / 文字保持浅色：深色底上只有浅色图标看得清。 -->
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+
+        <!-- 内容铺进刘海 / 挖孔区，和悬浮窗的 layoutInDisplayCutoutMode 保持一致。 -->
+        <item name="android:windowLayoutInDisplayCutoutMode" tools:targetApi="p">shortEdges</item>
+    </style>
+
+    <style name="Theme.NFCTouchDemo" parent="Base.Theme.NFCTouchDemo" />
+</resources>

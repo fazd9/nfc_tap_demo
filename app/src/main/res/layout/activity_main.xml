@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  已退役：这是 NFCTouchDemo 模板自带的 Hello World 布局，融合后没有任何地方 inflate 它。
+
+  悬浮窗内容在 overlay_root.xml（GL 水波层 + Canvas 动效层），启动页在 activity_home.xml，
+  NFC 联调页的界面是 com.pri.nfctouchdemo.nfc.MainActivity 里用代码搭的。
+  本文件留成空壳只是为了让资源仍然合法，可以随手删掉。
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent" />

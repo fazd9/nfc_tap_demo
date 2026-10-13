@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  悬浮窗内容：OverlayService 用 WindowManager 把这一层加在**其它应用之上**。
+
+  只有两层，而且根布局一律不设背景 —— 窗口是 FORMAT_TRANSLUCENT 的，
+  动效之外的地方必须真透明，否则下面那个应用会被糊住：
+    · RippleSurfaceView —— GL 水波层，折射源 = 服务传进来的背景图（整屏铺满）；
+    · OverlayView —— Canvas 动效层：白线 / 边缘辉光 / 发送面板 / 卡片 / 上滑提示。
+  背景图由 GL 层铺满整屏，所以这里不需要再放一层 ImageView。
+-->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent">
+
+    <com.pri.nfctouchdemo.gfx.RippleSurfaceView
+        android:id="@+id/ripple"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+
+    <com.pri.nfctouchdemo.ui.OverlayView
+        android:id="@+id/overlay"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent" />
+</FrameLayout>

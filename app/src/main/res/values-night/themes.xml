@@ -1,0 +1,15 @@
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <!-- 深色动效 demo，夜间模式与日间模式保持一致。 -->
+    <style name="Base.Theme.NFCTouchDemo" parent="Theme.Material3.Dark.NoActionBar">
+        <item name="android:windowBackground">@color/demo_background</item>
+
+        <!-- 与 values/themes.xml 完全一致：系统栏透明 + 关掉 API 29+ 的对比度 scrim。 -->
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:enforceStatusBarContrast" tools:targetApi="q">false</item>
+        <item name="android:enforceNavigationBarContrast" tools:targetApi="q">false</item>
+        <item name="android:windowLightStatusBar">false</item>
+        <item name="android:windowLightNavigationBar">false</item>
+        <item name="android:windowLayoutInDisplayCutoutMode" tools:targetApi="p">shortEdges</item>
+    </style>
+</resources>

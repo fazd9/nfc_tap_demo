@@ -1,0 +1,146 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  融合后的清单：一个 app 里同时有「一碰互联」的 NFC/传输层和碰一碰动效层。
+
+  组件分工：
+    · HomeActivity            启动页：选两张图看动效；也可以把选中的照片交给常驻服务等碰一碰
+    · nfc.MainActivity        NFC 联调页（二级）：日志控制台 / 角色切换 / 选图 / reader 模式 / 分享入口
+    · nfc.TapDispatchActivity 透明跳板：系统把 NFC 标签交给它 → 转交常驻服务 → 秒退
+    · nfc.TapService          常驻服务：碰一碰主流程（弹动效页 → Xfer 传图）
+    · nfc.HceService          HCE 卡模拟（发送侧）
+    · service.OverlayService  动效层宿主：前台服务 + 整屏悬浮窗（GL 水波 + OverlayView）
+
+  权限按来源分三段：NFC、悬浮窗/前台服务、传输通道。全部沿用两个源工程原有声明，
+  没有新增（改动权限会改变已验证过的那套流程）。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    android:sharedUserId="android.uid.system"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- NFC：安装期权限；HCE 卡模拟不需要运行时权限 -->
+    <uses-permission android:name="android.permission.NFC" />
+
+    <!-- 悬浮窗 + 前台服务 -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <!-- 传输通道：同 Wi-Fi 直连 / 本地热点 / Wi-Fi Direct / 蓝牙名 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
+    <uses-permission android:name="android.permission.BLUETOOTH" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
+
+    <uses-feature
+        android:name="android.hardware.nfc"
+        android:required="true" />
+    <uses-feature
+        android:name="android.hardware.wifi.direct"
+        android:required="false" />
+
+    <application
+        android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.NFCTouchDemo">
+
+        <!-- 启动页：动效演示 + 一碰互联入口 -->
+        <activity
+            android:name=".HomeActivity"
+            android:exported="true"
+            android:screenOrientation="portrait">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          NFC 联调页（二级）：带日志控制台，方便用 adb 顶掉碰触这一步做回归。
+          顺带保留两个分享入口 —— 相册/文件管理器选中图片后分享过来，等价于"相册把当前选中推给服务"。
+        -->
+        <activity
+            android:name=".nfc.MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask">
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+
+                <data android:mimeType="image/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+
+                <data android:mimeType="image/*" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          透明跳板：系统把 NFC 标签交给它 → 立即转交常驻服务处理（弹动效悬浮窗）→ 自身秒退。
+          界面不可见，所以用透明主题，且不进最近任务。
+        -->
+        <activity
+            android:name=".nfc.TapDispatchActivity"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.nfc.action.TECH_DISCOVERED" />
+
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <meta-data
+                android:name="android.nfc.action.TECH_DISCOVERED"
+                android:resource="@xml/tech_list" />
+        </activity>
+
+        <!-- 常驻服务：碰一碰主流程（demo 开放给调试相册调用；产品化改用签名级权限） -->
+        <service
+            android:name=".nfc.TapService"
+            android:exported="true" />
+
+        <!-- 卡模拟（发送侧）：AID 见 res/xml/apdu_service.xml -->
+        <service
+            android:name=".nfc.HceService"
+            android:exported="true"
+            android:permission="android.permission.BIND_NFC_SERVICE">
+            <intent-filter>
+                <action android:name="android.nfc.cardemulation.action.HOST_APDU_SERVICE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.nfc.cardemulation.host_apdu_service"
+                android:resource="@xml/apdu_service" />
+        </service>
+
+        <!--
+          动效层宿主：动效本体盖在**别的应用之上**，服务常驻。
+          动效窗口的触摸穿透开关放在通知里 —— 窗口一旦 FLAG_NOT_TOUCHABLE，
+          它自己的按钮就点不到了，所以这个开关必须在窗口外。
+        -->
+        <service
+            android:name=".service.OverlayService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="touch_anime_overlay" />
+        </service>
+    </application>
+
+</manifest>
