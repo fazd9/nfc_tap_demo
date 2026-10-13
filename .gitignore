@@ -33,3 +33,8 @@ google-services.json
 
 # Android Profiling
 *.hprof
+
+# 手工构建产物
+out/
+*.idsig
+!demo.keystore

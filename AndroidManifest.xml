@@ -1,0 +1,89 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="com.pri.nfcdemo"
+    android:versionCode="24"
+    android:versionName="5.0">
+    <!--
+      产品化(系统应用)时的开关 —— demo 不能开,开了会因缺少平台签名而安装失败:
+      android:sharedUserId="android.uid.system"
+      系统化需要:① 平台签名(或厂商签名+privapp 白名单) ② 预置到 /system/priv-app
+      ③ privapp-permissions 白名单(免弹窗接热点等特权)。
+    -->
+
+    <uses-sdk android:minSdkVersion="23" android:targetSdkVersion="36" />
+
+    <!-- NFC: install-time permission; HCE needs no runtime permission -->
+    <uses-permission android:name="android.permission.NFC" />
+    <uses-permission android:name="android.permission.BLUETOOTH" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
+    <!-- Wi-Fi Direct transfer -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.CHANGE_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
+    <!-- 悬浮窗:demo 用 adb(appops set com.pri.nfcdemo SYSTEM_ALERT_WINDOW allow)授权;系统应用免授权 -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <uses-feature android:name="android.hardware.nfc" android:required="true" />
+    <uses-feature android:name="android.hardware.wifi.direct" android:required="false" />
+
+    <application android:label="@string/app_name">
+
+        <activity
+            android:name=".TapDispatchActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:launchMode="singleTop"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar">
+            <intent-filter>
+                <action android:name="android.nfc.action.TECH_DISCOVERED" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+            <meta-data
+                android:name="android.nfc.action.TECH_DISCOVERED"
+                android:resource="@xml/tech_list" />
+        </activity>
+
+        <service
+            android:name=".TapService"
+            android:exported="true" /><!-- demo 开放给调试相册调用;产品化改用签名级权限 -->
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <!-- Fallback path: platform tag dispatch when the peer's HCE card is discovered -->
+            <!-- 分享入口:相册/文件管理器选中图片后分享过来(与相册解耦的标准入口) -->
+            <intent-filter>
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="image/*" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".HceService"
+            android:exported="true"
+            android:permission="android.permission.BIND_NFC_SERVICE">
+            <intent-filter>
+                <action android:name="android.nfc.cardemulation.action.HOST_APDU_SERVICE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.nfc.cardemulation.host_apdu_service"
+                android:resource="@xml/apdu_service" />
+        </service>
+
+    </application>
+</manifest>

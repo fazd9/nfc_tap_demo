@@ -1,0 +1,428 @@
+package com.pri.nfcdemo;
+
+import android.content.Context;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.net.Uri;
+import android.net.wifi.WifiManager;
+import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
+
+import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.InputStream;
+import java.net.InetSocketAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
+
+/**
+ * 纯热点传图(v3.0):完全不使用 Wi-Fi Direct,把 Wi-Fi 接口额度全部让给热点。
+ *  - 接收方:按「切换为接收方」时即开本地热点(LocalOnlyHotspot),SSID/密码写进 NFC payload。
+ *  - 发送方:碰一碰拿到 SSID/密码后,用 WifiNetworkSpecifier 直接接入(免搜索),
+ *           连热点网关的 8988 端口传图;若双方本就在同一 Wi-Fi,则直接按 IP 连。
+ */
+public class Xfer {
+
+    public interface Listener {
+        void onP2pReady(boolean isGroupOwner, String goAddress);
+        void onImageReceived(Bitmap bmp, int bytes, boolean saved);
+        void onImageSent(int bytes);
+        void onXferFailed(String why);
+    }
+
+    private static final int PORT = 8988;
+    private static final int MAGIC = 0x4E464331; // "NFC1"
+
+    private final Context mCtx;
+    private final Listener mListener;
+    private final Handler mMain = new Handler(Looper.getMainLooper());
+
+    private ServerSocket mServer;
+    private volatile Socket mPendingSocket;
+    private volatile boolean mRunning = true;
+    private volatile boolean mReceiverRole;
+    private volatile boolean mGotConnection;
+
+    private volatile String mPeerLanIp;
+    private volatile String mPeerHsSsid;
+    private volatile String mPeerHsPass;
+
+    private volatile WifiManager.LocalOnlyHotspotReservation mHotspotReservation;
+    private volatile boolean mHotspotActive;
+    private volatile android.net.ConnectivityManager.NetworkCallback mWifiNetCb;
+
+    public Xfer(Context ctx, Listener listener) {
+        mCtx = ctx.getApplicationContext();
+        mListener = listener;
+        // 注意:这里刻意不初始化 WifiP2pManager —— 避免占用 p2p0/p2p1 接口,
+        // 让 Wi-Fi 芯片有余量创建热点接口(ap0)。
+    }
+
+    public void setExpectedPeer(String modelName, String btName, String p2pName, String p2pAddr,
+                                String lanIp, String hsSsid, String hsPass) {
+        mPeerLanIp = lanIp;
+        mPeerHsSsid = hsSsid;
+        mPeerHsPass = hsPass;
+        Bus.log("传输: 目标 = " + modelName + "/" + btName
+                + (lanIp != null ? ", 局域网IP=" + lanIp : "")
+                + (hsSsid != null ? ", 对方热点=" + hsSsid : ""));
+    }
+
+    private boolean checkWifi() {
+        try {
+            WifiManager wm = (WifiManager) mCtx.getSystemService(Context.WIFI_SERVICE);
+            if (wm != null && !wm.isWifiEnabled()) {
+                Bus.log("提示: Wi-Fi 未开启,热点/直连都需要打开 Wi-Fi");
+                return false;
+            }
+        } catch (Throwable ignored) {}
+        return true;
+    }
+
+    /** 接收方按下按钮时即开启本地热点,把 SSID/密码写进 payload,让对方免搜索直连。 */
+    public void startHotspot() {
+        if (mHotspotReservation != null) return;
+        try {
+            final WifiManager wm = (WifiManager) mCtx.getSystemService(Context.WIFI_SERVICE);
+            if (wm == null) return;
+            boolean wifiOn = false;
+            try { wifiOn = wm.isWifiEnabled(); } catch (Throwable ignored) {}
+            Bus.log("热点: 正在开启本地热点(给对方免搜索直连用)…" + (wifiOn ? "(注意: Wi-Fi 正开着)" : ""));
+            wm.startLocalOnlyHotspot(new WifiManager.LocalOnlyHotspotCallback() {
+                @Override public void onStarted(WifiManager.LocalOnlyHotspotReservation reservation) {
+                    mHotspotReservation = reservation;
+                    mHotspotActive = true;
+                    android.net.wifi.SoftApConfiguration cfg = reservation.getSoftApConfiguration();
+                    if (cfg != null && cfg.getSsid() != null) {
+                        Bus.setHotspotInfo(cfg.getSsid(), cfg.getPassphrase());
+                        Bus.log("热点: 已开启 SSID=" + cfg.getSsid() + ",对方碰一下即可直连");
+                    } else {
+                        Bus.log("热点: 已开启但拿不到 SSID");
+                    }
+                }
+                @Override public void onFailed(int reason) {
+                    String r;
+                    switch (reason) {
+                        case WifiManager.LocalOnlyHotspotCallback.ERROR_INCOMPATIBLE_MODE:
+                            r = "INCOMPATIBLE_MODE(当前模式不支持)"; break;
+                        case WifiManager.LocalOnlyHotspotCallback.ERROR_NO_CHANNEL:
+                            r = "NO_CHANNEL"; break;
+                        case WifiManager.LocalOnlyHotspotCallback.ERROR_TETHERING_DISALLOWED:
+                            r = "TETHERING_DISALLOWED"; break;
+                        default:
+                            r = "GENERIC";
+                    }
+                    String hint = "";
+                    try {
+                        WifiManager wm2 = (WifiManager) mCtx.getSystemService(Context.WIFI_SERVICE);
+                        if (wm2 != null && wm2.isWifiEnabled()) {
+                            hint = "(本机型热点和 Wi-Fi 不能同时开:请先关闭 Wi-Fi 再点一次)";
+                        }
+                    } catch (Throwable ignored) {}
+                    Bus.log("热点: 开启失败 " + r + hint);
+                    mHotspotActive = false;
+                    mMain.post(new Runnable() {
+                        @Override public void run() {
+                            mListener.onXferFailed("热点开启失败,请先关闭 Wi-Fi 再试");
+                        }
+                    });
+                }
+                @Override public void onStopped() {
+                    mHotspotActive = false;
+                    Bus.log("热点: 已停止");
+                }
+            }, mMain);
+        } catch (Throwable t) {
+            Bus.log("热点: 开启异常 " + t);
+        }
+    }
+
+    private void closeHotspot() {
+        try { if (mHotspotReservation != null) mHotspotReservation.close(); } catch (Throwable ignored) {}
+        mHotspotReservation = null;
+        mHotspotActive = false;
+    }
+
+    /** 接收方入口:起服务端等对方连(热点内网关地址 或 同一 Wi-Fi 的本机 IP 都能到)。 */
+    public void startAsReceiver() {
+        mReceiverRole = true;
+        startServer();
+        Bus.log("传输: 本机接收方,等待对方通过热点/局域网连接…");
+        mMain.postDelayed(new Runnable() {
+            @Override public void run() {
+                if (mRunning && !mGotConnection) {
+                    Bus.log("传输: 尚未等到对方连接(确认对方点过「允许连接到…」)");
+                }
+            }
+        }, 25000);
+    }
+
+    /** 发送方入口:对端热点(免搜索直连) → 同一 Wi-Fi 直连。 */
+    public void startAsSender() {
+        mReceiverRole = false;
+        checkWifi();
+        new Thread(new Runnable() {
+            @Override public void run() {
+                if (mPeerHsSsid != null && joinHotspot()) return;
+                if (mPeerLanIp != null && connectTo(mPeerLanIp, "局域网")) return;
+                fail("无法连接对方(对方热点信息不可用且不在同一 Wi-Fi)");
+            }
+        }).start();
+    }
+
+    private boolean connectTo(String ip, String how) {
+        for (int i = 0; i < 2 && mRunning; i++) {
+            try {
+                Socket s = new Socket();
+                s.connect(new InetSocketAddress(ip, PORT), 1500);
+                mPendingSocket = s;
+                Bus.log("传输: " + how + "直连成功 " + ip + ":" + PORT + "(免搜索)");
+                mListener.onP2pReady(false, ip);
+                return true;
+            } catch (Exception e) {
+                Bus.log("传输: " + how + "直连尝试 " + (i + 1) + " 失败: " + e);
+            }
+        }
+        return false;
+    }
+
+    /** 用碰一碰传来的 SSID/密码接入对方热点,再连热点网关的传输端口。 */
+    private boolean joinHotspot() {
+        if (Build.VERSION.SDK_INT < 29) return false;
+        try {
+            Bus.log("传输: 用对方热点信息直连 SSID=" + mPeerHsSsid + "…");
+            android.net.wifi.WifiNetworkSpecifier.Builder sb =
+                    new android.net.wifi.WifiNetworkSpecifier.Builder().setSsid(mPeerHsSsid);
+            if (mPeerHsPass != null) sb.setWpa2Passphrase(mPeerHsPass);
+            android.net.NetworkRequest req = new android.net.NetworkRequest.Builder()
+                    .addTransportType(android.net.NetworkCapabilities.TRANSPORT_WIFI)
+                    .removeCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
+                    .setNetworkSpecifier(sb.build())
+                    .build();
+            final android.net.ConnectivityManager cm =
+                    (android.net.ConnectivityManager) mCtx.getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm == null) return false;
+            final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
+            final android.net.Network[] holder = new android.net.Network[1];
+            mWifiNetCb = new android.net.ConnectivityManager.NetworkCallback() {
+                @Override public void onAvailable(android.net.Network network) {
+                    holder[0] = network;
+                    latch.countDown();
+                }
+                @Override public void onUnavailable() {
+                    latch.countDown();
+                }
+            };
+            cm.requestNetwork(req, mWifiNetCb, 25000);
+            if (!latch.await(26, java.util.concurrent.TimeUnit.SECONDS) || holder[0] == null) {
+                Bus.log("传输: 对方热点接入失败(超时或被拒绝)");
+                releaseNetworkRequest();
+                return false;
+            }
+            android.net.Network net = holder[0];
+            String gw = null;
+            for (int i = 0; i < 10 && gw == null && mRunning; i++) {
+                android.net.LinkProperties lp = cm.getLinkProperties(net);
+                if (lp != null) {
+                    for (android.net.RouteInfo r : lp.getRoutes()) {
+                        if (r.isDefaultRoute() && r.getGateway() != null) {
+                            gw = r.getGateway().getHostAddress();
+                            break;
+                        }
+                    }
+                }
+                if (gw == null) {
+                    try { Thread.sleep(500); } catch (InterruptedException ignored) {}
+                }
+            }
+            Bus.log("传输: 热点已接入" + (gw != null ? ",网关=" + gw : ",网关未知"));
+            if (gw == null) {
+                releaseNetworkRequest();
+                return false;
+            }
+            for (int i = 0; i < 3 && mRunning; i++) {
+                try {
+                    Socket s = net.getSocketFactory().createSocket();
+                    s.connect(new InetSocketAddress(gw, PORT), 2000);
+                    mPendingSocket = s;
+                    Bus.log("传输: 热点直连成功(免搜索)");
+                    mListener.onP2pReady(false, gw);
+                    return true;
+                } catch (Exception e) {
+                    Bus.log("传输: 热点内连接尝试 " + (i + 1) + " 失败: " + e);
+                    try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
+                }
+            }
+            return false;
+        } catch (Throwable t) {
+            Bus.log("传输: 接入对方热点异常 " + t);
+            return false;
+        }
+    }
+
+    private void releaseNetworkRequest() {
+        try {
+            if (mWifiNetCb != null) {
+                android.net.ConnectivityManager cm =
+                        (android.net.ConnectivityManager) mCtx.getSystemService(Context.CONNECTIVITY_SERVICE);
+                if (cm != null) cm.unregisterNetworkCallback(mWifiNetCb);
+            }
+        } catch (Throwable ignored) {}
+        mWifiNetCb = null;
+    }
+
+    private void startServer() {
+        if (mServer != null) return;
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    mServer = new ServerSocket(PORT);
+                    Bus.log("传输: 已监听端口 " + PORT + ",等待对方连接…");
+                    while (mRunning) {
+                        Socket s = mServer.accept();
+                        mGotConnection = true;
+                        Bus.log("传输: 对方已连接 " + s.getInetAddress());
+                        if (mReceiverRole) {
+                            handleIncoming(s);
+                        } else {
+                            mPendingSocket = s; // 发送方做服务端(很少见):等用户点发送
+                            Bus.log("传输: 连接已就绪,点「发送给对方」即可发送");
+                        }
+                    }
+                } catch (Exception e) {
+                    if (mRunning) Bus.log("传输: 监听异常 " + e);
+                }
+            }
+        }).start();
+    }
+
+    /** 从一条已建立的 TCP 连接上读一张图片:显示 + 存相册。 */
+    private void handleIncoming(Socket s) {
+        try {
+            DataInputStream in = new DataInputStream(s.getInputStream());
+            int magic = in.readInt();
+            if (magic != MAGIC) {
+                Bus.log("传输: 数据头不匹配 " + Integer.toHexString(magic));
+                return;
+            }
+            int len = in.readInt();
+            Bus.log("传输: 正在接收 " + len + " 字节…");
+            byte[] data = new byte[len];
+            in.readFully(data);
+            final Bitmap bmp = decode(data);
+            final boolean saved = saveToGallery(data);
+            Bus.log("传输: 接收完成 " + len + " 字节, 已存相册=" + saved);
+            mMain.post(new Runnable() {
+                @Override public void run() {
+                    mListener.onImageReceived(bmp, data.length, saved);
+                }
+            });
+        } catch (Exception e) {
+            Bus.log("传输: 接收异常 " + e);
+        } finally {
+            try { s.close(); } catch (Exception ignored) {}
+        }
+    }
+
+    /** 发送方:把选中的图片推给对方。 */
+    public void sendImage(final Uri uri) {
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    byte[] data = readAll(mCtx.getContentResolver().openInputStream(uri));
+                    Socket s = mPendingSocket;
+                    if (s == null) {
+                        fail("对方尚未连接,请稍候再点发送");
+                        return;
+                    }
+                    Bus.log("传输: 正在发送 " + data.length + " 字节…");
+                    DataOutputStream out = new DataOutputStream(s.getOutputStream());
+                    out.writeInt(MAGIC);
+                    out.writeInt(data.length);
+                    out.write(data);
+                    out.flush();
+                    s.close();
+                    mPendingSocket = null;
+                    Bus.log("传输: 发送完成");
+                    final int n = data.length;
+                    mMain.post(new Runnable() {
+                        @Override public void run() { mListener.onImageSent(n); }
+                    });
+                } catch (Exception e) {
+                    fail("发送失败: " + e);
+                }
+            }
+        }).start();
+    }
+
+    public void destroy() {
+        mRunning = false;
+        try { if (mServer != null) mServer.close(); } catch (Exception ignored) {}
+        try { if (mPendingSocket != null) mPendingSocket.close(); } catch (Exception ignored) {}
+        releaseNetworkRequest();
+        closeHotspot();
+    }
+
+    // ---------- helpers ----------
+
+    private void fail(final String why) {
+        Bus.log("传输: " + why);
+        mMain.post(new Runnable() {
+            @Override public void run() { mListener.onXferFailed(why); }
+        });
+    }
+
+    private static byte[] readAll(InputStream in) throws Exception {
+        if (in == null) throw new Exception("无法读取图片");
+        try {
+            ByteArrayOutputStream bos = new ByteArrayOutputStream();
+            byte[] buf = new byte[64 * 1024];
+            int n;
+            while ((n = in.read(buf)) > 0) bos.write(buf, 0, n);
+            return bos.toByteArray();
+        } finally {
+            try { in.close(); } catch (Exception ignored) {}
+        }
+    }
+
+    private static Bitmap decode(byte[] data) {
+        try {
+            BitmapFactory.Options o = new BitmapFactory.Options();
+            o.inJustDecodeBounds = true;
+            BitmapFactory.decodeByteArray(data, 0, data.length, o);
+            int scale = 1;
+            while (o.outWidth / scale > 1600 || o.outHeight / scale > 1600) scale *= 2;
+            BitmapFactory.Options o2 = new BitmapFactory.Options();
+            o2.inSampleSize = scale;
+            return BitmapFactory.decodeByteArray(data, 0, data.length, o2);
+        } catch (Throwable t) {
+            Bus.log("传输: 解码失败 " + t);
+            return null;
+        }
+    }
+
+    private boolean saveToGallery(byte[] data) {
+        if (Build.VERSION.SDK_INT < 29) return false; // 老版本要写权限,demo 不处理
+        try {
+            android.content.ContentValues v = new android.content.ContentValues();
+            v.put(android.provider.MediaStore.Images.Media.DISPLAY_NAME,
+                    "nfctap_" + System.currentTimeMillis() + ".jpg");
+            v.put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
+            v.put(android.provider.MediaStore.Images.Media.RELATIVE_PATH,
+                    android.os.Environment.DIRECTORY_PICTURES + "/NfcTapDemo");
+            Uri u = mCtx.getContentResolver().insert(
+                    android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, v);
+            if (u == null) return false;
+            java.io.OutputStream os = mCtx.getContentResolver().openOutputStream(u);
+            if (os == null) return false;
+            os.write(data);
+            os.close();
+            return true;
+        } catch (Throwable t) {
+            Bus.log("传输: 存相册失败 " + t);
+            return false;
+        }
+    }
+}

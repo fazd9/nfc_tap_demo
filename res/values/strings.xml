@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">NFC 碰一碰 Demo</string>
+    <string name="hce_service_desc">NFC Tap Demo card emulation</string>
+    <string name="aid_group_desc">NFC Tap Demo AID</string>
+</resources>

@@ -1,0 +1,382 @@
+package com.pri.nfcdemo;
+
+import android.app.Activity;
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
+import android.bluetooth.BluetoothServerSocket;
+import android.bluetooth.BluetoothSocket;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
+import android.net.Uri;
+import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
+
+import java.io.ByteArrayOutputStream;
+import java.io.DataInputStream;
+import java.io.DataOutputStream;
+import java.io.InputStream;
+import java.util.UUID;
+
+/**
+ * 蓝牙(RFCOMM)传图:
+ *  - 发送方: 起 RFCOMM 服务端 + 请求"允许被发现";对方连上后, 用户点发送时推图。
+ *  - 接收方: 经典蓝牙搜索对方(按名字匹配) → insecure RFCOMM 连接 → 读图显示并存相册。
+ * 图片先压缩(最长边 1280 / JPEG85)再发, 否则蓝牙带宽下等待太久。
+ */
+public class Xfer {
+
+    public interface Listener {
+        void onLinkReady(boolean localIsServer, String info);
+        void onImageReceived(Bitmap bmp, int bytes, boolean saved);
+        void onImageSent(int bytes);
+        void onXferFailed(String why);
+    }
+
+    public static final int REQ_DISCOVERABLE = 101;
+
+    private static final String SVC_NAME = "NfcTapDemo";
+    private static final UUID SVC_UUID = UUID.fromString("f0f0a1b2-3c4d-4e5f-8a9b-0c1d2e3f4a5b");
+    private static final int MAGIC = 0x4E464331; // "NFC1"
+    private static final int MAX_DIM = 1280;
+
+    private final Activity mActivity;
+    private final Context mCtx;
+    private final Listener mListener;
+    private final Handler mMain = new Handler(Looper.getMainLooper());
+    private final BluetoothAdapter mBt;
+
+    private BroadcastReceiver mRx;
+    private BluetoothServerSocket mServer;
+    private volatile BluetoothSocket mPendingSocket;
+
+    private volatile boolean mRunning = true;
+    private volatile boolean mReceiverRole;
+    private volatile boolean mConnected;
+    private volatile String mPeerBtName;
+    private int mScanRetry;
+    private boolean mServerStarted;
+
+    public Xfer(Activity activity, Listener listener) {
+        mActivity = activity;
+        mCtx = activity.getApplicationContext();
+        mListener = listener;
+        mBt = BluetoothAdapter.getDefaultAdapter();
+    }
+
+    public void setExpectedPeerName(String btName) {
+        mPeerBtName = btName;
+        Bus.log("蓝牙: 目标设备名 = " + btName);
+    }
+
+    private boolean ensureBt() {
+        if (mBt == null) {
+            fail("本机不支持蓝牙");
+            return false;
+        }
+        if (!mBt.isEnabled()) {
+            Bus.log("蓝牙未开启,请先打开蓝牙(传输需要)");
+            try { mBt.enable(); } catch (Throwable ignored) {}
+            return false;
+        }
+        return true;
+    }
+
+    /** 发送方:起服务端 + 请求"可被发现"(系统弹窗,需点允许)。 */
+    public void startAsSender() {
+        mReceiverRole = false;
+        register();
+        if (!ensureBt()) return;
+        if (mServerStarted) {
+            Bus.log("蓝牙: 已在监听,忽略重复请求");
+            return;
+        }
+        startServer();
+        requestDiscoverable();
+    }
+
+    /** 接收方:经典蓝牙搜索对方,按名字匹配后连接读图。 */
+    public void startAsReceiver() {
+        mReceiverRole = true;
+        register();
+        if (!ensureBt()) return;
+        if (mConnected) {
+            Bus.log("蓝牙: 已连接,忽略重复请求");
+            return;
+        }
+        startDiscovery();
+    }
+
+    private void requestDiscoverable() {
+        try {
+            Intent i = new Intent(BluetoothAdapter.ACTION_REQUEST_DISCOVERABLE);
+            i.putExtra(BluetoothAdapter.EXTRA_DISCOVERABLE_DURATION, 300);
+            mActivity.startActivityForResult(i, REQ_DISCOVERABLE);
+            Bus.log("蓝牙: 已请求「可被发现」授权(请在弹窗点允许)");
+        } catch (Throwable t) {
+            Bus.log("请求可被发现失败: " + t + "(可手动到系统蓝牙设置里打开可被发现)");
+        }
+    }
+
+    private void startServer() {
+        if (mServer != null) return;
+        mServerStarted = true;
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    mServer = mBt.listenUsingInsecureRfcommWithServiceRecord(SVC_NAME, SVC_UUID);
+                    Bus.log("蓝牙: 已开始监听,等待对方连接…");
+                    while (mRunning) {
+                        BluetoothSocket s = mServer.accept();
+                        if (s == null) break;
+                        mPendingSocket = s;
+                        Bus.log("蓝牙: 对方已连接(" + s.getRemoteDevice().getName() + "),点「发送给对方」即可发送");
+                    }
+                } catch (Exception e) {
+                    if (mRunning) Bus.log("蓝牙: 监听异常 " + e);
+                }
+            }
+        }).start();
+    }
+
+    private void startDiscovery() {
+        try {
+            if (mBt.isDiscovering()) mBt.cancelDiscovery();
+            boolean ok = mBt.startDiscovery();
+            Bus.log("蓝牙: 开始搜索对方(对方需在弹窗点过「允许被发现」)… start=" + ok);
+        } catch (Throwable t) {
+            fail("搜索异常: " + t);
+            return;
+        }
+        mMain.postDelayed(new Runnable() {
+            @Override public void run() {
+                if (mRunning && mReceiverRole && !mConnected) {
+                    if (mScanRetry++ < 6) {
+                        Bus.log("蓝牙: 暂未搜到对方,重新搜索(第 " + mScanRetry + " 次)");
+                        startDiscovery();
+                    } else {
+                        fail("多次未搜到对方(确认对方点过「允许被发现」)");
+                    }
+                }
+            }
+        }, 15000);
+    }
+
+    private void register() {
+        if (mRx != null) return;
+        mRx = new BroadcastReceiver() {
+            @Override public void onReceive(Context c, Intent i) {
+                String a = i.getAction();
+                if (BluetoothDevice.ACTION_FOUND.equals(a)) {
+                    BluetoothDevice d = i.getParcelableExtra(BluetoothDevice.EXTRA_DEVICE);
+                    if (d == null) return;
+                    String name = null;
+                    try { name = d.getName(); } catch (Throwable ignored) {}
+                    Bus.log("蓝牙: 发现设备 " + name + " (" + d.getAddress() + ")");
+                    if (!mReceiverRole || mConnected) return;
+                    if (mPeerBtName != null && name != null && name.equalsIgnoreCase(mPeerBtName)) {
+                        try { mBt.cancelDiscovery(); } catch (Throwable ignored) {}
+                        connect(d);
+                    }
+                } else if (BluetoothAdapter.ACTION_DISCOVERY_FINISHED.equals(a)) {
+                    if (mReceiverRole && !mConnected && mRunning && mScanRetry < 6) {
+                        mScanRetry++;
+                        Bus.log("蓝牙: 搜索结束,未找到对方,重搜(第 " + mScanRetry + " 次)");
+                        startDiscovery();
+                    }
+                } else if (BluetoothAdapter.ACTION_STATE_CHANGED.equals(a)) {
+                    int st = i.getIntExtra(BluetoothAdapter.EXTRA_STATE, -1);
+                    Bus.log("蓝牙: 适配器状态变化 state=" + st);
+                }
+            }
+        };
+        IntentFilter f = new IntentFilter();
+        f.addAction(BluetoothDevice.ACTION_FOUND);
+        f.addAction(BluetoothAdapter.ACTION_DISCOVERY_FINISHED);
+        f.addAction(BluetoothAdapter.ACTION_STATE_CHANGED);
+        try {
+            if (Build.VERSION.SDK_INT >= 33) {
+                mCtx.registerReceiver(mRx, f, Context.RECEIVER_NOT_EXPORTED);
+            } else {
+                mCtx.registerReceiver(mRx, f);
+            }
+        } catch (Throwable t) {
+            Bus.log("注册蓝牙广播失败: " + t);
+        }
+    }
+
+    private void connect(final BluetoothDevice device) {
+        new Thread(new Runnable() {
+            @Override public void run() {
+                int fail = 0;
+                while (mRunning) {
+                    try {
+                        BluetoothSocket s = device.createInsecureRfcommSocketToServiceRecord(SVC_UUID);
+                        s.connect();
+                        mConnected = true;
+                        Bus.log("蓝牙: 已连接对方,等待接收图片…");
+                        mListener.onLinkReady(false, "");
+                        handleIncoming(s);
+                        mConnected = false;
+                        // 支持连续接收:连接断掉后重新连
+                        try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
+                    } catch (Exception e) {
+                        fail++;
+                        Bus.log("蓝牙: 连接失败(第 " + fail + " 次): " + e);
+                        if (fail >= 5 || mConnected) {
+                            if (fail >= 5) fail("连接对方失败");
+                            return;
+                        }
+                        try { Thread.sleep(2000); } catch (InterruptedException ignored) {}
+                    }
+                }
+            }
+        }).start();
+    }
+
+    private void handleIncoming(BluetoothSocket s) {
+        try {
+            DataInputStream in = new DataInputStream(s.getInputStream());
+            int magic = in.readInt();
+            if (magic != MAGIC) {
+                Bus.log("传输: 数据头不匹配 " + Integer.toHexString(magic));
+                return;
+            }
+            int len = in.readInt();
+            Bus.log("传输: 正在接收 " + len + " 字节…");
+            byte[] data = new byte[len];
+            in.readFully(data);
+            final Bitmap bmp = decode(data);
+            final boolean saved = saveToGallery(data);
+            Bus.log("传输: 接收完成 " + len + " 字节, 已存相册=" + saved);
+            mMain.post(new Runnable() {
+                @Override public void run() {
+                    mListener.onImageReceived(bmp, data.length, saved);
+                }
+            });
+        } catch (Exception e) {
+            Bus.log("传输: 接收异常 " + e);
+        } finally {
+            try { s.close(); } catch (Exception ignored) {}
+        }
+    }
+
+    /** 发送方:压缩后经已建立的蓝牙连接推给对方。 */
+    public void sendImage(final Uri uri) {
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    byte[] data = compressForSend(uri);
+                    BluetoothSocket s = mPendingSocket;
+                    if (s == null) {
+                        for (int i = 0; i < 20 && mRunning && s == null; i++) {
+                            try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
+                            s = mPendingSocket;
+                        }
+                        if (s == null) {
+                            fail("对方尚未连接,请让对方保持前台(对方会自动搜索连接本机)");
+                            return;
+                        }
+                    }
+                    Bus.log("传输: 正在发送 " + data.length + " 字节…");
+                    DataOutputStream out = new DataOutputStream(s.getOutputStream());
+                    out.writeInt(MAGIC);
+                    out.writeInt(data.length);
+                    out.write(data);
+                    out.flush();
+                    s.close();
+                    mPendingSocket = null;
+                    Bus.log("传输: 发送完成");
+                    final int n = data.length;
+                    mMain.post(new Runnable() {
+                        @Override public void run() { mListener.onImageSent(n); }
+                    });
+                } catch (Exception e) {
+                    fail("发送失败: " + e);
+                }
+            }
+        }).start();
+    }
+
+    public void destroy() {
+        mRunning = false;
+        try { if (mServer != null) mServer.close(); } catch (Exception ignored) {}
+        try { if (mPendingSocket != null) mPendingSocket.close(); } catch (Exception ignored) {}
+        try { if (mRx != null) mCtx.unregisterReceiver(mRx); } catch (Exception ignored) {}
+        mRx = null;
+        try { if (mBt != null && mBt.isDiscovering()) mBt.cancelDiscovery(); } catch (Exception ignored) {}
+    }
+
+    // ---------- helpers ----------
+
+    private void fail(final String why) {
+        Bus.log("传输: " + why);
+        mMain.post(new Runnable() {
+            @Override public void run() { mListener.onXferFailed(why); }
+        });
+    }
+
+    private byte[] compressForSend(Uri uri) throws Exception {
+        InputStream in = mCtx.getContentResolver().openInputStream(uri);
+        BitmapFactory.Options o = new BitmapFactory.Options();
+        o.inJustDecodeBounds = true;
+        BitmapFactory.decodeStream(in, null, o);
+        try { if (in != null) in.close(); } catch (Exception ignored) {}
+        int scale = 1;
+        while (o.outWidth / scale > MAX_DIM || o.outHeight / scale > MAX_DIM) scale *= 2;
+        BitmapFactory.Options o2 = new BitmapFactory.Options();
+        o2.inSampleSize = scale;
+        InputStream in2 = mCtx.getContentResolver().openInputStream(uri);
+        Bitmap bmp = BitmapFactory.decodeStream(in2, null, o2);
+        try { if (in2 != null) in2.close(); } catch (Exception ignored) {}
+        if (bmp == null) throw new Exception("图片解码失败");
+        ByteArrayOutputStream bos = new ByteArrayOutputStream();
+        bmp.compress(Bitmap.CompressFormat.JPEG, 85, bos);
+        byte[] data = bos.toByteArray();
+        Bus.log("传输: 图片已压缩为 " + (data.length / 1024) + "KB(蓝牙传输用)");
+        return data;
+    }
+
+    private static Bitmap decode(byte[] data) {
+        try {
+            BitmapFactory.Options o = new BitmapFactory.Options();
+            o.inJustDecodeBounds = true;
+            BitmapFactory.decodeByteArray(data, 0, data.length, o);
+            int scale = 1;
+            while (o.outWidth / scale > 1600 || o.outHeight / scale > 1600) scale *= 2;
+            BitmapFactory.Options o2 = new BitmapFactory.Options();
+            o2.inSampleSize = scale;
+            return BitmapFactory.decodeByteArray(data, 0, data.length, o2);
+        } catch (Throwable t) {
+            Bus.log("传输: 解码失败 " + t);
+            return null;
+        }
+    }
+
+    private boolean saveToGallery(byte[] data) {
+        if (Build.VERSION.SDK_INT < 29) return false; // 老版本要写权限,demo 不处理
+        try {
+            android.content.ContentValues v = new android.content.ContentValues();
+            v.put(android.provider.MediaStore.Images.Media.DISPLAY_NAME,
+                    "nfctap_" + System.currentTimeMillis() + ".jpg");
+            v.put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/jpeg");
+            v.put(android.provider.MediaStore.Images.Media.RELATIVE_PATH,
+                    android.os.Environment.DIRECTORY_PICTURES + "/NfcTapDemo");
+            Uri u = mCtx.getContentResolver().insert(
+                    android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, v);
+            if (u == null) return false;
+            java.io.OutputStream os = mCtx.getContentResolver().openOutputStream(u);
+            if (os == null) return false;
+            os.write(data);
+            os.close();
+            return true;
+        } catch (Throwable t) {
+            Bus.log("传输: 存相册失败 " + t);
+            return false;
+        }
+    }
+}
