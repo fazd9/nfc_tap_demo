@@ -24,10 +24,15 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
     private SendPage mSendPage;
     private String mPeerLabel = "--------";
     private volatile boolean mLinkReady;
+    private volatile boolean mPreviewsSent;
     private ReceivePage mReceivePage;
     private Bitmap mLastBmp;
     private boolean mAccepted;
     private int mPreviewCount;
+    private int mFullCount;
+    private int mTotalCount;                                            // 对方预告的总张数
+    private boolean mTransferDone;                                      // 对方发送完毕(连接关闭)
+    private final ArrayList<Bitmap> mBmps = new ArrayList<Bitmap>();    // 本次收到的全部整图
 
     /** 相册推送过来的"当前选中照片"。 */
     private static final ArrayList<Uri> PENDING = new ArrayList<Uri>();
@@ -56,20 +61,54 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         Xfer x = xfer(this);
         x.addListener(this);
         x.warmUp();
+        loadPending(); // 进程被回收后冷启:恢复上次选中的照片,避免碰触时误判成接收方
         Bus.log("服务: TapService 常驻中(承载碰一碰流程)");
         if (intent != null && "com.pri.nfcdemo.TAG".equals(intent.getAction())) {
             final android.nfc.Tag tag = intent.getParcelableExtra(android.nfc.NfcAdapter.EXTRA_TAG);
             if (tag != null) handleTag(tag);
+        }
+        if (intent != null && "com.pri.nfcdemo.PEER".equals(intent.getAction())) {
+            // 卡侧(HCE)碰到的对方信息经 intent 转交:服务没跑时会被冷启,事件不会丢
+            String payload = intent.getStringExtra("payload");
+            Bus.log("服务: 收到碰触信息" + (payload == null ? "" : ",对方=" + payload));
+            Bus.onPeerData(payload, intent.getStringExtra("role"));
+        }
+        if (intent != null && "com.pri.nfcdemo.DEBUG".equals(intent.getAction())) {
+            // 调试:把 NFC 交换这一步用 adb 参数顶掉,其余流程走真实代码(免物理碰触做回归/演示)
+            String payload = intent.getStringExtra("payload");
+            Bus.log("调试: 模拟碰一碰,对方信息 = " + payload);
+            Bus.onPeerData(payload, intent.getStringExtra("role"));
         }
         if (intent != null && Intent.ACTION_SEND_MULTIPLE.equals(intent.getAction())) {
             ArrayList<Uri> uris = intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM);
             if (uris != null) {
                 PENDING.clear();
                 PENDING.addAll(uris);
+                savePending();
                 Bus.log("服务: 收到相册当前选中 " + PENDING.size() + " 张照片(等碰一碰)");
             }
         }
         return START_STICKY;
+    }
+
+    /** 选中照片持久化(URI 读取授权按 uid 保留,重启进程后仍可读)。 */
+    private void savePending() {
+        StringBuilder sb = new StringBuilder();
+        for (Uri u : PENDING) {
+            if (sb.length() > 0) sb.append('|');
+            sb.append(u.toString());
+        }
+        getSharedPreferences("tapdemo", 0).edit().putString("pending", sb.toString()).apply();
+    }
+
+    private void loadPending() {
+        if (!PENDING.isEmpty()) return;
+        String s = getSharedPreferences("tapdemo", 0).getString("pending", "");
+        if (s == null || s.isEmpty()) return;
+        for (String p : s.split("\\|")) {
+            if (!p.isEmpty()) PENDING.add(Uri.parse(p));
+        }
+        if (!PENDING.isEmpty()) Bus.log("服务: 恢复上次选中的 " + PENDING.size() + " 张照片");
     }
 
     // ---------- 碰一碰:发送方(卡方)收到读取 → 弹出发送确认页 ----------
@@ -78,32 +117,25 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
 
     @Override
     public void onPeer(String payload, String role) {
-        if ("reader".equals(role)) { // 本机读取到了对方
-            final String label = "用户" + (field(payload, "t") == null ? "--------" : field(payload, "t"));
-            Xfer x = xfer(this);
-            x.setExpectedPeer(field(payload,"n"), field(payload,"b"), field(payload,"p"),
-                    field(payload,"a"), field(payload,"ip"), field(payload,"hs"), field(payload,"hp"));
-            x.startAsReceiver(); // 服务端先就绪
-            mPeerLabel = label;
-            if (!Bus.lockRole()) { Bus.log("角色已定,忽略接收方事件"); return; }
-            mMain.post(new Runnable() { @Override public void run() { showReceivePage(label); } });
-            return;
-        }
-        if (!"card".equals(role)) return; // 只有发送方(被读方)走这里
-        if (!Bus.lockRole()) { Bus.log("角色已定(本机已是接收方),忽略本次卡侧事件"); return; }
-        if (PENDING.isEmpty()) {
-            Bus.log("服务: 碰通了,但相册没有选中照片,忽略");
-            return;
-        }
-        mPeerLabel = "用户" + (field(payload, "t") == null ? "--------" : field(payload, "t"));
+        mLinkReady = false; // 新一轮:连接就绪状态重置
+        // 角色只由"本机有没有选中照片"决定,与 NFC 的"读/被读"方向无关
+        final String label = "用户" + (field(payload, "t") == null ? "--------" : field(payload, "t"));
         Xfer x = xfer(this);
         x.setExpectedPeer(field(payload,"n"), field(payload,"b"), field(payload,"p"),
                 field(payload,"a"), field(payload,"ip"), field(payload,"hs"), field(payload,"hp"));
-        x.startAsReceiver(); // 服务端先就绪(两台都可收)
-        if (sXfer != null) sXfer.startAsSender(); // 发送方:碰后即开始建立连接
-        mMain.post(new Runnable() {
-            @Override public void run() { showSendPage(); }
-        });
+        x.startAsReceiver(); // 服务端先就绪
+        if (!Bus.lockRole()) { Bus.log("角色已定,忽略重复的碰触事件"); return; }
+        mPeerLabel = label;
+        if (PENDING.isEmpty()) {
+            Bus.log("本机无照片 → 本机是接收方");
+            x.startHotspot(); // 接收方起本地热点(SSID/密码进 payload,对方下次碰可直接接入;Wi-Fi 开着会启失败并提示)
+            mMain.post(new Runnable() { @Override public void run() { showReceivePage(label); } });
+        } else {
+            Bus.log("本机有照片 → 本机是发送方");
+            x.startAsSender();
+            // 发送页不在此处弹:热点接入时系统会弹「允许连接」确认框,而悬浮窗 z 序在其之上会把它挡住,
+            // 改为连接就绪后再弹(onP2pReady);失败时由 onXferFailed 补弹并显示原因
+        }
     }
 
     private void showSendPage() {
@@ -123,6 +155,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
                 dismissSendPage();
             }
         });
+        mPreviewsSent = false;
         mSendPage.bind(PENDING, "发送给 " + mPeerLabel, PENDING.size());
         mSendPage.setStatus("正在连接对方…");
         mSendPage.root.setAlpha(0f);
@@ -142,9 +175,23 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
     @Override
     public void onP2pReady(boolean isGroupOwner, String goAddress) {
         mLinkReady = true;
-        if (mSendPage == null) return; // 接收方由 Activity 处理
-        mSendPage.setStatus("已连接,上滑发送即可");
-        if (sXfer != null) sXfer.sendPreviews(new ArrayList<Uri>(PENDING));
+        final boolean sender = !PENDING.isEmpty();
+        mMain.post(new Runnable() { @Override public void run() { // 回到主线程再改 UI
+            if (sender) {
+                if (mSendPage == null) showSendPage(); // 连接就绪才弹(见 onPeer 里的说明)
+                if (mSendPage != null) mSendPage.setStatus("已连接,上滑发送即可");
+            } else if (mReceivePage != null) {
+                mReceivePage.setStatus("已连接,等待接收…");
+            }
+        }});
+        if (sender && sXfer != null) {
+            synchronized (this) { // 原子防重:两个后台线程同时回调时也只推一次
+                if (!mPreviewsSent) {
+                    mPreviewsSent = true;
+                    sXfer.sendPreviews(new ArrayList<Uri>(PENDING));
+                }
+            }
+        }
     }
 
     @Override public void onPreview(Bitmap bmp) {
@@ -154,18 +201,41 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         }
     }
 
-    @Override public void onImageReceived(Bitmap bmp, int bytes, boolean saved) {
+    @Override public void onImageCount(int total) {
+        mTotalCount = total;
+        if (mReceivePage != null) mReceivePage.setPreviewCount(total); // 文案用真实总张数,不再回退成 1
+    }
+
+    @Override public void onImageReceived(int index, int total, Bitmap bmp, int bytes, boolean saved) {
+        mFullCount = index;
         mLastBmp = bmp;
+        // 图片到达:必须经过"接收确认"这一步(没有接收页就先弹出来)
+        if (mReceivePage == null) {
+            dismissSendPage();
+            showReceivePage(mPeerLabel);
+        }
         if (mReceivePage != null) {
             mReceivePage.reveal();
             if (bmp != null) mReceivePage.setPreview(bmp);
-            mReceivePage.setStatus("已收到 " + (bytes / 1024) + "KB");
+            mReceivePage.setStatus("已收到 " + index + "/" + Math.max(total, index) + " 张"
+                    + (saved ? ",已存入相册" : ""));
+        }
+    }
+
+    /** 对方发送完毕:把本次收到的全部图交给查看器(用户已确认接收就打开)。 */
+    @Override public void onTransferDone(java.util.List<Bitmap> bmps) {
+        mTransferDone = true;
+        mBmps.clear();
+        if (bmps != null) mBmps.addAll(bmps);
+        if (mReceivePage != null) {
+            mReceivePage.setStatus("已收到 " + mFullCount + " 张,请确认接收");
             if (mAccepted) {
                 ReceivePage p = mReceivePage; mReceivePage = null;
-                p.dismiss(); showViewer(bmp); Bus.unlockRole();
+                p.dismiss(); showViewer(mBmps); Bus.unlockRole();
             }
-        } else if (bmp != null) {
-            showViewer(bmp);
+        } else if (mAccepted) {
+            showViewer(mBmps);
+            Bus.unlockRole();
         }
     }
 
@@ -174,21 +244,20 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         Bus.log("服务: 发送完成(" + (bytes / 1024) + "KB),悬浮窗关闭,用户仍在相册");
         Bus.unlockRole();
         PENDING.clear();
+        savePending();
         dismissSendPage();
     }
 
     @Override
     public void onXferFailed(String why) {
+        if (mSendPage == null && !PENDING.isEmpty()) showSendPage(); // 失败也要让用户看到原因(发送页此时可能还没弹)
         if (mSendPage != null) mSendPage.setStatus(why);
+        // 流程结束(失败):立即释放角色锁,保证下一轮碰触能重新开始
+        Bus.unlockRole();
     }
 
     /** 读取对方(接收方动作,由透明跳板转交)。 */
     private void handleTag(final android.nfc.Tag tag) {
-        // 有选中照片的手机不读取(只当卡等对方来读),避免双方同时读造成 RF 冲突(TagLost)
-        if (hasPending()) {
-            Bus.log("本机有选中照片 → 不读取,只当卡等对方来读");
-            return;
-        }
         new Thread(new Runnable() { public void run() {
             android.nfc.tech.IsoDep iso = android.nfc.tech.IsoDep.get(tag);
             if (iso == null) { Bus.log("对方不是 IsoDep(HCE)设备"); return; }
@@ -211,15 +280,16 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
 
     private void showReceivePage(String label) {
         if (mReceivePage != null) return;
-        mAccepted = false; mPreviewCount = 0;
+        mAccepted = false; mPreviewCount = 0; mFullCount = 0;
+        mTotalCount = 0; mTransferDone = false; mBmps.clear();
         mReceivePage = new ReceivePage(this, new ReceivePage.Listener() {
             @Override public void onAccept() {
                 mAccepted = true;
-                if (mLastBmp != null) {
+                if (mTransferDone && mFullCount > 0) { // 已经收完,直接看全部
                     ReceivePage p = mReceivePage; mReceivePage = null;
-                    p.dismiss(); showViewer(mLastBmp); Bus.unlockRole();
+                    p.dismiss(); showViewer(mBmps); Bus.unlockRole();
                 } else if (mReceivePage != null) {
-                    mReceivePage.setStatus("等待对方发送…");
+                    mReceivePage.setStatus(mFullCount > 0 ? "正在接收,收完自动打开…" : "等待对方发送…");
                 }
             }
             @Override public void onReject() {
@@ -235,18 +305,24 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         mReceivePage.root.animate().alpha(1f).setDuration(280).start();
     }
 
-    private void showViewer(Bitmap bmp) {
-        android.widget.FrameLayout v = new android.widget.FrameLayout(this);
-        v.setBackgroundColor(0xFF000000);
-        android.widget.ImageView img = new android.widget.ImageView(this);
-        img.setScaleType(android.widget.ImageView.ScaleType.FIT_CENTER);
-        if (bmp != null) img.setImageBitmap(bmp);
-        v.addView(img, new android.widget.FrameLayout.LayoutParams(
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-                android.view.ViewGroup.LayoutParams.MATCH_PARENT));
-        v.setOnClickListener(new android.view.View.OnClickListener() {
-            @Override public void onClick(android.view.View x) { Overlay.get(TapService.this).hide(x); }
+    private void showViewer(java.util.List<Bitmap> bmps) {
+        android.widget.FrameLayout v = Ui.buildViewer(this, bmps);
+        // 关闭按钮(右上):点图片本体不退出
+        android.widget.TextView vc = new android.widget.TextView(this);
+        vc.setText("✕");
+        vc.setTextColor(0xFFDDDDDD);
+        vc.setTextSize(20);
+        vc.setPadding(36, 24, 36, 24);
+        vc.setOnClickListener(new android.view.View.OnClickListener() {
+            @Override public void onClick(android.view.View x) { Overlay.get(TapService.this).hide(v); }
         });
+        android.widget.FrameLayout.LayoutParams vlp = new android.widget.FrameLayout.LayoutParams(
+                android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+                android.view.ViewGroup.LayoutParams.WRAP_CONTENT);
+        vlp.gravity = android.view.Gravity.TOP | android.view.Gravity.RIGHT;
+        vlp.topMargin = 60;
+        vlp.rightMargin = 4;
+        v.addView(vc, vlp);
         Overlay.get(this).show(v);
     }
 

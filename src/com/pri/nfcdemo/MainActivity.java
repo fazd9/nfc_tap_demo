@@ -59,6 +59,9 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback,
     private int mPreviewCount;
     private Bitmap mLastBmp;
     private boolean mAccepted;
+    private int mFullCount;
+    private boolean mTransferDone;
+    private final java.util.ArrayList<Bitmap> mReceived = new java.util.ArrayList<Bitmap>();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -66,8 +69,9 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback,
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         buildUi();
 
-        mXfer = TapService.xfer(this); // 与服务共用同一个传输器,避免重复建链
-        mXfer.addListener(mXferListener);
+        mXfer = TapService.xfer(this); // 与服务共用同一个传输器
+        // 注意:主界面不再注册 Xfer 监听(碰一碰流程已全部由服务托管);
+        // 之前它从后台线程回调更新界面,会把"连接成功"抛成异常记成失败
         ensurePermissions();
         mUserWantsReader = Bus.isUserWantsReader();
         mXfer.warmUp();
@@ -349,7 +353,9 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback,
         }
         mReaderOn = true;
         Bus.setUserWantsReader(true);
-        // 热点改由服务在"碰后"开启(不再提前开,避免占 Wi-Fi)
+        // 接收方预热本地热点:SSID/密码随 payload 告诉对方,碰后对方直接接入(免搜索,实测 ~50Mbps)。
+        // 本机型热点与 Wi-Fi 互斥(无 bridged-AP),Wi-Fi 开着时热点会启失败,日志会提示先关 Wi-Fi。
+        mXfer.startHotspot();
         mModeButton.setText("切回发送方(停止读卡)");
         setState("接收方模式(读卡中)— 现在去贴对方", Color.parseColor("#2E7D32"));
         Bus.log("读卡模式已开启,等待碰触");
@@ -438,26 +444,17 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback,
     public void onPeer(String payload, String role) {
         mPeerView.setText("✅ 握手成功,对方信息:\n" + pretty(payload));
         mSelfView.setText("本机信息: " + Bus.selfPayload());
-        mAmReceiver = "reader".equals(role);
-        mXfer.setExpectedPeer(field(payload, "n"), field(payload, "b"),
-                field(payload, "p"), field(payload, "a"), field(payload, "ip"),
-                field(payload, "hs"), field(payload, "hp"));;
+        // 碰一碰主流程由常驻服务托管(TapService),角色=本机有没有选中照片。
+        // 本页只更新状态,不再自己起发送/接收:否则本页按 NFC 读/被读方向判角色,
+        // 接收端会误把自己当发送方去连对方,与服务的连接交叉、把 mPendingSocket 抢走 → 卡"正在发送"
+        mAmReceiver = !TapService.hasPending();
         if (mAmReceiver) {
-            setState("握手成功 → 正在建立 Wi-Fi 直连(本机接收)…", Color.parseColor("#2E7D32"));
-            mXfer.startAsReceiver();
+            setState("握手成功 → 本机接收,服务正在建立直连…", Color.parseColor("#2E7D32"));
         } else {
-            setState("握手成功 → 正在建立 Wi-Fi 直连(本机发送)…", Color.parseColor("#2E7D32"));
-            mXfer.startAsSender();
+            setState("握手成功 → 本机发送,服务正在建立直连…", Color.parseColor("#2E7D32"));
         }
         mModeButton.setEnabled(false); // 本次会话不再切换角色
         updateSendEnabled();
-
-        // 确认页:接收方由本 Activity 弹出;发送方由常驻服务弹出(不打断前台应用,对齐产品视频)
-        if (mAmReceiver) {
-            showReceivePage(peerLabel(payload), 1);
-        } else {
-            Bus.log("发送方:确认页由常驻服务弹出(相册不被打断)");
-        }
     }
 
     // ---------- Xfer.Listener ----------
@@ -484,23 +481,37 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback,
             }
         }
 
-        @Override public void onImageReceived(Bitmap bmp, int bytes, boolean saved) {
+        @Override public void onImageCount(int total) {
+            if (mReceivePage != null) mReceivePage.setPreviewCount(total);
+        }
+
+        @Override public void onImageReceived(int index, int total, Bitmap bmp, int bytes, boolean saved) {
+            mFullCount = index;
             if (bmp != null) mImageView.setImageBitmap(bmp);
             mLastBmp = bmp;
-            Bus.unlockRole();
-            setState("✅ 已收到图片(" + (bytes / 1024) + "KB"
+            setState("✅ 已收到第 " + index + "/" + Math.max(total, index) + " 张(" + (bytes / 1024) + "KB"
                     + (saved ? ",已存入相册" : "") + ")", Color.parseColor("#2E7D32"));
             if (mReceivePage != null) {
                 mReceivePage.reveal();   /* 发送方发送后,接收方界面元素才出现 */
-                mReceivePage.setPreview(bmp);
-                mReceivePage.setStatus("已收到 " + (bytes / 1024) + "KB");
+                if (bmp != null) mReceivePage.setPreview(bmp);
+                mReceivePage.setStatus("已收到 " + index + "/" + Math.max(total, index) + " 张");
+            }
+        }
+
+        @Override public void onTransferDone(java.util.List<Bitmap> bmps) {
+            mTransferDone = true;
+            mReceived.clear();
+            if (bmps != null) mReceived.addAll(bmps);
+            Bus.unlockRole();
+            if (mReceivePage != null) {
+                mReceivePage.setStatus("已收到 " + mFullCount + " 张,请确认接收");
                 if (mAccepted) {
                     mReceivePage.dismiss();
                     mReceivePage = null;
-                    showViewer(bmp);
+                    showViewer(mReceived);
                 }
-            } else {
-                showViewer(bmp);
+            } else if (mAccepted) {
+                showViewer(mReceived);
             }
         }
 
@@ -563,14 +574,17 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback,
     private void showReceivePage(String label, int count) {
         if (mReceivePage != null) return;
         mPreviewCount = 0;
+        mFullCount = 0;
+        mTransferDone = false;
+        mReceived.clear();
         mReceivePage = new ReceivePage(this, new ReceivePage.Listener() {
             @Override public void onAccept() {
                 mAccepted = true;
-                if (mLastBmp != null) {
+                if (mTransferDone && mFullCount > 0) {
                     if (mReceivePage != null) { mReceivePage.dismiss(); mReceivePage = null; }
-                    showViewer(mLastBmp);
+                    showViewer(mReceived);
                 } else if (mReceivePage != null) {
-                    mReceivePage.setStatus("等待对方发送…");
+                    mReceivePage.setStatus(mFullCount > 0 ? "正在接收,收完自动打开…" : "等待对方发送…");
                 }
             }
             @Override public void onReject() {
@@ -601,14 +615,11 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback,
         }, 2600);
     }
 
-    /** 接收完成后的全屏查看器(模拟相册大图页)。 */
-    private void showViewer(Bitmap bmp) {
+    /** 接收完成后的全屏查看器(模拟相册大图页,支持多张切换)。 */
+    private void showViewer(java.util.List<Bitmap> bmps) {
         FrameLayout v = new FrameLayout(this);
         v.setBackgroundColor(0xFF000000);
-        ImageView img = new ImageView(this);
-        img.setScaleType(ImageView.ScaleType.FIT_CENTER);
-        if (bmp != null) img.setImageBitmap(bmp);
-        v.addView(img, new FrameLayout.LayoutParams(
+        v.addView(Ui.buildViewer(this, bmps), new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         LinearLayout top = new LinearLayout(this);
@@ -673,6 +684,16 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback,
             showReceivePage("用户021e465j580e94", count);
         } else if ("viewer".equals(page)) {
             showViewer(null);
+        } else if ("hotspot".equals(page)) {
+            mXfer.startHotspot();      // 调试:拉起本地热点(实测热点路径吞吐用)
+        } else if ("hotspotstop".equals(page)) {
+            mXfer.stopHotspot();
+        } else if ("fakepeer".equals(page)) {
+            // 调试:模拟卡侧收到的对方信息,和真实 HCE 一样经 intent 转交服务(可验证服务冷启路径)
+            startService(new Intent(this, TapService.class)
+                    .setAction("com.pri.nfcdemo.PEER")
+                    .putExtra("payload", intent.getStringExtra("payload"))
+                    .putExtra("role", intent.getStringExtra("role")));
         }
     }
 

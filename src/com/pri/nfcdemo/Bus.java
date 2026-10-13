@@ -202,10 +202,16 @@ public final class Bus {
     private static volatile boolean sRoleLocked;
 
     /** 角色锁:谁先确定角色(接收方=读取方 / 发送方=卡方)就锁定,另一方事件忽略。 */
+    private static volatile long sRoleLockedAt;
+
     public static boolean lockRole() {
-        if (sRoleLocked) return false;
-        sRoleLocked = true;
-        return true;
+        synchronized (Bus.class) {
+            // 30 秒自动过期:上一轮若漏了解锁,这一轮碰触仍能重新拿锁(只支持一次的根因修复)
+            if (sRoleLocked && System.currentTimeMillis() - sRoleLockedAt < 30000) return false;
+            sRoleLocked = true;
+            sRoleLockedAt = System.currentTimeMillis();
+            return true;
+        }
     }
 
     public static void unlockRole() {

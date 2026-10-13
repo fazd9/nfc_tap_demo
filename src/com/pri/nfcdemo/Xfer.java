@@ -39,22 +39,29 @@ public class Xfer {
     public interface Listener {
         void onP2pReady(boolean isGroupOwner, String goAddress);
         void onPreview(Bitmap bmp);                    // 对方发来的预览缩略图(接收确认页显示用)
-        void onImageReceived(Bitmap bmp, int bytes, boolean saved);
+        void onImageCount(int total);                  // 对方预告本次共发几张(接收页文案用)
+        void onImageReceived(int index, int total, Bitmap bmp, int bytes, boolean saved); // 每张整图都回调
+        void onTransferDone(java.util.List<Bitmap> bmps);  // 对方发送完毕(连接关闭),bmps=本次收到的全部整图
         void onImageSent(int bytes);
         void onXferFailed(String why);
     }
 
     private static final int PORT = 8988;
+    private final Object mWriteLock = new Object();
     public static final String HS_SSID = "TapShare-Transfer";
     public static final String HS_PASS = "tapshare2026";
     private static final int MAGIC = 0x4E464331; // "NFC1"
     private static final int TYPE_PREVIEW = 1;   // 预览缩略图(确认前发送)
     private static final int TYPE_FULL = 2;      // 完整图片(用户确认后发送)
+    private static final int TYPE_META = 3;      // 发送预告:总张数(len 字段即张数,无 payload)
 
     private final Context mCtx;
     private final java.util.List<Listener> mAll =
             new java.util.concurrent.CopyOnWriteArrayList<Listener>();
     private final Handler mMain = new Handler(Looper.getMainLooper());
+    /** 接收端后台队列:解码+存相册不占 socket 读线程(否则发送端被 TCP 背压卡住,实测每张卡 ~2.5s)。 */
+    private final java.util.concurrent.ExecutorService mIo =
+            java.util.concurrent.Executors.newSingleThreadExecutor();
 
     /** 事件转发器:支持多个监听者(Activity 与服务各自订阅)。 */
     private final Listener mListener = new Listener() {
@@ -64,8 +71,14 @@ public class Xfer {
         @Override public void onPreview(Bitmap b) {
             for (Listener l : mAll) l.onPreview(b);
         }
-        @Override public void onImageReceived(Bitmap b, int c, boolean d) {
-            for (Listener l : mAll) l.onImageReceived(b, c, d);
+        @Override public void onImageCount(int t) {
+            for (Listener l : mAll) l.onImageCount(t);
+        }
+        @Override public void onImageReceived(int i, int t, Bitmap b, int c, boolean d) {
+            for (Listener l : mAll) l.onImageReceived(i, t, b, c, d);
+        }
+        @Override public void onTransferDone(java.util.List<Bitmap> b) {
+            for (Listener l : mAll) l.onTransferDone(b);
         }
         @Override public void onImageSent(int b) {
             for (Listener l : mAll) l.onImageSent(b);
@@ -157,17 +170,17 @@ public class Xfer {
     /** 接收方按下按钮时即开启本地热点,把 SSID/密码写进 payload,让对方免搜索直连。 */
     public void startHotspot() {
         if (mHotspotReservation != null || mHotspotStarting) return;
-        mHotspotStarting = true;
         try {
             final WifiManager wm = (WifiManager) mCtx.getSystemService(Context.WIFI_SERVICE);
             if (wm == null) return;
+            // 本机型热点与 Wi-Fi 互斥(无 bridged-AP 能力):Wi-Fi 开着时必然失败,直接跳过走同网/P2P
+            if (wm.isWifiEnabled()) {
+                Bus.log("热点: Wi-Fi 正开着,本机型热点与 Wi-Fi 互斥 — 跳过热点(走同网直连/P2P)");
+                return;
+            }
+            mHotspotStarting = true;
             mReceiverRole = true;
             startServer(); // 提前监听 8988:消除"对方连过来时服务端还没起"的竞态
-            try {
-                if (wm.isWifiEnabled()) {
-                    Bus.log("热点: Wi-Fi 正开着 —— 本机型热点与 Wi-Fi 互斥,请先关闭 Wi-Fi,否则会开启失败");
-                }
-            } catch (Throwable ignored) {}
             mPauseWarm = true; // 先停 P2P 搜索:部分芯片不支持"搜索+热点"同时进行
             try { mP2p.stopPeerDiscovery(mChannel, null); } catch (Throwable ignored) {}
             Bus.log("热点: 正在开启本地热点(给对方免搜索直连用)…");
@@ -237,6 +250,11 @@ public class Xfer {
         mPauseWarm = false;
     }
 
+    /** 关闭热点(调试用)。 */
+    public void stopHotspot() {
+        closeHotspot();
+    }
+
     /** 应用打开即预热搜索:碰完之后只剩连接协商,大幅缩短等待。 */
     public void warmUp() {
         register();
@@ -246,7 +264,7 @@ public class Xfer {
     }
 
     private void warmDiscoverLoop() {
-        if (!mRunning || mGoAddress != null) return;
+        if (!mRunning || mGoAddress != null || mPauseWarm || mGotConnection) return;
         if (!mPauseWarm) {
             try {
                 mP2p.discoverPeers(mChannel, new WifiP2pManager.ActionListener() {
@@ -335,13 +353,13 @@ public class Xfer {
         }, 20000);
     }
 
-    /** 发送方连接策略:对端热点(免搜索直连) → 同一 Wi-Fi 直连 → P2P 兜底。 */
-    /** 连接策略:① 同一 Wi-Fi 直连(最快,实测 <1 秒) ② Wi-Fi Direct 兜底(预热后 ~5 秒)。热点留给系统应用阶段。 */
+    /** 连接策略:① 对方热点(直连,最快,实测 ~50Mbps) ② 同一 Wi-Fi 直连 ③ Wi-Fi Direct 兜底。 */
     private void startConnectStrategy() {
         new Thread(new Runnable() {
             @Override public void run() {
+                if (mPeerHsSsid != null && joinHotspot(mPeerHsSsid, mPeerHsPass)) return;
                 if (mPeerLanIp != null && connectTo(mPeerLanIp, "局域网")) return;
-                Bus.log("传输: 同网直连未成功(两台不在同一 Wi-Fi?),走 Wi-Fi Direct 兜底…");
+                Bus.log("传输: 热点/同网直连未成功(对方热点没开?不在同一 Wi-Fi?),走 Wi-Fi Direct 兜底…");
                 mPauseWarm = false;
                 warmDiscoverLoop();
             }
@@ -354,6 +372,8 @@ public class Xfer {
                 Socket s = new Socket();
                 s.connect(new InetSocketAddress(ip, PORT), 1500);
                 mPendingSocket = s;
+                mPauseWarm = true; // 连上后停止 P2P 搜索:射频让路给数据传输(否则吞吐暴跌)
+                try { mP2p.stopPeerDiscovery(mChannel, null); } catch (Throwable ignored) {}
                 Bus.log("传输: " + how + "直连成功 " + ip + ":" + PORT + "(免搜索)");
                 mListener.onP2pReady(false, ip);
                 return true;
@@ -369,9 +389,14 @@ public class Xfer {
         if (Build.VERSION.SDK_INT < 29) return false;
         try {
             Bus.log("传输: 用对方热点信息直连 SSID=" + mPeerHsSsid + "…");
+            // 关键:先停掉预热的 P2P 搜索 —— P2P 占着射频时,系统弹窗为找热点发起的扫描会
+            // 直接失败(WifiNetworkFactory: Scan failed - Device or resource busy)→ 永远"找不到设备"
+            mPauseWarm = true;
+            try { mP2p.stopPeerDiscovery(mChannel, null); } catch (Throwable ignored) {}
+            try { Thread.sleep(1500); } catch (InterruptedException ignored) {}
             android.net.wifi.WifiNetworkSpecifier.Builder sb =
                     new android.net.wifi.WifiNetworkSpecifier.Builder().setSsid(mPeerHsSsid);
-            if (mPeerHsPass != null) sb.setWpa2Passphrase(mPeerHsPass);
+            if (mPeerHsPass != null) sb.setWpa3Passphrase(mPeerHsPass); // 测试:本 ROM 热点默认 WPA2/WPA3 混合(PSK+SAE),按 WPA2 请求匹配不上
             android.net.NetworkRequest req = new android.net.NetworkRequest.Builder()
                     .addTransportType(android.net.NetworkCapabilities.TRANSPORT_WIFI)
                     .removeCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
@@ -391,8 +416,8 @@ public class Xfer {
                     latch.countDown();
                 }
             };
-            cm.requestNetwork(req, mWifiNetCb, 10000);
-            if (!latch.await(11, java.util.concurrent.TimeUnit.SECONDS) || holder[0] == null) {
+            cm.requestNetwork(req, mWifiNetCb, 30000); // 30s:普通应用会弹系统"允许连接"确认框,留足点按时间
+            if (!latch.await(31, java.util.concurrent.TimeUnit.SECONDS) || holder[0] == null) {
                 Bus.log("传输: 对方热点接入失败(超时或被拒绝)");
                 releaseNetworkRequest();
                 return false;
@@ -423,6 +448,8 @@ public class Xfer {
                     Socket s = net.getSocketFactory().createSocket();
                     s.connect(new InetSocketAddress(gw, PORT), 2000);
                     mPendingSocket = s;
+                    mPauseWarm = true; // 接入成功后停 P2P 搜索:射频让路给数据传输(否则吞吐暴跌)
+                    try { mP2p.stopPeerDiscovery(mChannel, null); } catch (Throwable ignored) {}
                     Bus.log("传输: 热点直连成功(免搜索)");
                     mListener.onP2pReady(false, gw);
                     return true;
@@ -450,6 +477,7 @@ public class Xfer {
     }
 
     private void startDiscovery() {
+        if (mPauseWarm || mGotConnection) return; // 连接已就绪,不再搜索
         Bus.log("P2P: 开始搜索附近设备…");
         try {
             mP2p.discoverPeers(mChannel, new WifiP2pManager.ActionListener() {
@@ -541,8 +569,8 @@ public class Xfer {
         }
         Bus.log("P2P: 搜到 " + list.size() + " 个设备: " + sb.toString().trim());
 
-        // 只有接收方主动发起直连
-        if (!mReceiverRole || mGoAddress != null || mConnecting) return;
+        // 只有接收方主动发起直连;局域网已连上(mGotConnection)后不再发起 P2P,避免传输中协商抢射频
+        if (!mReceiverRole || mGoAddress != null || mConnecting || mGotConnection) return;
 
         WifiP2pDevice target = null;
         for (WifiP2pDevice d : list) {
@@ -638,12 +666,16 @@ public class Xfer {
         }).start();
     }
 
-    /** 从一条已建立的 TCP 连接上读图片(可多张,每张一帧):显示 + 存相册。 */
+    /** 从一条已建立的 TCP 连接上读图片(可多张,每张一帧):显示 + 存相册。
+     *  读线程只管收;解码+入库放 mIo 单线程队列,收完一张立刻收下一张(否则发送端被背压卡住)。 */
     private void handleIncoming(Socket s) {
+        final java.util.ArrayList<Bitmap> all = new java.util.ArrayList<Bitmap>();
         try {
-            DataInputStream in = new DataInputStream(s.getInputStream());
+            DataInputStream in = new DataInputStream(
+                    new java.io.BufferedInputStream(s.getInputStream(), 256 * 1024));
             int count = 0;
             int total = 0;
+            int expect = 0;
             while (mRunning) {
                 int magic;
                 try {
@@ -657,8 +689,17 @@ public class Xfer {
                 }
                 int type = in.readInt();
                 int len = in.readInt();
+                if (type == TYPE_META) {
+                    expect = len; // 对方预告总张数:接收页文案不再回退成 1
+                    final int n = expect;
+                    Bus.log("传输: 对方本次共发 " + n + " 张");
+                    mMain.post(new Runnable() {
+                        @Override public void run() { mListener.onImageCount(n); }
+                    });
+                    continue;
+                }
                 Bus.log("传输: 正在接收" + (type == TYPE_PREVIEW ? "预览" : "第 " + (count + 1) + " 张") + " " + len + " 字节…");
-                byte[] data = new byte[len];
+                final byte[] data = new byte[len];
                 in.readFully(data);
                 if (type == TYPE_PREVIEW) {
                     final Bitmap pbmp = decode(data);
@@ -669,17 +710,33 @@ public class Xfer {
                 }
                 count++;
                 total += len;
-                final Bitmap bmp = decode(data);
-                final boolean saved = saveToGallery(data);
-                if (count == 1) {
-                    mMain.post(new Runnable() {
-                        @Override public void run() {
-                            mListener.onImageReceived(bmp, data.length, saved);
-                        }
-                    });
-                }
+                final int idx = count;
+                final int exp = expect;
+                mIo.execute(new Runnable() {
+                    @Override public void run() {
+                        final Bitmap bmp = decode(data);
+                        final boolean saved = saveToGallery(data);
+                        synchronized (all) { all.add(bmp); }
+                        final int bytes = data.length;
+                        mMain.post(new Runnable() {
+                            @Override public void run() { mListener.onImageReceived(idx, exp, bmp, bytes, saved); }
+                        });
+                    }
+                });
             }
             Bus.log("传输: 接收完成,共 " + count + " 张 " + total + " 字节");
+            if (count > 0) {
+                // 接在同一单线程队列尾部:前面几张解码+入库都完成后再通知"收完",顺序保证
+                mIo.execute(new Runnable() {
+                    @Override public void run() {
+                        final java.util.List<Bitmap> list;
+                        synchronized (all) { list = new java.util.ArrayList<Bitmap>(all); }
+                        mMain.post(new Runnable() {
+                            @Override public void run() { mListener.onTransferDone(list); }
+                        });
+                    }
+                });
+            }
             if (mReceiverRole && mHotspotActive) {
                 closeHotspot();
                 Bus.log("传输: 热点已关闭,Wi-Fi 恢复可用");
@@ -697,6 +754,19 @@ public class Xfer {
             @Override public void run() {
                 try {
                     Socket s = mPendingSocket;
+                    if (s == null && !mImGo && mGoAddress != null) {
+                        // P2P 组已建立且本机是组员:主动连组主(组主的 8988 服务已在跑)。
+                        // 原来这条路径没接上 —— 组先建好时上面的策略会因 mGoAddress != null 早退,发送方一直干等
+                        try {
+                            Socket t = new Socket();
+                            t.connect(new InetSocketAddress(mGoAddress, PORT), 3000);
+                            mPendingSocket = t;
+                            s = t;
+                            Bus.log("传输: 已连接组主 " + mGoAddress + "(P2P)");
+                        } catch (Exception e) {
+                            Bus.log("传输: 连接组主失败 " + e);
+                        }
+                    }
                     if (s == null) {
                         if (mImGo) {
                             // 本机是组主但对方(接收方)还没连上:等一会儿
@@ -716,10 +786,31 @@ public class Xfer {
                     }
                     DataOutputStream out = new DataOutputStream(s.getOutputStream());
                     int total = 0;
-                    int idx = 0;
-                    for (Uri uri : uris) {
-                        byte[] data = readAll(mCtx.getContentResolver().openInputStream(uri));
-                        Bus.log("传输: 正在发送第 " + (++idx) + "/" + uris.size() + " 张 " + data.length + " 字节…");
+                    // 预读线程:先把图读进内存,「读相册」与「写 socket」并行(读一张 ~0.2-0.4s)
+                    final java.util.concurrent.ArrayBlockingQueue<Object> q =
+                            new java.util.concurrent.ArrayBlockingQueue<Object>(2);
+                    final Object eod = new Object();
+                    new Thread(new Runnable() {
+                        @Override public void run() {
+                            try {
+                                for (Uri uri : uris) {
+                                    q.put(readAll(mCtx.getContentResolver().openInputStream(uri)));
+                                }
+                            } catch (Throwable t) {
+                                Bus.log("传输: 读取图片失败 " + t);
+                            }
+                            try { q.put(eod); } catch (InterruptedException ignored) {}
+                        }
+                    }).start();
+                    synchronized (mWriteLock) {
+                    out.writeInt(MAGIC);
+                    out.writeInt(TYPE_META);   // 先告知总张数:接收端文案/进度用
+                    out.writeInt(uris.size());
+                    for (int i = 0; i < uris.size(); i++) {
+                        Object o = q.take();
+                        if (o == eod) break;
+                        byte[] data = (byte[]) o;
+                        Bus.log("传输: 正在发送第 " + (i + 1) + "/" + uris.size() + " 张 " + data.length + " 字节…");
                         out.writeInt(MAGIC);
                         out.writeInt(TYPE_FULL);
                         out.writeInt(data.length);
@@ -727,9 +818,15 @@ public class Xfer {
                         total += data.length;
                     }
                     out.flush();
+                    }
                     s.close();
                     mPendingSocket = null;
                     Bus.log("传输: 发送完成,共 " + uris.size() + " 张 " + total + " 字节");
+                    if (mWifiNetCb != null) { // 走对方热点发的:几秒后释放,让本机 Wi-Fi 回到原网络
+                        mMain.postDelayed(new Runnable() {
+                            @Override public void run() { releaseNetworkRequest(); }
+                        }, 5000);
+                    }
                     final int n = total;
                     mMain.post(new Runnable() {
                         @Override public void run() { mListener.onImageSent(n); }
@@ -754,6 +851,7 @@ public class Xfer {
                     }
                     DataOutputStream out = new DataOutputStream(s.getOutputStream());
                     int sent = 0;
+                    synchronized (mWriteLock) {
                     for (Uri uri : uris) {
                         if (sent >= 3) break; // 最多推 3 张预览
                         byte[] thumb = thumbnail(uri);
@@ -765,6 +863,7 @@ public class Xfer {
                         sent++;
                     }
                     out.flush();
+                    }
                     Bus.log("传输: 已推送 " + sent + " 张预览图");
                 } catch (Exception e) {
                     Bus.log("传输: 预览推送失败 " + e);

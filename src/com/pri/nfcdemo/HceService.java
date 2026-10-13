@@ -1,5 +1,6 @@
 package com.pri.nfcdemo;
 
+import android.content.Intent;
 import android.nfc.cardemulation.HostApduService;
 import android.os.Bundle;
 
@@ -24,7 +25,16 @@ public class HceService extends HostApduService {
         if ((apdu[0] & 0xFF) == 0x80 && ins == 0x10) {
             String peer = new String(Bus.apduData(apdu), StandardCharsets.UTF_8);
             Bus.log("HCE: 收到对方(接收方)信息: " + peer);
-            Bus.onPeerData(peer, "card");
+            // 交给常驻服务处理:必须走 intent —— 应用进程被系统回收后,碰触只会让 NFC 框架把 HCE 拉起来,
+            // 服务可能没在跑,直接用进程内监听投递会丢事件(实测:发送端整轮没反应)
+            try {
+                startService(new Intent(this, TapService.class)
+                        .setAction("com.pri.nfcdemo.PEER")
+                        .putExtra("payload", peer)
+                        .putExtra("role", "card"));
+            } catch (Throwable t) {
+                Bus.log("HCE: 转交服务失败 " + t);
+            }
             byte[] mine = Bus.selfPayload().getBytes(StandardCharsets.UTF_8);
             byte[] resp = new byte[mine.length + 2];
             System.arraycopy(mine, 0, resp, 0, mine.length);

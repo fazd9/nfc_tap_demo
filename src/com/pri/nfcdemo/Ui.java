@@ -64,4 +64,64 @@ public class Ui {
             }
         }).start();
     }
+
+    /** 全屏大图查看器(支持多张:点左/右半屏切上一张/下一张,顶部显示 序号/总数)。 */
+    public static android.widget.FrameLayout buildViewer(final Context ctx, final java.util.List<Bitmap> bmps) {
+        final java.util.ArrayList<Bitmap> list = new java.util.ArrayList<Bitmap>();
+        if (bmps != null) {
+            for (Bitmap b : bmps) if (b != null) list.add(b);
+        }
+
+        final android.widget.FrameLayout root = new android.widget.FrameLayout(ctx);
+        root.setBackgroundColor(0xFF000000);
+
+        final ImageView img = new ImageView(ctx);
+        img.setScaleType(ImageView.ScaleType.FIT_CENTER);
+        root.addView(img, new android.widget.FrameLayout.LayoutParams(
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                android.view.ViewGroup.LayoutParams.MATCH_PARENT));
+
+        final android.widget.TextView idxView = new android.widget.TextView(ctx);
+        idxView.setTextColor(0xCCFFFFFF);
+        idxView.setTextSize(13);
+        android.widget.FrameLayout.LayoutParams ilp = new android.widget.FrameLayout.LayoutParams(
+                android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+                android.view.ViewGroup.LayoutParams.WRAP_CONTENT);
+        ilp.gravity = android.view.Gravity.TOP | android.view.Gravity.CENTER_HORIZONTAL;
+        ilp.topMargin = dp(ctx, 34);
+        root.addView(idxView, ilp);
+
+        final int[] cur = {0};
+        final Runnable show = new Runnable() {
+            @Override public void run() {
+                if (list.isEmpty()) return;
+                img.setImageBitmap(list.get(cur[0]));
+                idxView.setText((cur[0] + 1) + "/" + list.size());
+            }
+        };
+        show.run();
+
+        if (list.size() > 1) { // 左右半屏点击切图(关闭按钮等由调用方后加,自然盖在上面)
+            int half = ctx.getResources().getDisplayMetrics().widthPixels / 2;
+            android.view.View prev = new android.view.View(ctx);
+            prev.setOnClickListener(new android.view.View.OnClickListener() {
+                @Override public void onClick(android.view.View v) {
+                    if (cur[0] > 0) { cur[0]--; show.run(); }
+                }
+            });
+            android.view.View next = new android.view.View(ctx);
+            next.setOnClickListener(new android.view.View.OnClickListener() {
+                @Override public void onClick(android.view.View v) {
+                    if (cur[0] < list.size() - 1) { cur[0]++; show.run(); }
+                }
+            });
+            root.addView(prev, new android.widget.FrameLayout.LayoutParams(
+                    half, android.view.ViewGroup.LayoutParams.MATCH_PARENT));
+            android.widget.FrameLayout.LayoutParams rp = new android.widget.FrameLayout.LayoutParams(
+                    half, android.view.ViewGroup.LayoutParams.MATCH_PARENT);
+            rp.gravity = android.view.Gravity.RIGHT;
+            root.addView(next, rp);
+        }
+        return root;
+    }
 }
