@@ -2322,11 +2322,13 @@ class OverlayView @JvmOverloads constructor(
 
     //pri added by zhuyang,E7: photo rect inside the card; drawCard and the burst origin both call it,20261014,start
     private fun photoArea(out: RectF) {
+        //pri added by zhuyang,Receive card draws no title/meta lines, so the photo fills the card instead of leaving that band empty,20261014
+        val bottomInset = if (mode == Mode.RECEIVE) 9f * k else 53f * k
         out.set(
             cardRect.left + 9f * k,
             cardRect.top + 9f * k,
             cardRect.right - 9f * k,
-            cardRect.bottom - 53f * k
+            cardRect.bottom - bottomInset
         )
     }
     //pri added by zhuyang,E7: photo rect inside the card; drawCard and the burst origin both call it,20261014,end
@@ -2409,33 +2411,37 @@ class OverlayView @JvmOverloads constructor(
         }
         //pri added by zhuyang,E7: over-expose the photo to a white rounded rect while sending,20261014,end
 
-        // 文字区
-        textPaint.typeface = bold
-        textPaint.textSize = 12f * k
-        textPaint.letterSpacing = 0.008f
-        textPaint.clearShadowLayer()
-        val fmStrong = textPaint.fontMetrics
-        val strongH = fmStrong.descent - fmStrong.ascent
+        //pri added by zhuyang,Receive card carries no card-level text (reference: the card is just the photo),20261014,start
+        if (mode != Mode.RECEIVE) {
+            // 文字区
+            textPaint.typeface = bold
+            textPaint.textSize = 12f * k
+            textPaint.letterSpacing = 0.008f
+            textPaint.clearShadowLayer()
+            val fmStrong = textPaint.fontMetrics
+            val strongH = fmStrong.descent - fmStrong.ascent
 
-        textPaint.typeface = normal
-        textPaint.textSize = 9f * k
-        textPaint.letterSpacing = 0f
-        val fmSpan = textPaint.fontMetrics
-        val spanH = fmSpan.descent - fmSpan.ascent
+            textPaint.typeface = normal
+            textPaint.textSize = 9f * k
+            textPaint.letterSpacing = 0f
+            val fmSpan = textPaint.fontMetrics
+            val spanH = fmSpan.descent - fmSpan.ascent
 
-        val boxBottom = cardRect.bottom - 13f * k
-        val spanTop = boxBottom - spanH
-        val strongTop = spanTop - 4f * k - strongH
+            val boxBottom = cardRect.bottom - 13f * k
+            val spanTop = boxBottom - spanH
+            val strongTop = spanTop - 4f * k - strongH
 
-        textPaint.typeface = bold
-        textPaint.textSize = 12f * k
-        textPaint.color = withAlpha(0xFF252B31.toInt(), alpha)
-        c.drawText(cardTitle, cardRect.left + 17f * k, strongTop - fmStrong.ascent, textPaint)
+            textPaint.typeface = bold
+            textPaint.textSize = 12f * k
+            textPaint.color = withAlpha(0xFF252B31.toInt(), alpha)
+            c.drawText(cardTitle, cardRect.left + 17f * k, strongTop - fmStrong.ascent, textPaint)
 
-        textPaint.typeface = normal
-        textPaint.textSize = 9f * k
-        textPaint.color = withAlpha(0xFF737B82.toInt(), alpha)
-        c.drawText(cardMeta, cardRect.left + 17f * k, spanTop - fmSpan.ascent, textPaint)
+            textPaint.typeface = normal
+            textPaint.textSize = 9f * k
+            textPaint.color = withAlpha(0xFF737B82.toInt(), alpha)
+            c.drawText(cardMeta, cardRect.left + 17f * k, spanTop - fmSpan.ascent, textPaint)
+        }
+        //pri added by zhuyang,Receive card carries no card-level text (reference: the card is just the photo),20261014,end
 
         c.restoreToCount(save)
     }
