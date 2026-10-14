@@ -1,5 +1,6 @@
 package com.pri.nfctouchdemo.service
 
+import android.animation.ValueAnimator
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -13,6 +14,8 @@ import android.content.res.Configuration
 import android.graphics.Bitmap
 import android.graphics.PixelFormat
 import android.graphics.Point
+import android.graphics.RenderEffect
+import android.graphics.Shader
 import android.net.Uri
 import android.os.Build
 import android.os.Handler
@@ -22,9 +25,11 @@ import android.provider.Settings
 import android.util.Log
 import android.view.Gravity
 import android.view.LayoutInflater
+import android.view.MotionEvent
 import android.view.View
 import android.view.WindowInsets
 import android.view.WindowManager
+import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
 import androidx.core.view.ViewCompat
@@ -36,7 +41,9 @@ import com.pri.nfctouchdemo.anim.Timeline
 import com.pri.nfctouchdemo.gfx.ImageLoader
 import com.pri.nfctouchdemo.gfx.RippleSurfaceView
 import com.pri.nfctouchdemo.nfc.TapService
+import com.pri.nfctouchdemo.nfc.Ui
 import com.pri.nfctouchdemo.ui.OverlayView
+import kotlin.math.abs
 
 /**
  * 动效层宿主：整屏悬浮窗 + 前台服务，动效本体盖在**别的应用之上**，服务常驻。
@@ -92,6 +99,17 @@ class OverlayService : Service() {
     /** 窗口是否已经挂上（[ACTION_HIDE] 之后仍然留着视图树）。 */
     private var attached = false
 
+    //pri added by zhuyang,Fail banner (D1) is a third, independent window with its own lifecycle,20261014,start
+    //pri added by zhuyang,View of the banner window: built per show, dropped on hide, never part of the main tree,20261014
+    private var failView: View? = null
+
+    //pri added by zhuyang,5s auto-dismiss timer: every dismiss path must cancel it,20261014
+    private var failRunnable: Runnable? = null
+
+    //pri added by zhuyang,Swipe gesture start point, used by the banner's own OnTouchListener,20261014
+    private var failDownY = 0f
+    //pri added by zhuyang,Fail banner (D1) is a third, independent window with its own lifecycle,20261014,end
+
     /** 建窗后延迟自动演示一遍的那个回调，拆窗时要撤掉。 */
     private var startRunnable: Runnable? = null
 
@@ -143,6 +161,8 @@ class OverlayService : Service() {
             ACTION_PEER -> updatePeer(intent)
             ACTION_REPLAY -> scheduleReplay()
             ACTION_HIDE -> hideDemo()
+            ACTION_FAIL_BANNER -> showFailBanner(intent)
+            ACTION_HIDE_FAIL_BANNER -> hideFailBanner()
             ACTION_TOGGLE_TOUCH -> setTouchThrough(!touchThrough)
             ACTION_STOP -> stopEverything()
             // 没有任何 action 的启动 = 只进前台待命
@@ -184,6 +204,7 @@ class OverlayService : Service() {
      * "服务被重复启动"都不会丢图。
      */
     private fun startSendFlow(intent: Intent?) {
+        hideFailBanner()
         mode = OverlayView.Mode.SEND
         uriExtra(intent, EXTRA_BACKDROP)?.let { backdropUri = it }
         uriExtra(intent, EXTRA_PHOTO)?.let { photoUri = it }
@@ -230,6 +251,7 @@ class OverlayService : Service() {
      * [ACTION_PHOTO] 换上。**不会**因此不播动效。
      */
     private fun startReceiveFlow(intent: Intent?) {
+        hideFailBanner()
         mode = OverlayView.Mode.RECEIVE
         if (intent?.hasExtra(EXTRA_PEER) == true) peerLabel = intent.getStringExtra(EXTRA_PEER)
         // 没有新的张数就沿用上一轮（重播时不该把「接收 3 张照片」缩回 1 张）
@@ -482,6 +504,7 @@ class OverlayService : Service() {
 
     /** 「停止演示」：摘掉窗口、停掉时间轴，服务不动（视图树留着，下次直接复用）。 */
     private fun hideDemo() {
+        hideFailBanner()
         if (rootView != null) detachOverlay()
         ensureForeground()
     }
@@ -675,7 +698,116 @@ class OverlayService : Service() {
         ensureForeground()
     }
 
+    //pri added by zhuyang,D1 fail banner: an independent small top window, its own lifecycle,20261014,start
+
+    //pri added by zhuyang,Only a small window makes "tap outside" real: on the full-screen window there is no outside,20261014
+    //pri added by zhuyang,Text comes from TapService (two extras); this side knows nothing about the business,20261014
+    private fun showFailBanner(intent: Intent?) {
+        //pri added by zhuyang,Same overlay-permission fallback as ACTION_START / ACTION_RECEIVE,20261014
+        if (!Settings.canDrawOverlays(this)) {
+            Toast.makeText(this, R.string.toast_need_overlay, Toast.LENGTH_SHORT).show()
+            ensureForeground()
+            return
+        }
+        //pri added by zhuyang,Idempotent: a re-entry never stacks a second banner window,20261014
+        hideFailBanner()
+
+        val content = LayoutInflater.from(this).inflate(R.layout.overlay_fail_banner, null)
+        content.findViewById<TextView>(R.id.fail_title).text =
+            intent?.getStringExtra(EXTRA_FAIL_TITLE) ?: getString(R.string.fail_title)
+        content.findViewById<TextView>(R.id.fail_detail).text =
+            intent?.getStringExtra(EXTRA_FAIL_DETAIL).orEmpty()
+        content.findViewById<TextView>(R.id.fail_icon).background =
+            Ui.rounded(this, FAIL_BANNER_RED, FAIL_BANNER_ICON_RADIUS_DP)
+        //pri added by zhuyang,Dark background starts at y=0 while the text stays clear of the status bar,20261014
+        content.setPadding(0, topInsetPx(), 0, 0)
+
+        //pri added by zhuyang,Three dismiss paths: swipe, tap outside (ACTION_OUTSIDE), 5s auto-dismiss,20261014
+        val swipePx = Ui.dp(this, FAIL_BANNER_SWIPE_DP)
+        content.setOnTouchListener { _, ev ->
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_DOWN -> failDownY = ev.rawY
+                MotionEvent.ACTION_UP -> if (abs(ev.rawY - failDownY) > swipePx) hideFailBanner()
+                MotionEvent.ACTION_OUTSIDE -> hideFailBanner()
+            }
+            true
+        }
+
+        val added = runCatching { windowManager.addView(content, buildFailBannerParams()) }
+            .onFailure { Log.e(TAG, "挂失败横幅失败", it) }
+            .isSuccess
+        if (!added) return
+        failView = content
+
+        //pri added by zhuyang,Blur-up fade-in: alpha 0..1 and a 24px..0 blur on the same 120ms curve,20261014
+        content.alpha = 0f
+        ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = FAIL_BANNER_IN_MS.toLong()
+            addUpdateListener {
+                val f = it.animatedValue as Float
+                content.alpha = f
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                    val r = (1f - f) * FAIL_BANNER_BLUR_PX
+                    runCatching {
+                        content.setRenderEffect(
+                            if (r > 0f) RenderEffect.createBlurEffect(r, r, Shader.TileMode.CLAMP) else null
+                        )
+                    }
+                }
+            }
+            start()
+        }
+
+        val runnable = Runnable { hideFailBanner() }
+        failRunnable = runnable
+        mainHandler.postDelayed(runnable, FAIL_BANNER_DISMISS_MS)
+    }
+
+    //pri added by zhuyang,Dismiss is idempotent: swipe and the 5s timer together still remove the window once,20261014
+    private fun hideFailBanner() {
+        failRunnable?.let { mainHandler.removeCallbacks(it) }
+        failRunnable = null
+        val view = failView
+        failView = null
+        if (view == null) return
+        runCatching { windowManager.removeView(view) }
+            .onFailure { Log.e(TAG, "摘失败横幅失败", it) }
+    }
+
+    //pri added by zhuyang,Banner window: same full-bleed insets handling as the main window, three flags differ,20261014
+    //pri added by zhuyang,Extra NOT_TOUCH_MODAL + WATCH_OUTSIDE_TOUCH (outside = below the banner); no LAYOUT_NO_LIMITS,20261014
+    private fun buildFailBannerParams(): WindowManager.LayoutParams {
+        val params = WindowManager.LayoutParams(
+            WindowManager.LayoutParams.MATCH_PARENT,
+            WindowManager.LayoutParams.WRAP_CONTENT,
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
+                WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH or
+                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
+                WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED,
+            PixelFormat.TRANSLUCENT
+        )
+        params.gravity = Gravity.TOP or Gravity.START
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            params.fitInsetsTypes = 0
+            params.fitInsetsSides = 0
+            params.setFitInsetsIgnoringVisibility(true)
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            params.layoutInDisplayCutoutMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS
+            } else {
+                WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
+            }
+        }
+        return params
+    }
+    //pri added by zhuyang,D1 fail banner: an independent small top window, its own lifecycle,20261014,end
+
     private fun teardown() {
+        //pri added by zhuyang,D1: the banner window must go even if the main view tree was never built,20261014
+        hideFailBanner()
         startRunnable?.let { overlay.removeCallbacks(it) }
         startRunnable = null
         cancelReplay()
@@ -883,6 +1015,20 @@ class OverlayService : Service() {
         /** 只摘掉动画窗口，常驻服务继续待命。 */
         const val ACTION_HIDE = "com.pri.nfctouchdemo.action.HIDE"
 
+        //pri added by zhuyang,D1 fail banner: show the top banner window / take it down again,20261014,start
+        //pri added by zhuyang,Show the banner; carries EXTRA_FAIL_TITLE / EXTRA_FAIL_DETAIL,20261014
+        const val ACTION_FAIL_BANNER = "com.pri.nfctouchdemo.action.FAIL_BANNER"
+
+        //pri added by zhuyang,Drop the banner: a new round must not carry the previous round's banner,20261014
+        const val ACTION_HIDE_FAIL_BANNER = "com.pri.nfctouchdemo.action.HIDE_FAIL_BANNER"
+
+        //pri added by zhuyang,Banner main line (bold white), picked by the NFC layer,20261014
+        const val EXTRA_FAIL_TITLE = "extra_fail_title"
+
+        //pri added by zhuyang,Banner second line (smaller grey), picked by the NFC layer,20261014
+        const val EXTRA_FAIL_DETAIL = "extra_fail_detail"
+        //pri added by zhuyang,D1 fail banner: show the top banner window / take it down again,20261014,end
+
         const val ACTION_TOGGLE_TOUCH = "com.pri.nfctouchdemo.action.TOGGLE_TOUCH"
 
         /** 退出常驻：真正停掉服务。 */
@@ -1007,6 +1153,19 @@ class OverlayService : Service() {
         fun stopIntent(context: Context): Intent =
             Intent(context, OverlayService::class.java).setAction(ACTION_STOP)
 
+        //pri added by zhuyang,D1: banner factory (the NFC layer picks both lines) + its hide counterpart,20261014,start
+        @JvmStatic
+        fun failBannerIntent(context: Context, title: String, detail: String): Intent =
+            Intent(context, OverlayService::class.java)
+                .setAction(ACTION_FAIL_BANNER)
+                .putExtra(EXTRA_FAIL_TITLE, title)
+                .putExtra(EXTRA_FAIL_DETAIL, detail)
+
+        @JvmStatic
+        fun hideFailBannerIntent(context: Context): Intent =
+            Intent(context, OverlayService::class.java).setAction(ACTION_HIDE_FAIL_BANNER)
+        //pri added by zhuyang,D1: banner factory (the NFC layer picks both lines) + its hide counterpart,20261014,end
+
         private const val TAG = "OverlayService"
         private const val CHANNEL_ID = "touch_anime_overlay"
         private const val NOTIFICATION_ID = 0x4F50
@@ -1018,6 +1177,21 @@ class OverlayService : Service() {
         private const val REQ_REPLAY = 2
         private const val REQ_TOUCH = 3
         private const val REQ_HIDE = 5
+
+        //pri added by zhuyang,D1 fail banner: 120ms blur-up fade-in, 5s auto-dismiss, 24dp swipe threshold,20261014,start
+        private const val FAIL_BANNER_IN_MS = 120f
+        private const val FAIL_BANNER_DISMISS_MS = 5000L
+        private const val FAIL_BANNER_SWIPE_DP = 24f
+
+        //pri added by zhuyang,Blur-up start radius in px, ramped to 0 over FAIL_BANNER_IN_MS; skipped below API 31,20261014
+        private const val FAIL_BANNER_BLUR_PX = 24f
+
+        //pri added by zhuyang,A 24dp round icon = 12dp corner radius (icon size lives in overlay_fail_banner.xml),20261014
+        private const val FAIL_BANNER_ICON_RADIUS_DP = 12
+
+        //pri added by zhuyang,Banner accent red, same tone as the motion layer,20261014
+        private val FAIL_BANNER_RED = 0xFFE5484D.toInt()
+        //pri added by zhuyang,D1 fail banner: 120ms blur-up fade-in, 5s auto-dismiss, 24dp swipe threshold,20261014,end
 
         /**
          * 通知里点「重播」之后等多久才真的播。

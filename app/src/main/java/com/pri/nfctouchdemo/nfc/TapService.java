@@ -9,6 +9,7 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 
+import com.pri.nfctouchdemo.R; //pri added by zhuyang,D1: fail banner lines live in strings.xml,20261014
 import com.pri.nfctouchdemo.service.OverlayService;
 
 import java.io.File;
@@ -124,8 +125,9 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
             if (sXfer != null) sXfer.confirmReceived(); //pri added by zhuyang,Write the ACCEPT verdict back on the same socket,20261014
             if (mTransferDone && mFullCount > 0) { // 已经收完,直接看全部
                 mReceiveShown = false;
-                startService(OverlayService.hideIntent(this)); // 摘掉动效窗口,查看器改用旧的 Overlay
-                showViewer(mBmps);
+                //pri modify by zhuyang,Detach the animation window; the viewer is the system one now,20261014
+                startService(OverlayService.hideIntent(this));
+                openSystemViewer();
                 Bus.unlockRole();
             } else {
                 startService(OverlayService.statusIntent(this,
@@ -178,6 +180,8 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
 
     @Override
     public void onPeer(String payload, String role) {
+        //pri added by zhuyang,D1: drop the previous round's fail banner the moment a new round starts,20261014
+        startService(OverlayService.hideFailBannerIntent(this));
         mLinkReady = false; // 新一轮:连接就绪状态重置
         mSendShown = false;    // 新一轮:本轮"发送页已弹"标记清零(替代原来 mSendPage 字段的生命周期)
         mReceiveShown = false; // 同理,接收页标记清零
@@ -301,14 +305,14 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
             if (mAccepted) {
                 mReceiveShown = false;
                 // 用户已经点过"接收":动效层没别的用途了,先摘掉它的窗口再开查看器
-                // (查看器仍走旧的 Overlay.get(this).show(...),两个悬浮窗别叠在一起)
+                //pri modify by zhuyang,D4: viewer is now the system one, opened on the saved MediaStore Uri,20261014
                 startService(OverlayService.hideIntent(this));
-                showViewer(mBmps);
+                openSystemViewer();
                 Bus.unlockRole();
             }
         } else if (mAccepted) {
             startService(OverlayService.hideIntent(this)); // 同上:进查看器前先摘掉动效窗口
-            showViewer(mBmps);
+            openSystemViewer();
             Bus.unlockRole();
         }
     }
@@ -329,6 +333,13 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
     public void onXferFailed(String why) {
         if (!mSendShown && !PENDING.isEmpty()) showSendPage(); // 失败也要让用户看到原因(发送页此时可能还没弹)
         startService(OverlayService.statusIntent(this, why)); // 失败原因同样走动效页底部状态行
+        //pri added by zhuyang,D1: banner only for a failure after this phone declared itself sender,20261014,start
+        if (mUserWantsSend) {
+            String detail = why == null ? "" : why;
+            if (detail.length() > 12) detail = detail.substring(0, 12); //pri added by zhuyang,Long text stays in the status line; the banner only fits a short line,20261014
+            startService(OverlayService.failBannerIntent(this, getString(R.string.fail_title), detail));
+        }
+        //pri added by zhuyang,D1: banner only for a failure after this phone declared itself sender,20261014,end
         // 流程结束(失败):立即释放角色锁,保证下一轮碰触能重新开始
         Bus.unlockRole();
     }
@@ -344,10 +355,11 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
     }
 
     @Override public void onPeerRejected() {
-        //pri added by zhuyang,Voluntary reject: keep off onXferFailed; batch 3 swaps the status line for the fail banner,20261014
         Bus.log("服务: 对方拒收");
         Bus.unlockRole();
-        startService(OverlayService.statusIntent(this, "发送失败:对方拒收"));
+        //pri modify by zhuyang,D1: the status line becomes the top fail banner,20261014
+        startService(OverlayService.failBannerIntent(this,
+                getString(R.string.fail_title), getString(R.string.fail_rejected)));
     }
 
     @Override public void onPeerAccepted() {
@@ -355,10 +367,11 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
     }
 
     @Override public void onVerdictTimeout() {
-        //pri added by zhuyang,No verdict within VERDICT_WAIT_MS; batch 3 swaps the status line for the fail banner,20261014
         Bus.log("服务: 对方未响应(等回执超时)");
         Bus.unlockRole();
-        startService(OverlayService.statusIntent(this, "发送失败:对方未响应"));
+        //pri modify by zhuyang,D1: the status line becomes the top fail banner,20261014
+        startService(OverlayService.failBannerIntent(this,
+                getString(R.string.fail_title), getString(R.string.fail_timeout)));
     }
     //pri added by zhuyang,Two-phase protocol callbacks,20261014,end
 
@@ -453,26 +466,21 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         }
     }
 
-    private void showViewer(java.util.List<Bitmap> bmps) {
-        android.widget.FrameLayout v = Ui.buildViewer(this, bmps);
-        // 关闭按钮(右上):点图片本体不退出
-        android.widget.TextView vc = new android.widget.TextView(this);
-        vc.setText("✕");
-        vc.setTextColor(0xFFDDDDDD);
-        vc.setTextSize(20);
-        vc.setPadding(36, 24, 36, 24);
-        vc.setOnClickListener(new android.view.View.OnClickListener() {
-            @Override public void onClick(android.view.View x) { Overlay.get(TapService.this).hide(v); }
-        });
-        android.widget.FrameLayout.LayoutParams vlp = new android.widget.FrameLayout.LayoutParams(
-                android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
-                android.view.ViewGroup.LayoutParams.WRAP_CONTENT);
-        vlp.gravity = android.view.Gravity.TOP | android.view.Gravity.RIGHT;
-        vlp.topMargin = 60;
-        vlp.rightMargin = 4;
-        v.addView(vc, vlp);
-        Overlay.get(this).show(v);
+    //pri added by zhuyang,D4: open the just-saved photo with the system viewer instead of the old overlay viewer,20261014,start
+    //pri added by zhuyang,Uri comes from the MediaStore record Xfer made while saving; nothing saved = log only,20261014
+    private void openSystemViewer() {
+        Uri u = (sXfer != null) ? sXfer.firstSavedUri() : null;
+        if (u == null) { Bus.log("接收完成:本轮没有落盘 Uri,不打系统查看器"); return; }
+        try {
+            startActivity(new Intent(Intent.ACTION_VIEW)
+                    .setDataAndType(u, "image/*")
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                            | Intent.FLAG_GRANT_READ_URI_PERMISSION));
+        } catch (Throwable t) {
+            Bus.log("打开系统查看器失败: " + t);
+        }
     }
+    //pri added by zhuyang,D4: open the just-saved photo with the system viewer instead of the old overlay viewer,20261014,end
 
     private static String field(String payload, String key) {
         for (String kv : payload.split("\\|")) {
