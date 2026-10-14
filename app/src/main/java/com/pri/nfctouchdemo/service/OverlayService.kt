@@ -599,7 +599,7 @@ class OverlayService : Service() {
         content.setOnKeyListener { _, keyCode, event -> handlePageKey(keyCode, event) }
         //pri added by zhuyang,Key path 2: a view added by a service has no Window.Callback, unhandled keys go to the root's unhandled listeners,20261014
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-            content.setOnUnhandledKeyEventListener { _, event -> handlePageKey(event.keyCode, event) }
+            content.addOnUnhandledKeyEventListener { _, event -> handlePageKey(event.keyCode, event) }
         }
         //pri added by zhuyang,Exit path: the window eats every touch, so a stalled page used to lock the whole phone; Back now dismisses it,20261014,end
 
@@ -707,8 +707,10 @@ class OverlayService : Service() {
         if (intent?.hasExtra(EXTRA_COUNT) == true) intent.getIntExtra(EXTRA_COUNT, fallback) else fallback
 
     /**
-     * 一个整屏、透明、不吃焦点的悬浮窗。
+     * 一个整屏、透明、可以获得焦点的悬浮窗 —— 返回键要能落到这一层。
      *
+     * 去掉 `FLAG_NOT_FOCUSABLE` 后要自己补上 `FLAG_NOT_TOUCH_MODAL`（以前由它隐式带来），
+     * 触摸时的模态关系与过去保持一致。
      * 宽高显式给"整块屏幕"的像素尺寸（不是 MATCH_PARENT）：配上
      * `FLAG_LAYOUT_NO_LIMITS` 这个尺寸不会被系统栏裁掉，窗口真的铺到最上沿和最下沿，
      * 导航栏落在窗口下面 —— 要么被内容盖住，要么已经被收起。
@@ -967,7 +969,7 @@ class OverlayService : Service() {
     /**
      * 请系统把状态栏 / 导航栏收起来。
      *
-     * 悬浮窗（`TYPE_APPLICATION_OVERLAY` + `FLAG_NOT_FOCUSABLE`）不是绝对能收起系统栏的，
+     * 悬浮窗（`TYPE_APPLICATION_OVERLAY`）不是绝对能收起系统栏的，
      * 收不起来也不影响整屏：窗口本来就铺到最下沿，导航栏落在窗口下面被内容盖住。
      */
     private fun requestFullScreen() {
