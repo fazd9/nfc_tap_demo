@@ -861,7 +861,7 @@ class OverlayService : Service() {
          * 只改「对端标识 / 张数」，别的都不动。
          *
          * 用途：接收页是在碰一碰那一刻就弹出来的，那时还不知道对方要发几张，
-         * `receiveIntent` 只能先按 1 张拉页；等对方把真实总张数报过来（Xfer 的 onImageCount），
+         * `receiveIntent` 只能先按 1 张拉页；等对方把真实总张数报过来（Xfer 的 onSendStarted），
          * 已经弹好的页面需要被**就地补正**成「接收 N 张照片」——重播一遍入场动画显然不行。
          */
         const val ACTION_PEER = "com.pri.nfctouchdemo.action.PEER"

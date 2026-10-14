@@ -96,6 +96,7 @@ public final class Bus {
     public static byte[] buildExchangeApdu(String payload) {
         byte[] d = payload.getBytes(StandardCharsets.UTF_8);
         if (d.length > MAX_PAYLOAD) {
+            Bus.log("payload 超长已截断: " + d.length + " -> " + MAX_PAYLOAD);
             byte[] trimmed = new byte[MAX_PAYLOAD];
             System.arraycopy(d, 0, trimmed, 0, MAX_PAYLOAD);
             d = trimmed;

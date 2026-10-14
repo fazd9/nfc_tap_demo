@@ -501,7 +501,7 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback,
                     + bmp.getWidth() + "x" + bmp.getHeight() + ")");
         }
 
-        @Override public void onImageCount(int total) {
+        @Override public void onSendStarted(int total) {
             setOverlayStatus("对方将发送 " + Math.max(1, total) + " 张照片");
         }
 
@@ -534,6 +534,24 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback,
             setState("❌ " + why, Color.RED);
             setOverlayStatus(why);
         }
+
+        //pri added by zhuyang,Stubs for the two-phase protocol callbacks (batch 1: interface only),20261014,start
+        @Override public void onOfferExpired() {
+            Bus.log("联调页: 对方超时未发货");
+        }
+
+        @Override public void onPeerRejected() {
+            Bus.log("联调页: 对方拒收");
+        }
+
+        @Override public void onPeerAccepted() {
+            Bus.log("联调页: 对方已接收");
+        }
+
+        @Override public void onVerdictTimeout() {
+            Bus.log("联调页: 等待对方回执超时");
+        }
+        //pri added by zhuyang,Stubs for the two-phase protocol callbacks (batch 1: interface only),20261014,end
     };
 
     // ---------- 动效层(确认页统一由 OverlayService + ui/OverlayView 承担) ----------

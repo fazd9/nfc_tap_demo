@@ -251,7 +251,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         else Bus.log("预览图落盘失败,动效层卡片继续用内置插画");
     }
 
-    @Override public void onImageCount(int total) {
+    @Override public void onSendStarted(int total) {
         mTotalCount = total;
         if (mReceiveShown) {
             // 动效层接收页的按钮文案张数来自 receiveIntent 的 count(=1);真实总张数到了,用状态行补正
@@ -317,6 +317,24 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         // 流程结束(失败):立即释放角色锁,保证下一轮碰触能重新开始
         Bus.unlockRole();
     }
+
+    //pri added by zhuyang,Stubs for the two-phase protocol callbacks (batch 1: interface only),20261014,start
+    @Override public void onOfferExpired() {
+        Bus.log("服务: 对方超时未发货,本轮结束");
+    }
+
+    @Override public void onPeerRejected() {
+        Bus.log("服务: 对方拒收");
+    }
+
+    @Override public void onPeerAccepted() {
+        Bus.log("服务: 对方已接收");
+    }
+
+    @Override public void onVerdictTimeout() {
+        Bus.log("服务: 等待对方回执超时");
+    }
+    //pri added by zhuyang,Stubs for the two-phase protocol callbacks (batch 1: interface only),20261014,end
 
     /** 读取对方(接收方动作,由透明跳板转交)。 */
     private void handleTag(final android.nfc.Tag tag) {

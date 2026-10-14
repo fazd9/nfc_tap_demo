@@ -39,11 +39,15 @@ public class Xfer {
     public interface Listener {
         void onP2pReady(boolean isGroupOwner, String goAddress);
         void onPreview(Bitmap bmp);                    // 对方发来的预览缩略图(接收确认页显示用)
-        void onImageCount(int total);                  // 对方预告本次共发几张(接收页文案用)
+        void onSendStarted(int total);                 // 对方预告本次共发几张(接收页文案用)
         void onImageReceived(int index, int total, Bitmap bmp, int bytes, boolean saved); // 每张整图都回调
         void onTransferDone(java.util.List<Bitmap> bmps);  // 对方发送完毕(连接关闭),bmps=本次收到的全部整图
         void onImageSent(int bytes);
         void onXferFailed(String why);
+        void onOfferExpired();                         //pri added by zhuyang,Receiver: peer never delivered the offer,20261014
+        void onPeerRejected();                         //pri added by zhuyang,Sender: peer rejected the transfer,20261014
+        void onPeerAccepted();                         //pri added by zhuyang,Sender: peer accepted the transfer,20261014
+        void onVerdictTimeout();                       //pri added by zhuyang,Sender: no verdict within VERDICT_WAIT_MS,20261014
     }
 
     private static final int PORT = 8988;
@@ -54,6 +58,9 @@ public class Xfer {
     private static final int TYPE_PREVIEW = 1;   // 预览缩略图(确认前发送)
     private static final int TYPE_FULL = 2;      // 完整图片(用户确认后发送)
     private static final int TYPE_META = 3;      // 发送预告:总张数(len 字段即张数,无 payload)
+    private static final int TYPE_ACCEPT = 4;        //pri added by zhuyang,Receiver verdict frame: accept (len=0),20261014
+    private static final int TYPE_REJECT = 5;        //pri added by zhuyang,Receiver verdict frame: reject (len=0),20261014
+    private static final int VERDICT_WAIT_MS = 60000;  //pri added by zhuyang,Sender waits this long for the verdict,20261014
 
     private final Context mCtx;
     private final java.util.List<Listener> mAll =
@@ -71,8 +78,8 @@ public class Xfer {
         @Override public void onPreview(Bitmap b) {
             for (Listener l : mAll) l.onPreview(b);
         }
-        @Override public void onImageCount(int t) {
-            for (Listener l : mAll) l.onImageCount(t);
+        @Override public void onSendStarted(int t) {
+            for (Listener l : mAll) l.onSendStarted(t);
         }
         @Override public void onImageReceived(int i, int t, Bitmap b, int c, boolean d) {
             for (Listener l : mAll) l.onImageReceived(i, t, b, c, d);
@@ -86,10 +93,22 @@ public class Xfer {
         @Override public void onXferFailed(String w) {
             for (Listener l : mAll) l.onXferFailed(w);
         }
+        @Override public void onOfferExpired() {
+            for (Listener l : mAll) l.onOfferExpired();
+        }
+        @Override public void onPeerRejected() {
+            for (Listener l : mAll) l.onPeerRejected();
+        }
+        @Override public void onPeerAccepted() {
+            for (Listener l : mAll) l.onPeerAccepted();
+        }
+        @Override public void onVerdictTimeout() {
+            for (Listener l : mAll) l.onVerdictTimeout();
+        }
     };
 
     public void addListener(Listener l) {
-        if (l != null) mAll.add(l);
+        if (l != null && !mAll.contains(l)) mAll.add(l);
     }
 
     private final WifiP2pManager mP2p;
@@ -739,7 +758,7 @@ public class Xfer {
                     final int n = expect;
                     Bus.log("传输: 对方本次共发 " + n + " 张");
                     mMain.post(new Runnable() {
-                        @Override public void run() { mListener.onImageCount(n); }
+                        @Override public void run() { mListener.onSendStarted(n); }
                     });
                     continue;
                 }
