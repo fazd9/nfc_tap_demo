@@ -108,6 +108,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
             if (sXfer == null || PENDING.isEmpty()) return START_STICKY;
             //pri modify by zhuyang,Swipe now declares the sender role and triggers the link negotiation,20261014,start
             mUserWantsSend = true;
+            sXfer.setSenderRole(); //pri added by zhuyang,Swipe declares the sender role even when the link is already up,20261014
             if (mLinkReady) {
                 if (!mSendStarted) {
                     mSendStarted = true;
@@ -216,6 +217,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         if (!Bus.lockRole()) { Bus.log("角色已定,忽略重复的碰触事件"); return; }
         mPeerLabel = label;
         //pri modify by zhuyang,Both phones only prepare to receive; the role is decided at swipe time,20261014,start
+        x.setCanSend(hasPending()); //pri added by zhuyang,Photos in hand = still undecided: the accept loop must not consume an incoming connection as data,20261014
         x.startHotspot(); //pri added by zhuyang,Unconditional: both sides prepare for a possible receive,20261014
         if (hasPending()) {
             showSendPage();

@@ -61,6 +61,7 @@ public class Xfer {
     private static final int TYPE_ACCEPT = 4;        //pri added by zhuyang,Receiver verdict frame: accept (len=0),20261014
     private static final int TYPE_REJECT = 5;        //pri added by zhuyang,Receiver verdict frame: reject (len=0),20261014
     private static final int VERDICT_WAIT_MS = 60000;  //pri added by zhuyang,Sender waits this long for the verdict,20261014
+    private static final int PROBE_MS = 3000;          //pri added by zhuyang,An accepted connection that stays silent this long carries no incoming data,20261014
 
     private final Context mCtx;
     private final java.util.List<Listener> mAll =
@@ -124,6 +125,8 @@ public class Xfer {
     private volatile Uri mFirstSavedUri;    //pri added by zhuyang,MediaStore Uri of the first image saved this round,20261014
 
     private boolean mReceiverRole;
+    private volatile boolean mCanSend;   //pri added by zhuyang,Holds photos and has not swiped: may still become the sender,20261014
+    private volatile boolean mDriveP2p;  //pri added by zhuyang,Sender whose hotspot/LAN attempts failed: only this phone drives the P2P fallback,20261014
     private volatile boolean mRunning = true;
     private volatile String mGoAddress;
     private volatile boolean mImGo;
@@ -231,6 +234,8 @@ public class Xfer {
         mRetry = 0;
         mPauseWarm = false;
         mReceiverRole = false;
+        mCanSend = false;   //pri added by zhuyang,New round: undecided until TapService reports the photos,20261014
+        mDriveP2p = false;  //pri added by zhuyang,New round: the P2P fallback needs a fresh decision,20261014
         //pri added by zhuyang,Bump the round token and drop the verdict session state of the previous round,20261014,start
         mRound++;
         try { if (mPeerSocket != null) mPeerSocket.close(); } catch (Exception ignored) {}
@@ -432,6 +437,22 @@ public class Xfer {
         }, 20000);
     }
 
+    //pri added by zhuyang,TapService tells the link layer whether this phone still holds photos (may swipe later),20261014
+    public void setCanSend(boolean can) {
+        mCanSend = can;
+    }
+
+    //pri added by zhuyang,Swipe declares the sender role without re-negotiating a channel that is already up,20261014
+    public void setSenderRole() {
+        mReceiverRole = false;
+        mCanSend = false;
+    }
+
+    //pri added by zhuyang,Who may drive P2P discovery/connect: a decided receiver, or a sender whose ①② attempts failed,20261014
+    private boolean mayDriveP2p() {
+        return (mReceiverRole && !mCanSend) || mDriveP2p;
+    }
+
     /** 连接策略:① 对方热点(直连,最快,实测 ~50Mbps) ② 同一 Wi-Fi 直连 ③ Wi-Fi Direct 兜底。 */
     private void startConnectStrategy() {
         new Thread(new Runnable() {
@@ -439,6 +460,7 @@ public class Xfer {
                 if (mPeerHsSsid != null && joinHotspot(mPeerHsSsid, mPeerHsPass)) return;
                 if (mPeerLanIp != null && connectTo(mPeerLanIp, "局域网")) return;
                 Bus.log("传输: 热点/同网直连未成功(对方热点没开?不在同一 Wi-Fi?),走 Wi-Fi Direct 兜底…");
+                mDriveP2p = true; //pri added by zhuyang,Only here does the sender take over P2P discovery/connect,20261014
                 mPauseWarm = false;
                 warmDiscoverLoop();
             }
@@ -572,7 +594,7 @@ public class Xfer {
     }
 
     private void retryDiscovery() {
-        if (!mRunning || !mReceiverRole || mRetry >= 5) {
+        if (!mRunning || !mayDriveP2p() || mRetry >= 5) {
             mDiscovering = false;
             mConnecting = false;
             fail("P2P 搜索多次失败");
@@ -649,7 +671,7 @@ public class Xfer {
         Bus.log("P2P: 搜到 " + list.size() + " 个设备: " + sb.toString().trim());
 
         // 只有接收方主动发起直连;局域网已连上(mGotConnection)后不再发起 P2P,避免传输中协商抢射频
-        if (!mReceiverRole || mGoAddress != null || mConnecting || mGotConnection) return;
+        if (!mayDriveP2p() || mGoAddress != null || mConnecting || mGotConnection) return;
 
         WifiP2pDevice target = null;
         for (WifiP2pDevice d : list) {
@@ -700,6 +722,28 @@ public class Xfer {
         // 发送方且是组员:等用户点「发送」时连组主写图
     }
 
+    //pri added by zhuyang,Sender always writes the offer first: a connection that stays silent is not incoming data,20261014,start
+    private boolean peerSpeaksFirst(Socket s) {
+        long deadline = System.currentTimeMillis() + PROBE_MS;
+        try {
+            java.io.InputStream in = s.getInputStream();
+            while (mRunning && System.currentTimeMillis() < deadline) {
+                if (in.available() > 0) return true;
+                try { Thread.sleep(100); } catch (InterruptedException ignored) {}
+            }
+        } catch (Throwable t) {
+            Bus.log("传输: 探测连接方向失败 " + t);
+        }
+        return false;
+    }
+    //pri added by zhuyang,Sender always writes the offer first: a connection that stays silent is not incoming data,20261014,end
+
+    //pri added by zhuyang,Sender side of an accepted connection: keep it for the offer the user is about to send,20261014
+    private void stashForSending(Socket s) {
+        mPendingSocket = s; // 发送方做组主:暂存连接,等用户点发送
+        Bus.log("传输: 连接已就绪,点「发送给对方」即可发送");
+    }
+
     private void startServer() {
         if (mServer != null) return;
         new Thread(new Runnable() {
@@ -711,12 +755,18 @@ public class Xfer {
                         Socket s = mServer.accept();
                         mGotConnection = true;
                         Bus.log("传输: 对方已连接 " + s.getInetAddress());
-                        if (mReceiverRole) {
-                            handleIncoming(s);
+                        //pri added by zhuyang,Classify late: who writes first decides the direction of this socket,20261014,start
+                        if (!mReceiverRole) {
+                            stashForSending(s);
+                        } else if (peerSpeaksFirst(s)) {
+                            handleIncoming(s); // 对方在发报价:本机就是这一轮的接收方
+                        } else if (!mReceiverRole || mCanSend) {
+                            stashForSending(s); // 本机还有照片没上滑(探测期间上滑也算):留着当发送通道
                         } else {
-                            mPendingSocket = s; // 发送方做组主:暂存连接,等用户点发送
-                            Bus.log("传输: 连接已就绪,点「发送给对方」即可发送");
+                            try { s.close(); } catch (Exception ignored) {}
+                            Bus.log("传输: 对端只是读取方,已释放空连接");
                         }
+                        //pri added by zhuyang,Classify late: who writes first decides the direction of this socket,20261014,end
                     }
                 } catch (Exception e) {
                     if (mRunning) Bus.log("传输: 监听异常 " + e);
