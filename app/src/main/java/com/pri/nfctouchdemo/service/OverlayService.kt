@@ -94,6 +94,9 @@ class OverlayService : Service() {
     private lateinit var particleView: ParticleView
     private lateinit var timeline: Timeline
 
+    //pri added by zhuyang,Change 2: top-task listener (Home / Recents), created in onCreate and dropped in onDestroy,20261014
+    private lateinit var taskStackWatcher: TaskStackWatcher
+
     /** 当前是哪一种确认页：发送（上滑发送）还是接收（接收 / 拒绝）。 */
     private var mode = OverlayView.Mode.SEND
 
@@ -158,6 +161,9 @@ class OverlayService : Service() {
         super.onCreate()
         windowManager = getSystemService(WindowManager::class.java)
         createChannel()
+        //pri added by zhuyang,Change 2: follow the top task for the whole life of the service,20261014
+        taskStackWatcher = TaskStackWatcher(::onTopTaskChanged)
+        taskStackWatcher.register()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -199,6 +205,8 @@ class OverlayService : Service() {
     }
 
     override fun onDestroy() {
+        //pri added by zhuyang,Change 2: the top-task listener is bound to this service and must go with it,20261014
+        taskStackWatcher.unregister()
         teardown()
         super.onDestroy()
     }
@@ -560,6 +568,25 @@ class OverlayService : Service() {
         //pri added by zhuyang,Drop a live drag / fly / dissolve so the detached view tree does not carry it into the next round,20261014
         overlay.resetSendState()
     }
+
+    //pri added by zhuyang,Change 2: the page gives way when the top task changes (Home / Recents), as FunnyWindowService does,20261014,start
+    //pri added by zhuyang,Fired on a binder thread: read the setting and touch the view tree on the main thread,20261014
+    private fun onTopTaskChanged() {
+        mainHandler.post {
+            //pri added by zhuyang,Same gate as the reference: only gesture navigation dismisses on a task change,20261014
+            val navMode = Settings.Secure.getInt(contentResolver, "navigation_mode", -1)
+            if (navMode == 2) {
+                //pri added by zhuyang,Nothing on screen -> nothing to dismiss,20261014
+                if (attached) {
+                    Log.d(TAG, "顶层任务变化：手势导航，收起动效页")
+                    dismissPage()
+                }
+            } else {
+                Log.d(TAG, "顶层任务变化：非手势导航，忽略")
+            }
+        }
+    }
+    //pri added by zhuyang,Change 2: the page gives way when the top task changes (Home / Recents), as FunnyWindowService does,20261014,end
     //pri added by zhuyang,Exit path: Back on the animation window, the page has no other way out once the round stalls,20261014,end
 
     // ---------------------------------------------------------------- 动效层 ↔ NFC 层
@@ -703,6 +730,20 @@ class OverlayService : Service() {
     private fun countExtra(intent: Intent?, fallback: Int): Int =
         if (intent?.hasExtra(EXTRA_COUNT) == true) intent.getIntExtra(EXTRA_COUNT, fallback) else fallback
 
+    //pri added by zhuyang,Change 1: window type of the animation page,20261014,start
+    //pri added by zhuyang,TYPE_NAVIGATION_BAR_PANEL = layer 25: above the status bar / keyguard / IME, like FunnyWindowModel,20261014
+    //pri added by zhuyang,The constant itself is @hide (not in the public SDK), so it is read from this ROM's framework,20261014
+    private val overlayWindowType: Int by lazy {
+        runCatching {
+            Class.forName("android.view.WindowManager\$LayoutParams")
+                .getField("TYPE_NAVIGATION_BAR_PANEL").getInt(null)
+        }.getOrElse {
+            Log.e(TAG, "取 TYPE_NAVIGATION_BAR_PANEL 失败，退回 TYPE_APPLICATION_OVERLAY", it)
+            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
+        }
+    }
+    //pri added by zhuyang,Change 1: window type of the animation page,20261014,end
+
     /**
      * 一个整屏、透明、可以获得焦点的悬浮窗 —— 返回键要能落到这一层。
      *
@@ -716,10 +757,12 @@ class OverlayService : Service() {
         val size = displaySize()
         //pri modify by zhuyang,Window is focusable now (FLAG_NOT_FOCUSABLE dropped): Back must reach this window, it is the exit of a stalled page,20261014,start
         //pri modify by zhuyang,FLAG_NOT_TOUCH_MODAL now set explicitly - FLAG_NOT_FOCUSABLE used to imply it, so touch routing stays exactly what it is today,20261014
+        //pri modify by zhuyang,Change 1: FLAG_ALT_FOCUSABLE_IM as in FunnyWindowModel - the focusable window never becomes the IME target,20261014
         val flags = WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
-            WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
+            WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED or
+            WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM
         //pri modify by zhuyang,Touch-through keeps its old meaning: the window takes neither touches nor keys,20261014
         val windowFlags = if (touchThrough) {
             flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
@@ -731,7 +774,7 @@ class OverlayService : Service() {
         val params = WindowManager.LayoutParams(
             size.x,
             size.y,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+            overlayWindowType,
             windowFlags,
             PixelFormat.TRANSLUCENT
         )
