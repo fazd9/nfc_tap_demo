@@ -578,11 +578,11 @@ class OverlayService : Service() {
             if (navMode == 2) {
                 //pri added by zhuyang,Nothing on screen -> nothing to dismiss,20261014
                 if (attached) {
-                    Log.d(TAG, "顶层任务变化：手势导航，收起动效页")
+                    Log.i(TAG, "顶层任务变化：手势导航，收起动效页")
                     dismissPage()
                 }
             } else {
-                Log.d(TAG, "顶层任务变化：非手势导航，忽略")
+                Log.i(TAG, "顶层任务变化：非手势导航，忽略")
             }
         }
     }

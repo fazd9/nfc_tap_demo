@@ -30,6 +30,9 @@ class TaskStackWatcher(private val onTopTaskChanged: () -> Unit) : Binder() {
     //pri added by zhuyang,The two callbacks that mean "top task changed": moved to front, and focus gained,20261014,start
     //pri added by zhuyang,Runs on a binder thread - the callback is marshalled to the main thread by the service,20261014
     override fun onTransact(code: Int, data: Parcel, reply: Parcel?, flags: Int): Boolean {
+        //pri added by zhuyang,Log every inbound transaction before dispatch: only code/flags are read, reading data here would consume it,20261014
+        val isKnownCode = code == movedToFrontTransaction || code == focusChangedTransaction
+        Log.i(TAG, "收到事务：code=$code,flags=$flags,已知回调=$isKnownCode")
         when (code) {
             movedToFrontTransaction -> onTopTaskChanged()
             focusChangedTransaction -> {
@@ -60,6 +63,8 @@ class TaskStackWatcher(private val onTopTaskChanged: () -> Unit) : Binder() {
                 iatm.getMethod("unregisterTaskStackListener", iface).invoke(service, proxy)
             }
             //pri modify by zhuyang,register/unregisterTaskStackListener are declared on IActivityTaskManager (the interface getService returns), not on ITaskStackListener,20261014,end
+            //pri added by zhuyang,Log success as well: silence alone was ambiguous between registered fine and register() never having run,20261014
+            Log.i(TAG, "注册顶层任务监听成功")
         }.onFailure { Log.e(TAG, "注册顶层任务监听失败", it) }
     }
 
