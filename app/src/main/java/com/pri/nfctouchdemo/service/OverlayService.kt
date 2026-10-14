@@ -94,8 +94,8 @@ class OverlayService : Service() {
     private lateinit var particleView: ParticleView
     private lateinit var timeline: Timeline
 
-    //pri added by zhuyang,Change 2: top-task listener (Home / Recents), created in onCreate and dropped in onDestroy,20261014
-    private lateinit var taskStackWatcher: TaskStackWatcher
+    //pri added by zhuyang,Change 2: top-task watcher (Home / Recents) - alive only while the page is attached, see startTopTaskPolling,20261014
+    private var topTaskPoller: TopTaskPoller? = null
 
     /** 当前是哪一种确认页：发送（上滑发送）还是接收（接收 / 拒绝）。 */
     private var mode = OverlayView.Mode.SEND
@@ -161,9 +161,7 @@ class OverlayService : Service() {
         super.onCreate()
         windowManager = getSystemService(WindowManager::class.java)
         createChannel()
-        //pri added by zhuyang,Change 2: follow the top task for the whole life of the service,20261014
-        taskStackWatcher = TaskStackWatcher(::onTopTaskChanged)
-        taskStackWatcher.register()
+        //pri added by zhuyang,Change 2: the top task is watched from attach to detach only, not for the life of the service,20261014
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -205,8 +203,6 @@ class OverlayService : Service() {
     }
 
     override fun onDestroy() {
-        //pri added by zhuyang,Change 2: the top-task listener is bound to this service and must go with it,20261014
-        taskStackWatcher.unregister()
         teardown()
         super.onDestroy()
     }
@@ -570,7 +566,7 @@ class OverlayService : Service() {
     }
 
     //pri added by zhuyang,Change 2: the page gives way when the top task changes (Home / Recents), as FunnyWindowService does,20261014,start
-    //pri added by zhuyang,Fired on a binder thread: read the setting and touch the view tree on the main thread,20261014
+    //pri added by zhuyang,Fired on the poller thread: read the setting and touch the view tree on the main thread,20261014
     private fun onTopTaskChanged() {
         mainHandler.post {
             //pri added by zhuyang,Same gate as the reference: only gesture navigation dismisses on a task change,20261014
@@ -585,6 +581,20 @@ class OverlayService : Service() {
                 Log.i(TAG, "顶层任务变化：非手势导航，忽略")
             }
         }
+    }
+
+    //pri added by zhuyang,Change 2: a fresh poller per attach - one that outlived its page must never act on the next page,20261014
+    private fun startTopTaskPolling() {
+        stopTopTaskPolling()
+        val poller = TopTaskPoller(::onTopTaskChanged)
+        topTaskPoller = poller
+        poller.start()
+    }
+
+    private fun stopTopTaskPolling() {
+        val poller = topTaskPoller ?: return
+        topTaskPoller = null
+        poller.stop()
     }
     //pri added by zhuyang,Change 2: the page gives way when the top task changes (Home / Recents), as FunnyWindowService does,20261014,end
     //pri added by zhuyang,Exit path: Back on the animation window, the page has no other way out once the round stalls,20261014,end
@@ -669,6 +679,8 @@ class OverlayService : Service() {
         if (!added) return
         attached = true
         animating = true
+        //pri added by zhuyang,Change 2: the page is on screen now, so watch the top task from here (baseline read inside),20261014
+        startTopTaskPolling()
 
         //pri added by zhuyang,Take view focus for key path 1 of the exit path (the window itself is focusable, see buildWindowParams),20261014
         content.requestFocus()
@@ -694,6 +706,8 @@ class OverlayService : Service() {
         if (!attached) return
         attached = false
         animating = false
+        //pri added by zhuyang,Change 2: the page is off screen: nothing left to watch the top task for,20261014
+        stopTopTaskPolling()
         timeline.stop()
         runCatching { rippleView.onPause() }
         runCatching { windowManager.removeView(content) }
@@ -943,6 +957,8 @@ class OverlayService : Service() {
     private fun teardown() {
         //pri added by zhuyang,D1: the banner window must go even if the main view tree was never built,20261014
         hideFailBanner()
+        //pri added by zhuyang,Change 2: nothing is attached after this, so nothing may keep polling the top task,20261014
+        stopTopTaskPolling()
         startRunnable?.let { overlay.removeCallbacks(it) }
         startRunnable = null
         cancelReplay()
