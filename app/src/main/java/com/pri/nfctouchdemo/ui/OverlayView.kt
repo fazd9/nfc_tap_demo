@@ -764,6 +764,7 @@ class OverlayView @JvmOverloads constructor(
     fun setMode(mode: Mode) {
         this.mode = mode
         pressedButton = BUTTON_NONE
+        resetSendState() //pri added by zhuyang,Drop a live drag/fly state when the identity switches,20261014
         // 标题跟着身份走：发送态「发送给 X」、接收态「来自 X的分享」
         refreshTexts()
         invalidate()

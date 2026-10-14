@@ -116,6 +116,12 @@ public class Xfer {
     private BroadcastReceiver mRx;
     private ServerSocket mServer;
     private volatile Socket mPendingSocket;
+    private volatile Socket mPeerSocket;    //pri added by zhuyang,Receiver: the read connection the verdict is written back on,20261014
+    private volatile boolean mVerdictSent;  //pri added by zhuyang,Verdict is written back at most once per round,20261014
+    private volatile boolean mDoneNotified; //pri added by zhuyang,"transfer done" is delivered at most once per connection,20261014
+    private volatile int mExpect;           //pri added by zhuyang,Total image count announced by TYPE_META this round,20261014
+    private volatile int mRound;            //pri added by zhuyang,Round token: a stale verdict must not leak into the next round,20261014
+    private volatile Uri mFirstSavedUri;    //pri added by zhuyang,MediaStore Uri of the first image saved this round,20261014
 
     private boolean mReceiverRole;
     private volatile boolean mRunning = true;
@@ -225,6 +231,15 @@ public class Xfer {
         mRetry = 0;
         mPauseWarm = false;
         mReceiverRole = false;
+        //pri added by zhuyang,Bump the round token and drop the verdict session state of the previous round,20261014,start
+        mRound++;
+        try { if (mPeerSocket != null) mPeerSocket.close(); } catch (Exception ignored) {}
+        mPeerSocket = null;
+        mVerdictSent = false;
+        mDoneNotified = false;
+        mExpect = 0;
+        mFirstSavedUri = null;
+        //pri added by zhuyang,Bump the round token and drop the verdict session state of the previous round,20261014,end
         try { if (mServer != null) mServer.close(); } catch (Exception ignored) {}
         mServer = null;
         try { if (mPendingSocket != null) mPendingSocket.close(); } catch (Exception ignored) {}
@@ -737,6 +752,10 @@ public class Xfer {
         try {
             DataInputStream in = new DataInputStream(
                     new java.io.BufferedInputStream(s.getInputStream(), 256 * 1024));
+            mPeerSocket = s;        //pri added by zhuyang,Keep the socket so the verdict can be written back on it,20261014
+            mVerdictSent = false;   //pri added by zhuyang,Reset the per-connection verdict/done flags,20261014,start
+            mDoneNotified = false;
+            //pri added by zhuyang,Reset the per-connection verdict/done flags,20261014,end
             int count = 0;
             int total = 0;
             int expect = 0;
@@ -755,6 +774,7 @@ public class Xfer {
                 int len = in.readInt();
                 if (type == TYPE_META) {
                     expect = len; // 对方预告总张数:接收页文案不再回退成 1
+                    mExpect = expect; //pri added by zhuyang,Record the announced total for this round,20261014
                     final int n = expect;
                     Bus.log("传输: 对方本次共发 " + n + " 张");
                     mMain.post(new Runnable() {
@@ -779,7 +799,11 @@ public class Xfer {
                 mIo.execute(new Runnable() {
                     @Override public void run() {
                         final Bitmap bmp = decode(data);
-                        final boolean saved = saveToGallery(data);
+                        final Uri savedUri = saveToGallery(data); //pri added by zhuyang,saveToGallery now returns the MediaStore Uri,20261014
+                        if (savedUri != null && mFirstSavedUri == null) {
+                            mFirstSavedUri = savedUri; //pri added by zhuyang,Remember the first saved Uri of this round,20261014
+                        }
+                        final boolean saved = savedUri != null;
                         synchronized (all) { all.add(bmp); }
                         final int bytes = data.length;
                         mMain.post(new Runnable() {
@@ -787,20 +811,26 @@ public class Xfer {
                         });
                     }
                 });
+                //pri added by zhuyang,Two-phase protocol completion: count==expect means delivered,20261014,start
+                if (expect > 0 && count >= expect && !mDoneNotified) {
+                    mDoneNotified = true;
+                    enqueueTransferDone(all);
+                }
+                //pri added by zhuyang,Two-phase protocol completion: count==expect means delivered,20261014,end
             }
             Bus.log("传输: 接收完成,共 " + count + " 张 " + total + " 字节");
-            if (count > 0) {
-                // 接在同一单线程队列尾部:前面几张解码+入库都完成后再通知"收完",顺序保证
-                mIo.execute(new Runnable() {
-                    @Override public void run() {
-                        final java.util.List<Bitmap> list;
-                        synchronized (all) { list = new java.util.ArrayList<Bitmap>(all); }
-                        mMain.post(new Runnable() {
-                            @Override public void run() { mListener.onTransferDone(list); }
-                        });
-                    }
+            //pri added by zhuyang,EOF fallback for the done notification + expired-offer detection,20261014,start
+            if (count > 0 && !mDoneNotified) {
+                mDoneNotified = true;
+                enqueueTransferDone(all);
+            }
+            if (count == 0 && !mVerdictSent) {
+                Bus.log("传输: 对方未等表态就断开,本轮报价作废");
+                mMain.post(new Runnable() {
+                    @Override public void run() { mListener.onOfferExpired(); }
                 });
             }
+            //pri added by zhuyang,EOF fallback for the done notification + expired-offer detection,20261014,end
             if (mReceiverRole && mHotspotActive) {
                 closeHotspot();
                 Bus.log("传输: 热点已关闭,Wi-Fi 恢复可用");
@@ -808,11 +838,26 @@ public class Xfer {
         } catch (Exception e) {
             Bus.log("传输: 接收异常 " + e);
         } finally {
+            if (mPeerSocket == s) mPeerSocket = null; //pri added by zhuyang,Do not keep a dead socket for the verdict write-back,20261014
             try { s.close(); } catch (Exception ignored) {}
         }
     }
 
+    //pri added by zhuyang,Queue the done notification behind the decode tasks of this connection,20261014
+    private void enqueueTransferDone(final java.util.ArrayList<Bitmap> all) {
+        mIo.execute(new Runnable() {
+            @Override public void run() {
+                final java.util.List<Bitmap> list;
+                synchronized (all) { list = new java.util.ArrayList<Bitmap>(all); }
+                mMain.post(new Runnable() {
+                    @Override public void run() { mListener.onTransferDone(list); }
+                });
+            }
+        });
+    }
+
     /** 发送方:把选中的图片(可多张)推给对方(组主用暂存的连接,组员连组主)。 */
+    //pri modify by zhuyang,Two-phase: offer (META+one preview) first, full images only after ACCEPT,20261014
     public void sendImages(final java.util.List<Uri> uris) {
         new Thread(new Runnable() {
             @Override public void run() {
@@ -850,6 +895,32 @@ public class Xfer {
                     }
                     DataOutputStream out = new DataOutputStream(s.getOutputStream());
                     int total = 0;
+                    final int round = mRound; //pri added by zhuyang,Round token: a stale verdict is discarded by readVerdict,20261014
+                    //pri added by zhuyang,Offer stage: META(total) + one preview, then wait for the verdict,20261014,start
+                    synchronized (mWriteLock) {
+                        out.writeInt(MAGIC);
+                        out.writeInt(TYPE_META);   // 先告知总张数:接收端文案/进度用
+                        out.writeInt(uris.size());
+                        if (!uris.isEmpty()) {
+                            byte[] thumb = thumbnail(uris.get(0)); //pri added by zhuyang,Only the first preview, the receive card consumes the last one,20261014
+                            if (thumb != null) {
+                                out.writeInt(MAGIC);
+                                out.writeInt(TYPE_PREVIEW);
+                                out.writeInt(thumb.length);
+                                out.write(thumb);
+                            }
+                        }
+                        out.flush();
+                    }
+                    Bus.log("传输: 已报价(" + uris.size() + " 张 + 预览),等对方「接收/拒绝」…");
+                    int verdict = readVerdict(s, round);
+                    if (verdict != TYPE_ACCEPT) {
+                        try { s.close(); } catch (Exception ignored) {}
+                        Bus.log("传输: 对方未同意接收,整图未发出");
+                        releaseHotspotLater();
+                        return;
+                    }
+                    //pri added by zhuyang,Offer stage: META(total) + one preview, then wait for the verdict,20261014,end
                     // 预读线程:先把图读进内存,「读相册」与「写 socket」并行(读一张 ~0.2-0.4s)
                     final java.util.concurrent.ArrayBlockingQueue<Object> q =
                             new java.util.concurrent.ArrayBlockingQueue<Object>(2);
@@ -866,10 +937,8 @@ public class Xfer {
                             try { q.put(eod); } catch (InterruptedException ignored) {}
                         }
                     }).start();
+                    //pri added by zhuyang,Delivery stage: full images only after ACCEPT,20261014,start
                     synchronized (mWriteLock) {
-                    out.writeInt(MAGIC);
-                    out.writeInt(TYPE_META);   // 先告知总张数:接收端文案/进度用
-                    out.writeInt(uris.size());
                     for (int i = 0; i < uris.size(); i++) {
                         Object o = q.take();
                         if (o == eod) break;
@@ -886,15 +955,12 @@ public class Xfer {
                     s.close();
                     mPendingSocket = null;
                     Bus.log("传输: 发送完成,共 " + uris.size() + " 张 " + total + " 字节");
-                    if (mWifiNetCb != null) { // 走对方热点发的:几秒后释放,让本机 Wi-Fi 回到原网络
-                        mMain.postDelayed(new Runnable() {
-                            @Override public void run() { releaseNetworkRequest(); }
-                        }, 5000);
-                    }
+                    releaseHotspotLater();
                     final int n = total;
                     mMain.post(new Runnable() {
                         @Override public void run() { mListener.onImageSent(n); }
                     });
+                    //pri added by zhuyang,Delivery stage: full images only after ACCEPT,20261014,end
                 } catch (Exception e) {
                     fail("发送失败: " + e);
                 }
@@ -902,47 +968,104 @@ public class Xfer {
         }).start();
     }
 
-    /** 发送方:链路建立后先推预览缩略图(对方接收确认页显示照片用)。 */
-    public void sendPreviews(final java.util.List<Uri> uris) {
-        if (uris == null || uris.isEmpty()) return;
-        new Thread(new Runnable() {
+    //pri added by zhuyang,Offer/verdict layer of the two-phase protocol,20261014,start
+    //pri added by zhuyang,Sender: block up to VERDICT_WAIT_MS for ACCEPT/REJECT; 0 = no valid verdict,20261014
+    private int readVerdict(Socket s, final int round) {
+        int verdict = 0;
+        boolean stale = false;
+        try {
+            s.setSoTimeout(VERDICT_WAIT_MS);
+            DataInputStream in = new DataInputStream(
+                    new java.io.BufferedInputStream(s.getInputStream(), 8 * 1024));
+            int magic = in.readInt();
+            int type = in.readInt();
+            in.readInt(); //pri added by zhuyang,Verdict frame len is always 0: read it to stay frame-aligned,20261014
+            if (magic != MAGIC) {
+                Bus.log("传输: 回执头不匹配 " + Integer.toHexString(magic));
+            } else if (round != mRound) {
+                stale = true;
+                Bus.log("传输: 收到上一轮的回执,已忽略");
+            } else if (type == TYPE_ACCEPT || type == TYPE_REJECT) {
+                verdict = type;
+            } else {
+                Bus.log("传输: 未知的回执类型 " + type);
+            }
+        } catch (java.net.SocketTimeoutException e) {
+            Bus.log("传输: 等待对方「接收/拒绝」超时(" + (VERDICT_WAIT_MS / 1000) + "s)");
+        } catch (Exception e) {
+            Bus.log("传输: 未收到回执(对方已断开): " + e);
+        }
+        if (stale) return 0;
+        if (verdict == TYPE_ACCEPT) {
+            Bus.log("传输: 对方已确认接收");
+            mMain.post(new Runnable() {
+                @Override public void run() { mListener.onPeerAccepted(); }
+            });
+        } else if (verdict == TYPE_REJECT) {
+            Bus.log("传输: 对方拒收");
+            mMain.post(new Runnable() {
+                @Override public void run() { mListener.onPeerRejected(); }
+            });
+        } else {
+            mMain.post(new Runnable() {
+                @Override public void run() { mListener.onVerdictTimeout(); }
+            });
+        }
+        return verdict;
+    }
+
+    //pri added by zhuyang,Receiver: write the ACCEPT verdict back (images follow from the peer),20261014
+    public void confirmReceived() {
+        writeVerdict(TYPE_ACCEPT);
+    }
+
+    //pri added by zhuyang,Receiver: write the REJECT verdict back (no image was ever sent),20261014
+    public void rejectTransfer() {
+        writeVerdict(TYPE_REJECT);
+    }
+
+    //pri added by zhuyang,Write the verdict on the same connection at most once per round,20261014
+    private void writeVerdict(final int type) {
+        if (mVerdictSent) {
+            Bus.log("传输: 本轮回执已发过,忽略");
+            return;
+        }
+        final Socket s = mPeerSocket;
+        if (s == null || s.isClosed() || !s.isConnected()) {
+            Bus.log("传输: 回执写回失败(连接已关闭) type=" + type);
+            return;
+        }
+        mVerdictSent = true;
+        mIo.execute(new Runnable() {
             @Override public void run() {
                 try {
-                    // 连接可能还没就绪：发送方的 onP2pReady 在"P2P 组刚建好"时就回调（见本文件
-                    // 组信息回调那里），那一刻 mPendingSocket 还是 null。原实现只试一次就 return，
-                    // 预览图直接被丢掉 → 对方确认页永远停在占位图（真机现象：接收端一直是那张山海占位图）。
-                    // 所以这里等最多 10 秒，拿到"已连接"的 socket 再推。
-                    Socket s = null;
-                    for (int i = 0; i < 20 && mRunning; i++) {
-                        Socket cur = mPendingSocket;
-                        if (cur != null && cur.isConnected() && !cur.isClosed()) { s = cur; break; }
-                        try { Thread.sleep(500); } catch (InterruptedException ignored) {}
-                    }
-                    if (s == null) {
-                        Bus.log("传输: 预览暂不可发(等 10 秒仍无连接),对方确认页将显示占位图");
-                        return;
-                    }
                     DataOutputStream out = new DataOutputStream(s.getOutputStream());
-                    int sent = 0;
                     synchronized (mWriteLock) {
-                    for (Uri uri : uris) {
-                        if (sent >= 3) break; // 最多推 3 张预览
-                        byte[] thumb = thumbnail(uri);
-                        if (thumb == null) continue;
                         out.writeInt(MAGIC);
-                        out.writeInt(TYPE_PREVIEW);
-                        out.writeInt(thumb.length);
-                        out.write(thumb);
-                        sent++;
+                        out.writeInt(type);
+                        out.writeInt(0);
+                        out.flush();
                     }
-                    out.flush();
-                    }
-                    Bus.log("传输: 已推送 " + sent + " 张预览图");
+                    Bus.log("传输: 已" + (type == TYPE_ACCEPT ? "同意接收" : "拒绝接收") + ",回执已写回");
                 } catch (Exception e) {
-                    Bus.log("传输: 预览推送失败 " + e);
+                    Bus.log("传输: 回执写回异常 " + e);
                 }
             }
-        }).start();
+        });
+    }
+
+    //pri added by zhuyang,MediaStore Uri of the first image saved this round (null = nothing saved),20261014
+    public Uri firstSavedUri() {
+        return mFirstSavedUri;
+    }
+    //pri added by zhuyang,Offer/verdict layer of the two-phase protocol,20261014,end
+
+    //pri added by zhuyang,Release the hotspot network only after the whole transaction finished,20261014
+    private void releaseHotspotLater() {
+        if (mWifiNetCb == null) return;
+        mMain.postDelayed(new Runnable() {
+            @Override public void run() { releaseNetworkRequest(); }
+        }, 5000);
     }
 
     private byte[] thumbnail(Uri uri) {
@@ -1027,8 +1150,9 @@ public class Xfer {
         }
     }
 
-    private boolean saveToGallery(byte[] data) {
-        if (Build.VERSION.SDK_INT < 29) return false; // 老版本要写权限,demo 不处理
+    //pri added by zhuyang,Returns the MediaStore Uri (null on failure / API below 29),20261014
+    private Uri saveToGallery(byte[] data) {
+        if (Build.VERSION.SDK_INT < 29) return null; // 老版本要写权限,demo 不处理
         try {
             android.content.ContentValues v = new android.content.ContentValues();
             v.put(android.provider.MediaStore.Images.Media.DISPLAY_NAME,
@@ -1038,15 +1162,15 @@ public class Xfer {
                     android.os.Environment.DIRECTORY_PICTURES + "/NfcTapDemo");
             Uri u = mCtx.getContentResolver().insert(
                     android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, v);
-            if (u == null) return false;
+            if (u == null) return null;
             java.io.OutputStream os = mCtx.getContentResolver().openOutputStream(u);
-            if (os == null) return false;
+            if (os == null) return null;
             os.write(data);
             os.close();
-            return true;
+            return u;
         } catch (Throwable t) {
             Bus.log("传输: 存相册失败 " + t);
-            return false;
+            return null;
         }
     }
 }

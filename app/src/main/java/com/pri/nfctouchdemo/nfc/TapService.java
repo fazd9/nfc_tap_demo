@@ -34,7 +34,9 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
     private final Handler mMain = new Handler(Looper.getMainLooper());
     private String mPeerLabel = "--------";
     private volatile boolean mLinkReady;
-    private volatile boolean mPreviewsSent;
+    private volatile boolean mUserWantsSend;                            //pri added by zhuyang,Local user swiped: this phone is the sender,20261014
+    private boolean mSendStarted;                                       //pri added by zhuyang,sendImages already handed over this round,20261014
+    private boolean mRejected;                                          //pri added by zhuyang,Peer transfer rejected this round (blocks re-showing),20261014
     private Bitmap mLastBmp;                                            // 最近一张预览 / 整图(动效层卡片 + 预览落盘都用它)
     private boolean mAccepted;
     private int mPreviewCount;
@@ -103,17 +105,23 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         if (intent != null && OverlayService.ACTION_UI_SEND_CONFIRMED.equals(intent.getAction())) {
             // 等价于旧 SendPage.Listener.onSwipedSend():上滑过阈值那一刻
             if (sXfer == null || PENDING.isEmpty()) return START_STICKY;
-            if (!mLinkReady) {
-                // 还没连上就上滑:给状态行提示,不去发图(动效层自己的回弹动画负责把卡片放回去,
-                // 旧实现这里调 mSendPage.resetStack(),现已由动效层内部处理,故不再调用)
-                startService(OverlayService.statusIntent(this, "正在连接对方,请稍候…(就绪后再上滑)"));
+            //pri modify by zhuyang,Swipe now declares the sender role and triggers the link negotiation,20261014,start
+            mUserWantsSend = true;
+            if (mLinkReady) {
+                if (!mSendStarted) {
+                    mSendStarted = true;
+                    sXfer.sendImages(new ArrayList<Uri>(PENDING));
+                }
                 return START_STICKY;
             }
-            sXfer.sendImages(new ArrayList<Uri>(PENDING));
+            startService(OverlayService.statusIntent(this, "正在连接对方,请稍候…"));
+            sXfer.startAsSender();
+            //pri modify by zhuyang,Swipe now declares the sender role and triggers the link negotiation,20261014,end
         }
         if (intent != null && OverlayService.ACTION_UI_RECEIVE_ACCEPT.equals(intent.getAction())) {
             // 等价于旧 ReceivePage.Listener.onAccept():用户点了"接收 N 张照片"
             mAccepted = true;
+            if (sXfer != null) sXfer.confirmReceived(); //pri added by zhuyang,Write the ACCEPT verdict back on the same socket,20261014
             if (mTransferDone && mFullCount > 0) { // 已经收完,直接看全部
                 mReceiveShown = false;
                 startService(OverlayService.hideIntent(this)); // 摘掉动效窗口,查看器改用旧的 Overlay
@@ -127,6 +135,8 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         if (intent != null && OverlayService.ACTION_UI_RECEIVE_REJECT.equals(intent.getAction())) {
             // 等价于旧 ReceivePage.Listener.onReject():用户点了"拒绝"
             Bus.log("已拒绝接收");
+            if (sXfer != null) sXfer.rejectTransfer(); //pri added by zhuyang,Write the REJECT verdict back (no image was ever sent),20261014
+            mRejected = true; //pri added by zhuyang,Set before hideIntent: the fallback path must not re-open the card,20261014
             Bus.unlockRole();
             startService(OverlayService.hideIntent(this)); // 摘掉动效窗口(服务继续常驻,等下轮碰触)
             mAccepted = false;
@@ -171,26 +181,26 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         mLinkReady = false; // 新一轮:连接就绪状态重置
         mSendShown = false;    // 新一轮:本轮"发送页已弹"标记清零(替代原来 mSendPage 字段的生命周期)
         mReceiveShown = false; // 同理,接收页标记清零
-        // 角色只由"本机有没有选中照片"决定,与 NFC 的"读/被读"方向无关
-        final String label = "用户" + (field(payload, "t") == null ? "--------" : field(payload, "t"));
+        mUserWantsSend = false; //pri added by zhuyang,New round: role flags reset,20261014,start
+        mSendStarted = false;
+        mRejected = false;
+        mLastBmp = null;        //pri added by zhuyang,Preview bitmap is sticky across rounds,20261014
+        //pri added by zhuyang,New round: role flags reset,20261014,end
+        final String label = peerName(payload);
         Xfer x = xfer(this);
         x.setExpectedPeer(field(payload,"n"), field(payload,"b"), field(payload,"p"),
                 field(payload,"a"), field(payload,"ip"), field(payload,"hs"), field(payload,"hp"));
         x.startAsReceiver(); // 服务端先就绪
         if (!Bus.lockRole()) { Bus.log("角色已定,忽略重复的碰触事件"); return; }
         mPeerLabel = label;
-        if (PENDING.isEmpty()) {
-            Bus.log("本机无照片 → 本机是接收方");
-            x.startHotspot(); // 接收方起本地热点(SSID/密码进 payload,对方下次碰可直接接入;Wi-Fi 开着会启失败并提示)
-            mMain.post(new Runnable() { @Override public void run() { showReceivePage(label); } });
-        } else {
-            Bus.log("本机有照片 → 本机是发送方");
-            // 发送页**立刻**弹:以前要等 onP2pReady,链路一旦卡在"连接中",用户那边就是白屏、
-            // 完全没反应(失败时 onXferFailed 也只往一个还不存在的页面写状态行)。
-            // showSendPage() 内部有 mSendShown 幂等,onP2pReady 里那次调用不会重复建页。
+        //pri modify by zhuyang,Both phones only prepare to receive; the role is decided at swipe time,20261014,start
+        x.startHotspot(); //pri added by zhuyang,Unconditional: both sides prepare for a possible receive,20261014
+        if (hasPending()) {
             showSendPage();
-            x.startAsSender();
+        } else {
+            Bus.log("本机无照片 → 本机是接收候选,等对方上滑");
         }
+        //pri modify by zhuyang,Both phones only prepare to receive; the role is decided at swipe time,20261014,end
     }
 
     /**
@@ -208,7 +218,6 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
             // NFC 场景拿不到"对方屏幕画面",就把要发送的第一张照片自己当折射背景:
             // 涟漪/折射的取色与卡片内容一致,视觉上像"这张照片从对方那边荡开",不需要额外截图权限。
             final Uri backdrop = PENDING.get(0);
-            mPreviewsSent = false;
             // 带上对端标识和张数:动效页标题就是产品里那句「发送给 用户XXXX」,
             // 上滑提示是「上滑发送 N 张照片」(不给 peer 时会退回动效层自带的默认文案)。
             startForegroundService(OverlayService.intent(
@@ -222,23 +231,22 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
     @Override
     public void onP2pReady(boolean isGroupOwner, String goAddress) {
         mLinkReady = true;
-        final boolean sender = !PENDING.isEmpty();
         mMain.post(new Runnable() { @Override public void run() { // 回到主线程再改 UI
-            if (sender) {
-                showSendPage(); // 连接就绪才弹(见 onPeer 里的说明);内部有 mSendShown 幂等
-                if (mSendShown) startService(OverlayService.statusIntent(TapService.this, "已连接,上滑发送即可"));
-            } else if (mReceiveShown) {
-                startService(OverlayService.statusIntent(TapService.this, "已连接,等待接收…"));
-            }
-        }});
-        if (sender && sXfer != null) {
-            synchronized (this) { // 原子防重:两个后台线程同时回调时也只推一次
-                if (!mPreviewsSent) {
-                    mPreviewsSent = true;
-                    sXfer.sendPreviews(new ArrayList<Uri>(PENDING));
+            //pri modify by zhuyang,Role-aware guard: never paint the send page over the receive card,20261014,start
+            if (mUserWantsSend) {
+                startService(OverlayService.statusIntent(TapService.this, "正在发送…"));
+                if (!mSendStarted) {
+                    mSendStarted = true;
+                    sXfer.sendImages(new ArrayList<Uri>(PENDING));
                 }
+            } else if (mReceiveShown || mRejected) {
+                startService(OverlayService.statusIntent(TapService.this, "已连接,等待接收…"));
+            } else if (hasPending()) {
+                showSendPage();
+                startService(OverlayService.statusIntent(TapService.this, "已连接,上滑发送即可"));
             }
-        }
+            //pri modify by zhuyang,Role-aware guard: never paint the send page over the receive card,20261014,end
+        }});
     }
 
     @Override public void onPreview(Bitmap bmp) {
@@ -252,12 +260,19 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
     }
 
     @Override public void onSendStarted(int total) {
-        mTotalCount = total;
-        if (mReceiveShown) {
-            // 动效层接收页的按钮文案张数来自 receiveIntent 的 count(=1);真实总张数到了,用状态行补正
-            startService(OverlayService.statusIntent(this,
-                    "已收到 " + mFullCount + "/" + Math.max(total, mFullCount) + " 张"));
-        }
+        //pri modify by zhuyang,Receive card appears here (with the real count) instead of at tap time,20261014,start
+        if (mUserWantsSend) return;
+        if (mRejected) return;
+        mTotalCount = Math.max(total, 0);
+        mMain.post(new Runnable() { @Override public void run() {
+            if (mReceiveShown) {
+                startService(OverlayService.peerIntent(TapService.this, mPeerLabel, Math.max(1, mTotalCount)));
+                return;
+            }
+            if (hasPending()) { switchSendPageToReceive(); return; }
+            showReceivePage(mPeerLabel, mTotalCount);
+        }});
+        //pri modify by zhuyang,Receive card appears here (with the real count) instead of at tap time,20261014,end
     }
 
     @Override
@@ -265,8 +280,8 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         mFullCount = index;
         mLastBmp = bmp;
         // 图片到达:必须经过"接收确认"这一步(动效层接收页还没起来就先补起来)
-        if (!mReceiveShown) {
-            showReceivePage(mPeerLabel);
+        if (!mReceiveShown && !mRejected) { //pri modify by zhuyang,Narrow the fallback: never re-open the card after a reject,20261014
+            showReceivePage(mPeerLabel, mTotalCount);
         }
         if (bmp != null) {
             Uri u = previewUriOrNull();
@@ -318,13 +333,21 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         Bus.unlockRole();
     }
 
-    //pri added by zhuyang,Stubs for the two-phase protocol callbacks (batch 1: interface only),20261014,start
+    //pri added by zhuyang,Two-phase protocol callbacks,20261014,start
     @Override public void onOfferExpired() {
         Bus.log("服务: 对方超时未发货,本轮结束");
+        if (!mReceiveShown) return;
+        mReceiveShown = false;
+        mRejected = true; //pri added by zhuyang,This round must not re-open the card,20261014
+        startService(OverlayService.hideIntent(this));
+        Bus.unlockRole();
     }
 
     @Override public void onPeerRejected() {
+        //pri added by zhuyang,Voluntary reject: keep off onXferFailed; batch 3 swaps the status line for the fail banner,20261014
         Bus.log("服务: 对方拒收");
+        Bus.unlockRole();
+        startService(OverlayService.statusIntent(this, "发送失败:对方拒收"));
     }
 
     @Override public void onPeerAccepted() {
@@ -332,9 +355,12 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
     }
 
     @Override public void onVerdictTimeout() {
-        Bus.log("服务: 等待对方回执超时");
+        //pri added by zhuyang,No verdict within VERDICT_WAIT_MS; batch 3 swaps the status line for the fail banner,20261014
+        Bus.log("服务: 对方未响应(等回执超时)");
+        Bus.unlockRole();
+        startService(OverlayService.statusIntent(this, "发送失败:对方未响应"));
     }
-    //pri added by zhuyang,Stubs for the two-phase protocol callbacks (batch 1: interface only),20261014,end
+    //pri added by zhuyang,Two-phase protocol callbacks,20261014,end
 
     /** 读取对方(接收方动作,由透明跳板转交)。 */
     private void handleTag(final android.nfc.Tag tag) {
@@ -369,14 +395,38 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
      * 旧实现是 new ReceivePage(...) 自绘控件;现在由 OverlayService.receiveIntent 承担。
      * 接收页那张照片:Xfer 回调给的是 Bitmap,塞不进 Intent(有大小限制),先落成缓存文件再给 file:// Uri。
      */
-    private void showReceivePage(String label) {
+    private void showReceivePage(String label, int count) {
         if (mReceiveShown) return; // 幂等:图片到达时可能会再调一次(替代原来 mReceivePage != null 的判断)
         mReceiveShown = true;
         mAccepted = false; mPreviewCount = 0; mFullCount = 0;
-        mTotalCount = 0; mTransferDone = false; mBmps.clear();
-        startForegroundService(OverlayService.receiveIntent(this, label, 1, previewUriOrNull()));
-        startService(OverlayService.statusIntent(this, "正在连接对方…"));
+        mTransferDone = false; mBmps.clear();
+        //pri modify by zhuyang,Use the real announced count and pick the status line by link state,20261014
+        startForegroundService(OverlayService.receiveIntent(this, label, Math.max(1, count), previewUriOrNull()));
+        startService(OverlayService.statusIntent(this, mLinkReady ? "已连接,等待接收…" : "正在连接对方…"));
     }
+
+    //pri added by zhuyang,Loser side of the race: the live send page becomes the receive card in place,20261014,start
+    private void switchSendPageToReceive() {
+        mSendShown = false;
+        mReceiveShown = true;
+        mAccepted = false; mPreviewCount = 0; mFullCount = 0; mTransferDone = false;
+        mBmps.clear(); mLastBmp = null;
+        startForegroundService(OverlayService.receiveIntent(this, mPeerLabel,
+                Math.max(1, mTotalCount), previewUriOrNull()));
+        startService(OverlayService.statusIntent(this, mLinkReady ? "已连接,等待接收…" : "正在连接对方…"));
+    }
+    //pri added by zhuyang,Loser side of the race: the live send page becomes the receive card in place,20261014,end
+
+    //pri added by zhuyang,D3: peer display name = Bluetooth name, then model name,20261014,start
+    private static String peerName(String payload) {
+        String b = field(payload, "b");
+        String n = field(payload, "n");
+        if (b != null && !b.isEmpty() && !"?".equals(b)) return b;
+        if (n != null && !n.isEmpty() && !"?".equals(n)) return n;
+        String t = field(payload, "t");
+        return "用户" + (t == null ? "--------" : t);
+    }
+    //pri added by zhuyang,D3: peer display name = Bluetooth name, then model name,20261014,end
 
     /**
      * 把最近一张预览 / 整图落成缓存文件并返回 file:// Uri(没有图返回 null)。

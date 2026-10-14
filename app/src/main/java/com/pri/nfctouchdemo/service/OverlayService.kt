@@ -237,6 +237,16 @@ class OverlayService : Service() {
         if (intent?.hasExtra(EXTRA_STATUS) == true) statusText = intent.getStringExtra(EXTRA_STATUS)
         uriExtra(intent, EXTRA_PHOTO)?.let { photoUri = it }
 
+        //pri added by zhuyang,Live switch: a visible SEND page becomes the RECEIVE card in place,20261014,start
+        if (rootView != null && attached && mode == OverlayView.Mode.SEND) {
+            mode = OverlayView.Mode.RECEIVE
+            overlay.setMode(mode)
+            overlay.setPeerInfo(peerLabel, peerCount)
+            overlay.setStatus(statusText)
+            return
+        }
+        //pri added by zhuyang,Live switch: a visible SEND page becomes the RECEIVE card in place,20261014,end
+
         if (!Settings.canDrawOverlays(this)) {
             Toast.makeText(this, R.string.toast_need_overlay, Toast.LENGTH_SHORT).show()
             ensureForeground()
@@ -515,7 +525,8 @@ class OverlayService : Service() {
             overlay.applyTimeline(elapsed, ripple)
         }
         // 一次上滑发送结束：复位时间轴
-        overlay.onSendFinished = { timeline.reset() }
+        //pri added by zhuyang,Also drop the window: after the offer the sender waits up to 60s,20261014
+        overlay.onSendFinished = { timeline.reset(); hideDemo() }
         // 上滑越过阈值那一刻：只回执给 NFC 层，动效自己继续把卡片飞走
         overlay.onSendConfirmed = { notifyNfc(ACTION_UI_SEND_CONFIRMED) }
         // 接收页的两个按钮

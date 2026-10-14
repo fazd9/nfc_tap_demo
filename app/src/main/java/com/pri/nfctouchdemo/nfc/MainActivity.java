@@ -489,7 +489,6 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback,
             } else {
                 setState("✅ 已连接,上滑发送即可", Color.parseColor("#2E7D32"));
                 setOverlayStatus("已连接,上滑发送即可");
-                mXfer.sendPreviews(mSendUris); // 链路一好就把预览推给对方(接收确认页显示照片)
             }
         }
 
