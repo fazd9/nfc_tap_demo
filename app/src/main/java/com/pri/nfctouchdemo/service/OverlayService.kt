@@ -261,6 +261,9 @@ class OverlayService : Service() {
     private fun startReceiveFlow(intent: Intent?) {
         hideFailBanner()
         cancelDissolve() //pri added by zhuyang,E5: the new round owns the window,20261014
+        //pri added by zhuyang,Live switch: capture the previous identity before `mode` is overwritten,20261014,start
+        val wasSend = mode == OverlayView.Mode.SEND
+        //pri added by zhuyang,Live switch: capture the previous identity before `mode` is overwritten,20261014,end
         mode = OverlayView.Mode.RECEIVE
         if (intent?.hasExtra(EXTRA_PEER) == true) peerLabel = intent.getStringExtra(EXTRA_PEER)
         // 没有新的张数就沿用上一轮（重播时不该把「接收 3 张照片」缩回 1 张）
@@ -268,16 +271,15 @@ class OverlayService : Service() {
         if (intent?.hasExtra(EXTRA_STATUS) == true) statusText = intent.getStringExtra(EXTRA_STATUS)
         uriExtra(intent, EXTRA_PHOTO)?.let { photoUri = it }
 
-        //pri added by zhuyang,Live switch: a visible SEND page becomes the RECEIVE card in place,20261014,start
-        if (rootView != null && attached && mode == OverlayView.Mode.SEND) {
-            mode = OverlayView.Mode.RECEIVE
+        //pri added by zhuyang,Live switch: a SEND page visible at entry becomes the RECEIVE card in place,20261014,start
+        if (rootView != null && attached && wasSend) {
             overlay.setMode(mode)
             overlay.setPeerInfo(peerLabel, peerCount)
             overlay.setStatus(statusText)
             overlay.setAcceptInProgress(false) //pri added by zhuyang,E4: the swapped-in identity starts from the two-pill state,20261014
             return
         }
-        //pri added by zhuyang,Live switch: a visible SEND page becomes the RECEIVE card in place,20261014,end
+        //pri added by zhuyang,Live switch: a SEND page visible at entry becomes the RECEIVE card in place,20261014,end
 
         if (!Settings.canDrawOverlays(this)) {
             Toast.makeText(this, R.string.toast_need_overlay, Toast.LENGTH_SHORT).show()
