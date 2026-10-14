@@ -24,6 +24,7 @@ import android.os.Looper
 import android.provider.Settings
 import android.util.Log
 import android.view.Gravity
+import android.view.KeyEvent //pri added by zhuyang,Back key exit of the animation window,20261014
 import android.view.LayoutInflater
 import android.view.MotionEvent
 import android.view.View
@@ -545,6 +546,25 @@ class OverlayService : Service() {
     }
     //pri added by zhuyang,E5: a pending dissolve must never detach the next round's window,20261014,end
 
+    //pri added by zhuyang,Exit path: Back on the animation window, the page has no other way out once the round stalls,20261014,start
+    //pri added by zhuyang,Act on ACTION_DOWN: with back-navigation enabled the UP of a window without a back callback arrives cancelled,20261014
+    private fun handlePageKey(keyCode: Int, event: KeyEvent): Boolean {
+        if (keyCode != KeyEvent.KEYCODE_BACK) return false
+        if (event.action == KeyEvent.ACTION_DOWN) dismissPage()
+        return true
+    }
+
+    //pri added by zhuyang,Same teardown as the normal end of a round: detach the window, the service stays resident,20261014
+    //pri added by zhuyang,Send page has no cancel in the product flow, so this side reports nothing to the NFC layer (same as the notification's close action),20261014
+    private fun dismissPage() {
+        //pri added by zhuyang,Receiving page goes out exactly like the reject pill, otherwise the next incoming image would re-open the card,20261014
+        if (mode == OverlayView.Mode.RECEIVE) notifyNfc(ACTION_UI_RECEIVE_REJECT)
+        hideDemo()
+        //pri added by zhuyang,Drop a live drag / fly / dissolve so the detached view tree does not carry it into the next round,20261014
+        overlay.resetSendState()
+    }
+    //pri added by zhuyang,Exit path: Back on the animation window, the page has no other way out once the round stalls,20261014,end
+
     // ---------------------------------------------------------------- 动效层 ↔ NFC 层
 
     /**
@@ -572,6 +592,16 @@ class OverlayService : Service() {
         overlay = content.findViewById(R.id.overlay)
         particleView = content.findViewById(R.id.particles) //pri added by zhuyang,E7: topmost layer,20261014
         rootView = content
+
+        //pri added by zhuyang,Exit path: the window eats every touch, so a stalled page used to lock the whole phone; Back now dismisses it,20261014,start
+        //pri added by zhuyang,Key path 1: a ViewGroup consults its own key listener only while it is the focused view,20261014
+        content.isFocusableInTouchMode = true
+        content.setOnKeyListener { _, keyCode, event -> handlePageKey(keyCode, event) }
+        //pri added by zhuyang,Key path 2: a view added by a service has no Window.Callback, unhandled keys go to the root's unhandled listeners,20261014
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            content.setOnUnhandledKeyEventListener { _, event -> handlePageKey(event.keyCode, event) }
+        }
+        //pri added by zhuyang,Exit path: the window eats every touch, so a stalled page used to lock the whole phone; Back now dismisses it,20261014,end
 
         // 时间轴：每推进一帧同时刷新水波、背景模糊与 2D 图层
         val tl = Timeline(overlay)
@@ -615,6 +645,9 @@ class OverlayService : Service() {
         if (!added) return
         attached = true
         animating = true
+
+        //pri added by zhuyang,Take view focus for key path 1 of the exit path (the window itself is focusable, see buildWindowParams),20261014
+        content.requestFocus()
 
         // GL 的 onResume 要等视图真的挂上窗口，否则 surface 拿不到
         rippleView.onResume()
@@ -682,15 +715,25 @@ class OverlayService : Service() {
      */
     private fun buildWindowParams(): WindowManager.LayoutParams {
         val size = displaySize()
-        val flags = WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+        //pri modify by zhuyang,Window is focusable now (FLAG_NOT_FOCUSABLE dropped): Back must reach this window, it is the exit of a stalled page,20261014,start
+        //pri modify by zhuyang,FLAG_NOT_TOUCH_MODAL now set explicitly - FLAG_NOT_FOCUSABLE used to imply it, so touch routing stays exactly what it is today,20261014
+        val flags = WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or
             WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN or
             WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS or
             WindowManager.LayoutParams.FLAG_HARDWARE_ACCELERATED
+        //pri modify by zhuyang,Touch-through keeps its old meaning: the window takes neither touches nor keys,20261014
+        val windowFlags = if (touchThrough) {
+            flags or WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+        } else {
+            flags
+        }
+        //pri modify by zhuyang,Window is focusable now (FLAG_NOT_FOCUSABLE dropped): Back must reach this window, it is the exit of a stalled page,20261014,end
         val params = WindowManager.LayoutParams(
             size.x,
             size.y,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            if (touchThrough) flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE else flags,
+            windowFlags,
             PixelFormat.TRANSLUCENT
         )
         params.gravity = Gravity.TOP or Gravity.START
@@ -731,11 +774,15 @@ class OverlayService : Service() {
         val view = rootView
         if (view != null) {
             val params = view.layoutParams as WindowManager.LayoutParams
+            //pri modify by zhuyang,Mirror buildWindowParams: touch-through takes the window out of key handling too, otherwise it would keep focus and swallow every key of the app below,20261014,start
             params.flags = if (through) {
-                params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+                params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
             } else {
-                params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+                params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv() and
+                    WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE.inv()
             }
+            //pri modify by zhuyang,Mirror buildWindowParams: touch-through takes the window out of key handling too, otherwise it would keep focus and swallow every key of the app below,20261014,end
             // 窗口此刻可能已经被摘掉：参数照改（buildWindowParams 会带上 FLAG_NOT_TOUCHABLE），
             // 但不去动 WindowManager —— 否则同样是主线程 Fatal
             updateWindowLayout(view, params)
