@@ -53,10 +53,13 @@ class TaskStackWatcher(private val onTopTaskChanged: () -> Unit) : Binder() {
             val service = Class.forName("android.app.ActivityTaskManager")
                 .getMethod("getService").invoke(null)!!
             val proxy = Proxy.newProxyInstance(iface.classLoader, arrayOf(iface), handler)
-            iface.getMethod("registerTaskStackListener", iface).invoke(service, proxy)
+            //pri modify by zhuyang,register/unregisterTaskStackListener are declared on IActivityTaskManager (the interface getService returns), not on ITaskStackListener,20261014,start
+            val iatm = Class.forName("android.app.IActivityTaskManager")
+            iatm.getMethod("registerTaskStackListener", iface).invoke(service, proxy)
             unregisterAction = {
-                iface.getMethod("unregisterTaskStackListener", iface).invoke(service, proxy)
+                iatm.getMethod("unregisterTaskStackListener", iface).invoke(service, proxy)
             }
+            //pri modify by zhuyang,register/unregisterTaskStackListener are declared on IActivityTaskManager (the interface getService returns), not on ITaskStackListener,20261014,end
         }.onFailure { Log.e(TAG, "注册顶层任务监听失败", it) }
     }
 
