@@ -4,6 +4,7 @@ import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.util.AttributeSet;
 import android.view.View;
 
 import java.util.ArrayList;
@@ -26,6 +27,12 @@ public class ParticleView extends View {
     public ParticleView(Context c) {
         super(c);
     }
+
+    //pri added by zhuyang,Fix XML inflation: LayoutInflater needs the (Context, AttributeSet) form,20261014,start
+    public ParticleView(Context c, AttributeSet a) {
+        super(c, a);
+    }
+    //pri added by zhuyang,Fix XML inflation: LayoutInflater needs the (Context, AttributeSet) form,20261014,end
 
     /** 从 (cx, cy) 迸发 n 颗粒子。 */
     public void burst(float cx, float cy, int n) {
