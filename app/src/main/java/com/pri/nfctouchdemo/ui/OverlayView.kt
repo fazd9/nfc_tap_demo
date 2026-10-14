@@ -553,6 +553,12 @@ class OverlayView @JvmOverloads constructor(
         /** 卡片飞走（向上飘出屏幕）的时长。 */
         const val FLY_MS = 460L
 
+        //pri added by zhuyang,E7: photo over-exposure to white at the send moment (video ~0.1s),20261014
+        const val SEND_WHITE_IN_MS = 100f
+
+        //pri added by zhuyang,E7: hold the whitened card before the fly-away (video holds until the transfer ends; a fixed 700ms is the agreed compromise),20261014
+        const val SEND_HOLD_MS = 700L
+
         /**
          * 卡片飞走之后，隔多久复位时间轴、重播入场。
          *
@@ -709,6 +715,9 @@ class OverlayView @JvmOverloads constructor(
         const val BUTTON_NONE = 0
         const val BUTTON_PRIMARY = 1
         const val BUTTON_SECONDARY = 2
+
+        //pri added by zhuyang,E4: crossfade of the two pills into the single cancel pill (video 0.20-0.25s),20261014
+        const val CANCEL_SWAP_MS = 220f
     }
 
     /** 状态栏高度，避免面板文字被系统栏压住。 */
@@ -728,11 +737,17 @@ class OverlayView @JvmOverloads constructor(
     /** 上滑越过 [SEND_THRESHOLD_DP] 判定成立的**那一刻**回调（先于飞走动画），一次手势只回调一次。 */
     var onSendConfirmed: (() -> Unit)? = null
 
+    //pri added by zhuyang,E7: particle burst origin (centre of the photo area); wired by OverlayService,20261014
+    var onSendBurst: ((Float, Float) -> Unit)? = null
+
     /** 接收态点主按钮（「接收 N 张照片」）。 */
     var onReceiveAccepted: (() -> Unit)? = null
 
     /** 接收态点次按钮（「拒绝」）。 */
     var onReceiveRejected: (() -> Unit)? = null
+
+    //pri added by zhuyang,E4: receiving-state cancel callback (same slot as onReceiveRejected),20261014
+    var onReceiveCancel: (() -> Unit)? = null
 
     /** 当前身份；默认 [Mode.SEND] —— 单独演示这个动效页时和以前一模一样。 */
     var mode: Mode = Mode.SEND
@@ -747,6 +762,12 @@ class OverlayView @JvmOverloads constructor(
 
     /** 接收态按下的是哪一枚按钮（[BUTTON_NONE] = 没按中 / 已经抬起）。 */
     private var pressedButton = BUTTON_NONE
+
+    //pri added by zhuyang,E4: receiving state - the two pills crossfade into one cancel pill,20261014,start
+    private var acceptInProgress = false
+    private var cancelMix = 0f //pri added by zhuyang,0 = two pills, 1 = cancel pill only,20261014
+    private var cancelAnimator: ValueAnimator? = null
+    //pri added by zhuyang,E4: receiving state - the two pills crossfade into one cancel pill,20261014,end
 
     /** 上滑确认是否已经回调过（一次手势只回调一次，见 [startFlyAway]）。 */
     private var sendConfirmedNotified = false
@@ -769,6 +790,27 @@ class OverlayView @JvmOverloads constructor(
         refreshTexts()
         invalidate()
     }
+
+    //pri added by zhuyang,E4: enter/leave the receiving state (two pills crossfade into one cancel pill),20261014,start
+    fun setAcceptInProgress(v: Boolean) {
+        if (acceptInProgress == v) return
+        acceptInProgress = v
+        pressedButton = BUTTON_NONE
+        cancelAnimator?.cancel()
+        val from = cancelMix
+        val to = if (v) 1f else 0f
+        cancelAnimator = ValueAnimator.ofFloat(from, to).apply {
+            duration = CANCEL_SWAP_MS.toLong()
+            interpolator = LinearInterpolator()
+            addUpdateListener { va ->
+                cancelMix = va.animatedValue as Float
+                invalidate()
+            }
+            start()
+        }
+        invalidate()
+    }
+    //pri added by zhuyang,E4: enter/leave the receiving state (two pills crossfade into one cancel pill),20261014,end
 
     /**
      * 对方标识 + 张数，改完面板文案跟着换。
@@ -829,6 +871,19 @@ class OverlayView @JvmOverloads constructor(
         cardMeta = defaultCardMeta
         invalidate()
     }
+
+    //pri added by zhuyang,E5: dissolve the whole layer over ms; the host detaches the window afterwards,20261014,start
+    fun fadeOutPanel(ms: Long) {
+        fadeOutAnimator?.cancel()
+        alpha = 1f
+        fadeOutAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = ms
+            interpolator = LinearInterpolator()
+            addUpdateListener { va -> this@OverlayView.alpha = 1f - (va.animatedValue as Float) }
+            start()
+        }
+    }
+    //pri added by zhuyang,E5: dissolve the whole layer over ms; the host detaches the window afterwards,20261014,end
 
     // ---- 时间轴状态 ----
     private var elapsed = 0L
@@ -940,6 +995,13 @@ class OverlayView @JvmOverloads constructor(
     private var flyAnimator: ValueAnimator? = null
     private var resetRunnable: Runnable? = null
 
+    //pri added by zhuyang,Round-scoped state of E5 (dissolve) and E7 (send whitening + hold),20261014,start
+    private var fadeOutAnimator: ValueAnimator? = null
+    private var photoWhite = 0f
+    private var whiteAnimator: ValueAnimator? = null
+    private var holdRunnable: Runnable? = null
+    //pri added by zhuyang,Round-scoped state of E5 (dissolve) and E7 (send whitening + hold),20261014,end
+
     // ---- 文案 ----
     // 内置默认文案：`peer == null` / `count <= 0` 时用的就是这几条（单独演示动效页的画面不变）
     private val defaultReceiverText = context.getString(R.string.panel_receiver)
@@ -959,6 +1021,9 @@ class OverlayView @JvmOverloads constructor(
 
     /** 接收态次按钮文案（「拒绝」）。 */
     private var receiveRejectText = context.getString(R.string.receive_reject)
+
+    //pri added by zhuyang,E4: label of the single pill shown while the receiving state is in progress,20261014
+    private var receiveCancelText = context.getString(R.string.receive_cancel)
 
     /**
      * 发送页要不要用 NFC 层给过来的对端标识 / 张数改写文案。
@@ -1005,6 +1070,7 @@ class OverlayView @JvmOverloads constructor(
             context.getString(R.string.receive_accept)
         }
         receiveRejectText = context.getString(R.string.receive_reject)
+        receiveCancelText = context.getString(R.string.receive_cancel) //pri added by zhuyang,E4: cancel pill label,20261014
     }
 
     /**
@@ -1111,6 +1177,14 @@ class OverlayView @JvmOverloads constructor(
         sendConfirmedNotified = false
         resetRunnable?.let { removeCallbacks(it) }
         resetRunnable = null
+        //pri added by zhuyang,Rebuild the round state of E4/E5/E7 (accept swap, dissolve alpha, whitening, hold),20261014,start
+        acceptInProgress = false
+        cancelMix = 0f
+        alpha = 1f
+        photoWhite = 0f
+        holdRunnable?.let { removeCallbacks(it) }
+        holdRunnable = null
+        //pri added by zhuyang,Rebuild the round state of E4/E5/E7 (accept swap, dissolve alpha, whitening, hold),20261014,end
         invalidate()
     }
 
@@ -2236,6 +2310,17 @@ class OverlayView @JvmOverloads constructor(
         textPaint.clearShadowLayer()
     }
 
+    //pri added by zhuyang,E7: photo rect inside the card; drawCard and the burst origin both call it,20261014,start
+    private fun photoArea(out: RectF) {
+        out.set(
+            cardRect.left + 9f * k,
+            cardRect.top + 9f * k,
+            cardRect.right - 9f * k,
+            cardRect.bottom - 53f * k
+        )
+    }
+    //pri added by zhuyang,E7: photo rect inside the card; drawCard and the burst origin both call it,20261014,end
+
     private fun drawCard(c: Canvas) {
         if (cardRect.width() <= 0f) return
 
@@ -2288,17 +2373,14 @@ class OverlayView @JvmOverloads constructor(
         // 外侧 1px 白色描边（[edgeStroke] 和边缘光共用，先摘掉可能挂着的波前遮罩）
         edgeStroke.shader = null
         edgeStroke.strokeWidth = 1f * k
-        edgeStroke.color = withAlpha(0xFFFFFFFF.toInt(), 0.66f * alpha)
+        edgeStroke.color = withAlpha(0xFFFFFFFF.toInt(), 0.66f * alpha * (1f - photoWhite)) //pri modify by zhuyang,E7: the bright border fades out together with the whitening,20261014
         scratch.set(cardRect.left - 0.5f * k, cardRect.top - 0.5f * k, cardRect.right + 0.5f * k, cardRect.bottom + 0.5f * k)
         c.drawRoundRect(scratch, r, r, edgeStroke)
 
         // 照片区：插画是静态的，用缓存位图，避免常驻微颤动画每帧重画所有路径与渐变
-        val photo = RectF(
-            cardRect.left + 9f * k,
-            cardRect.top + 9f * k,
-            cardRect.right - 9f * k,
-            cardRect.bottom - 53f * k
-        )
+        //pri modify by zhuyang,E7: photo rect now comes from photoArea() so draw and burst share one geometry,20261014
+        val photo = RectF()
+        photoArea(photo)
         val pr = 15f * k
         val art = artworkBitmap(photo.width().toInt(), photo.height().toInt())
         photoClip.alpha = (alpha * 255f).toInt().coerceIn(0, 255)
@@ -2308,6 +2390,14 @@ class OverlayView @JvmOverloads constructor(
         c.clipPath(cardPath)
         c.drawBitmap(art, artSrc, photo, photoClip)
         c.restoreToCount(save2)
+
+        //pri added by zhuyang,E7: over-expose the photo to a white rounded rect while sending,20261014,start
+        if (photoWhite > 0.003f) {
+            cardPaint.shader = null
+            cardPaint.color = withAlpha(0xFFFFFFFF.toInt(), alpha * photoWhite)
+            c.drawRoundRect(photo, pr, pr, cardPaint)
+        }
+        //pri added by zhuyang,E7: over-expose the photo to a white rounded rect while sending,20261014,end
 
         // 文字区
         textPaint.typeface = bold
@@ -2424,19 +2514,21 @@ class OverlayView @JvmOverloads constructor(
         if (appear <= 0.003f) return
         if (receivePrimaryRect.width() <= 0f) return
         val r = RECEIVE_BTN_R_PX * k
+        //pri added by zhuyang,E4: while accepting, the two pills fade out by (1 - cancelMix),20261014
+        val pills = appear * (1f - cancelMix)
 
         // 主按钮：浅色底（#EDF7FF），按下时压深一档
         cardPaint.shader = null
         cardPaint.color = withAlpha(
             if (pressedButton == BUTTON_PRIMARY) 0xFFD7EAFB.toInt() else 0xFFEDF7FF.toInt(),
-            appear
+            pills
         )
         c.drawRoundRect(receivePrimaryRect, r, r, cardPaint)
 
         // 次按钮：半透明浅灰底（#14FFFFFF），按下时同样压深一档
         cardPaint.color = withAlpha(
             if (pressedButton == BUTTON_SECONDARY) 0x29FFFFFF else 0x14FFFFFF,
-            appear
+            pills
         )
         c.drawRoundRect(receiveSecondaryRect, r, r, cardPaint)
 
@@ -2445,10 +2537,23 @@ class OverlayView @JvmOverloads constructor(
         textPaint.letterSpacing = 0f
         textPaint.clearShadowLayer()
         textPaint.textSize = 15f * k
-        textPaint.color = withAlpha(0xFF111923.toInt(), appear)
+        textPaint.color = withAlpha(0xFF111923.toInt(), pills)
         drawCenteredLabel(c, receivePrimaryRect, receiveAcceptText)
-        textPaint.color = withAlpha(0xFFDDDDDD.toInt(), appear)
+        textPaint.color = withAlpha(0xFFDDDDDD.toInt(), pills)
         drawCenteredLabel(c, receiveSecondaryRect, receiveRejectText)
+
+        //pri added by zhuyang,E4: single cancel pill drawn in the reject slot (same rect as its hit test),20261014,start
+        if (acceptInProgress && cancelMix > 0.003f) {
+            val one = appear * cancelMix
+            cardPaint.color = withAlpha(
+                if (pressedButton == BUTTON_SECONDARY) 0x47FFFFFF else 0x33FFFFFF,
+                one
+            )
+            c.drawRoundRect(receiveSecondaryRect, r, r, cardPaint)
+            textPaint.color = withAlpha(0xFFFFFFFF.toInt(), one)
+            drawCenteredLabel(c, receiveSecondaryRect, receiveCancelText)
+        }
+        //pri added by zhuyang,E4: single cancel pill drawn in the reject slot (same rect as its hit test),20261014,end
     }
 
     /** 在一枚按钮矩形里居中画一行字（水平按测量宽度、垂直按 fontMetrics 校正）。 */
@@ -2532,11 +2637,15 @@ class OverlayView @JvmOverloads constructor(
         layoutReceiveActions()
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
+                //pri modify by zhuyang,E4: while accepting, the cancel pill in the secondary slot is the only live target,20261014,start
                 pressedButton = when {
+                    acceptInProgress && receiveSecondaryRect.contains(event.x, event.y) -> BUTTON_SECONDARY
+                    acceptInProgress -> BUTTON_NONE
                     receivePrimaryRect.contains(event.x, event.y) -> BUTTON_PRIMARY
                     receiveSecondaryRect.contains(event.x, event.y) -> BUTTON_SECONDARY
                     else -> BUTTON_NONE
                 }
+                //pri modify by zhuyang,E4: while accepting, the cancel pill in the secondary slot is the only live target,20261014,end
                 if (pressedButton == BUTTON_NONE) return false
                 parent?.requestDisallowInterceptTouchEvent(true)
                 invalidate()
@@ -2553,7 +2662,10 @@ class OverlayView @JvmOverloads constructor(
                 if (pressed == BUTTON_PRIMARY) {
                     if (receivePrimaryRect.contains(event.x, event.y)) onReceiveAccepted?.invoke()
                 } else {
-                    if (receiveSecondaryRect.contains(event.x, event.y)) onReceiveRejected?.invoke()
+                    //pri modify by zhuyang,E4: the secondary slot reports cancel while accepting, reject otherwise,20261014
+                    if (receiveSecondaryRect.contains(event.x, event.y)) {
+                        if (acceptInProgress) onReceiveCancel?.invoke() else onReceiveRejected?.invoke()
+                    }
                 }
                 invalidate()
                 return true
@@ -2656,17 +2768,37 @@ class OverlayView @JvmOverloads constructor(
         flying = true
         flyFromY = dragY
         flyFromScale = max(0.94f, 1f + dragY / (900f * k))
-        flyAnimator?.cancel()
-        flyAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
-            duration = FLY_MS
+        //pri added by zhuyang,E7: particle burst + photo whitening at the send moment,20261014,start
+        photoArea(scratch)
+        onSendBurst?.invoke(scratch.centerX(), scratch.centerY() + dragY) //pri added by zhuyang,E7: the card is drawn with the drag offset, so the burst origin follows it,20261014
+        whiteAnimator?.cancel()
+        whiteAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = SEND_WHITE_IN_MS.toLong()
             interpolator = LinearInterpolator()
-            addUpdateListener {
-                flyT = it.animatedValue as Float
+            addUpdateListener { va ->
+                photoWhite = va.animatedValue as Float
                 invalidate()
             }
             start()
         }
-        resetRunnable = Runnable { finishSend() }.also { postDelayed(it, RESET_DELAY_MS) }
+        //pri added by zhuyang,E7: particle burst + photo whitening at the send moment,20261014,end
+        //pri added by zhuyang,E7: keep the whitened card still for SEND_HOLD_MS, then start the existing fly-away,20261014,start
+        holdRunnable?.let { removeCallbacks(it) }
+        holdRunnable = Runnable {
+            holdRunnable = null
+            flyAnimator?.cancel()
+            flyAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+                duration = FLY_MS
+                interpolator = LinearInterpolator()
+                addUpdateListener {
+                    flyT = it.animatedValue as Float
+                    invalidate()
+                }
+                start()
+            }
+            resetRunnable = Runnable { finishSend() }.also { postDelayed(it, RESET_DELAY_MS) }
+        }.also { postDelayed(it, SEND_HOLD_MS) }
+        //pri added by zhuyang,E7: keep the whitened card still for SEND_HOLD_MS, then start the existing fly-away,20261014,end
     }
 
     private fun finishSend() {
@@ -2683,11 +2815,17 @@ class OverlayView @JvmOverloads constructor(
     private fun cancelAnimators() {
         returnAnimator?.cancel(); returnAnimator = null
         flyAnimator?.cancel(); flyAnimator = null
+        //pri added by zhuyang,The E4/E5/E7 one-shot animators join the same cancel set,20261014,start
+        cancelAnimator?.cancel(); cancelAnimator = null
+        fadeOutAnimator?.cancel(); fadeOutAnimator = null
+        whiteAnimator?.cancel(); whiteAnimator = null
+        //pri added by zhuyang,The E4/E5/E7 one-shot animators join the same cancel set,20261014,end
     }
 
     override fun onDetachedFromWindow() {
         cancelAnimators()
         resetRunnable?.let { removeCallbacks(it) }
+        holdRunnable?.let { removeCallbacks(it) } //pri added by zhuyang,E7: the hold timer must not outlive the view,20261014
         artCache?.recycle()
         artCache = null
         super.onDetachedFromWindow()

@@ -43,6 +43,7 @@ import com.pri.nfctouchdemo.gfx.RippleSurfaceView
 import com.pri.nfctouchdemo.nfc.TapService
 import com.pri.nfctouchdemo.nfc.Ui
 import com.pri.nfctouchdemo.ui.OverlayView
+import com.pri.nfctouchdemo.ui.ParticleView //pri added by zhuyang,E7: send burst layer (third child of overlay_root),20261014
 import kotlin.math.abs
 
 /**
@@ -87,6 +88,9 @@ class OverlayService : Service() {
     private var rootView: View? = null
     private lateinit var rippleView: RippleSurfaceView
     private lateinit var overlay: OverlayView
+
+    //pri added by zhuyang,E7: topmost child of overlay_root - the particle layer of the send burst,20261014
+    private lateinit var particleView: ParticleView
     private lateinit var timeline: Timeline
 
     /** 当前是哪一种确认页：发送（上滑发送）还是接收（接收 / 拒绝）。 */
@@ -112,6 +116,9 @@ class OverlayService : Service() {
 
     /** 建窗后延迟自动演示一遍的那个回调，拆窗时要撤掉。 */
     private var startRunnable: Runnable? = null
+
+    //pri added by zhuyang,E5: pending "dissolve, then detach" - at most one, and never across rounds,20261014
+    private var dissolveRunnable: Runnable? = null
 
     /** 通知里「重播」的 5 秒等待，等待期间 [replayPending] 让通知文案变一下。 */
     private var replayRunnable: Runnable? = null
@@ -160,7 +167,7 @@ class OverlayService : Service() {
             ACTION_STATUS -> updateStatus(intent)
             ACTION_PEER -> updatePeer(intent)
             ACTION_REPLAY -> scheduleReplay()
-            ACTION_HIDE -> hideDemo()
+            ACTION_HIDE -> hideDemo(intent)
             ACTION_FAIL_BANNER -> showFailBanner(intent)
             ACTION_HIDE_FAIL_BANNER -> hideFailBanner()
             ACTION_TOGGLE_TOUCH -> setTouchThrough(!touchThrough)
@@ -205,6 +212,7 @@ class OverlayService : Service() {
      */
     private fun startSendFlow(intent: Intent?) {
         hideFailBanner()
+        cancelDissolve() //pri added by zhuyang,E5: the new round owns the window,20261014
         mode = OverlayView.Mode.SEND
         uriExtra(intent, EXTRA_BACKDROP)?.let { backdropUri = it }
         uriExtra(intent, EXTRA_PHOTO)?.let { photoUri = it }
@@ -252,6 +260,7 @@ class OverlayService : Service() {
      */
     private fun startReceiveFlow(intent: Intent?) {
         hideFailBanner()
+        cancelDissolve() //pri added by zhuyang,E5: the new round owns the window,20261014
         mode = OverlayView.Mode.RECEIVE
         if (intent?.hasExtra(EXTRA_PEER) == true) peerLabel = intent.getStringExtra(EXTRA_PEER)
         // 没有新的张数就沿用上一轮（重播时不该把「接收 3 张照片」缩回 1 张）
@@ -265,6 +274,7 @@ class OverlayService : Service() {
             overlay.setMode(mode)
             overlay.setPeerInfo(peerLabel, peerCount)
             overlay.setStatus(statusText)
+            overlay.setAcceptInProgress(false) //pri added by zhuyang,E4: the swapped-in identity starts from the two-pill state,20261014
             return
         }
         //pri added by zhuyang,Live switch: a visible SEND page becomes the RECEIVE card in place,20261014,end
@@ -424,6 +434,7 @@ class OverlayService : Service() {
         rippleView.setRipple(0f)
         rippleView.setBlur(0f)
         rippleView.setGallerySource(darkBackdrop()) // 旧的折射背景同样不能留
+        particleView.clear() //pri added by zhuyang,E7: particles that have not died out must not carry over,20261014
     }
 
     /** 把已经解好的位图重新灌回视图（擦干净之后复用上一轮的缓存，必须重灌一遍）。 */
@@ -503,11 +514,34 @@ class OverlayService : Service() {
     }
 
     /** 「停止演示」：摘掉窗口、停掉时间轴，服务不动（视图树留着，下次直接复用）。 */
-    private fun hideDemo() {
+    private fun hideDemo(intent: Intent? = null) {
         hideFailBanner()
+        //pri added by zhuyang,E5: ACTION_HIDE may carry EXTRA_FADE_MS: fade the panel out, then detach,20261014,start
+        val fadeMs = intent?.getLongExtra(EXTRA_FADE_MS, 0L) ?: 0L
+        if (fadeMs > 0L && attached) {
+            timeline.releaseBlur()
+            overlay.fadeOutPanel(PANEL_DISSOLVE_MS)
+            cancelDissolve()
+            val runnable = Runnable {
+                dissolveRunnable = null
+                detachOverlay()
+            }
+            dissolveRunnable = runnable
+            mainHandler.postDelayed(runnable, fadeMs)
+            ensureForeground()
+            return
+        }
+        //pri added by zhuyang,E5: ACTION_HIDE may carry EXTRA_FADE_MS: fade the panel out, then detach,20261014,end
         if (rootView != null) detachOverlay()
         ensureForeground()
     }
+
+    //pri added by zhuyang,E5: a pending dissolve must never detach the next round's window,20261014,start
+    private fun cancelDissolve() {
+        dissolveRunnable?.let { mainHandler.removeCallbacks(it) }
+        dissolveRunnable = null
+    }
+    //pri added by zhuyang,E5: a pending dissolve must never detach the next round's window,20261014,end
 
     // ---------------------------------------------------------------- 动效层 ↔ NFC 层
 
@@ -534,6 +568,7 @@ class OverlayService : Service() {
         val content = LayoutInflater.from(this).inflate(R.layout.overlay_root, null)
         rippleView = content.findViewById(R.id.ripple)
         overlay = content.findViewById(R.id.overlay)
+        particleView = content.findViewById(R.id.particles) //pri added by zhuyang,E7: topmost layer,20261014
         rootView = content
 
         // 时间轴：每推进一帧同时刷新水波、背景模糊与 2D 图层
@@ -553,13 +588,21 @@ class OverlayService : Service() {
         // 上滑越过阈值那一刻：只回执给 NFC 层，动效自己继续把卡片飞走
         overlay.onSendConfirmed = { notifyNfc(ACTION_UI_SEND_CONFIRMED) }
         // 接收页的两个按钮
-        overlay.onReceiveAccepted = { notifyNfc(ACTION_UI_RECEIVE_ACCEPT) }
+        //pri modify by zhuyang,E4: 接收 also switches the local motion layer into the receiving state,20261014,start
+        overlay.onReceiveAccepted = {
+            overlay.setAcceptInProgress(true)
+            notifyNfc(ACTION_UI_RECEIVE_ACCEPT)
+        }
         overlay.onReceiveRejected = { notifyNfc(ACTION_UI_RECEIVE_REJECT) }
+        overlay.onReceiveCancel = { notifyNfc(ACTION_UI_RECEIVE_CANCEL) }
+        //pri modify by zhuyang,E4: 接收 also switches the local motion layer into the receiving state,20261014,end
+        overlay.onSendBurst = { cx, cy -> particleView.burst(cx, cy, SEND_PARTICLE_N) } //pri added by zhuyang,E7: send burst,20261014
     }
 
     /** 把视图树挂上窗口并铺满屏幕。 */
     private fun attachOverlay() {
         val content = rootView ?: return
+        cancelDissolve() //pri added by zhuyang,E5: a pending dissolve must not take the fresh window down,20261014
         if (attached) {
             ensureForeground()
             return
@@ -586,6 +629,7 @@ class OverlayService : Service() {
         val content = rootView ?: return
         startRunnable?.let { overlay.removeCallbacks(it) }
         startRunnable = null
+        cancelDissolve() //pri added by zhuyang,E5: drop a pending dissolve along with the auto-demo callback,20261014
         // 用户已经说"停止演示"了，还没到点的重播就别再自己上来
         cancelReplay()
         if (!attached) return
@@ -1015,6 +1059,12 @@ class OverlayService : Service() {
         /** 只摘掉动画窗口，常驻服务继续待命。 */
         const val ACTION_HIDE = "com.pri.nfctouchdemo.action.HIDE"
 
+        //pri added by zhuyang,E5: OPTIONAL extra of ACTION_HIDE; 0 or absent = detach immediately (notification path),20261014
+        const val EXTRA_FADE_MS = "extra_fade_ms"
+
+        //pri added by zhuyang,E5: total dissolve window = max(panel 150ms, blur release 250ms) + margin; TapService passes it,20261014
+        const val DISSOLVE_MS = 260L
+
         //pri added by zhuyang,D1 fail banner: show the top banner window / take it down again,20261014,start
         //pri added by zhuyang,Show the banner; carries EXTRA_FAIL_TITLE / EXTRA_FAIL_DETAIL,20261014
         const val ACTION_FAIL_BANNER = "com.pri.nfctouchdemo.action.FAIL_BANNER"
@@ -1043,6 +1093,9 @@ class OverlayService : Service() {
         const val ACTION_UI_SEND_CONFIRMED = "com.pri.nfctouchdemo.action.UI_SEND_CONFIRMED"
         const val ACTION_UI_RECEIVE_ACCEPT = "com.pri.nfctouchdemo.action.UI_RECEIVE_ACCEPT"
         const val ACTION_UI_RECEIVE_REJECT = "com.pri.nfctouchdemo.action.UI_RECEIVE_REJECT"
+
+        //pri added by zhuyang,E4: fourth UI receipt - the cancel pill of the receiving state,20261014
+        const val ACTION_UI_RECEIVE_CANCEL = "com.pri.nfctouchdemo.action.UI_RECEIVE_CANCEL"
 
         /** 背景图（水波折射的那张，产品里对应"对方的屏幕画面"）。 */
         const val EXTRA_BACKDROP = "extra_backdrop"
@@ -1148,6 +1201,14 @@ class OverlayService : Service() {
         fun hideIntent(context: Context): Intent =
             Intent(context, OverlayService::class.java).setAction(ACTION_HIDE)
 
+        //pri added by zhuyang,E5: same, but the panel dissolves for fadeMs before the window goes away,20261014,start
+        @JvmStatic
+        fun hideIntent(context: Context, fadeMs: Long): Intent =
+            Intent(context, OverlayService::class.java)
+                .setAction(ACTION_HIDE)
+                .putExtra(EXTRA_FADE_MS, fadeMs)
+        //pri added by zhuyang,E5: same, but the panel dissolves for fadeMs before the window goes away,20261014,end
+
         /** 退出常驻：真正停掉服务。 */
         @JvmStatic
         fun stopIntent(context: Context): Intent =
@@ -1192,6 +1253,12 @@ class OverlayService : Service() {
         //pri added by zhuyang,Banner accent red, same tone as the motion layer,20261014
         private val FAIL_BANNER_RED = 0xFFE5484D.toInt()
         //pri added by zhuyang,D1 fail banner: 120ms blur-up fade-in, 5s auto-dismiss, 24dp swipe threshold,20261014,end
+
+        //pri added by zhuyang,E5: the panel itself fades over 150ms inside the DISSOLVE_MS window,20261014
+        private const val PANEL_DISSOLVE_MS = 150L
+
+        //pri added by zhuyang,E7: particles per send burst (video: 30-60),20261014
+        private const val SEND_PARTICLE_N = 48
 
         /**
          * 通知里点「重播」之后等多久才真的播。

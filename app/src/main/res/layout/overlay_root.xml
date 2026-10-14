@@ -21,4 +21,12 @@
         android:id="@+id/overlay"
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
+
+    <!--pri added by zhuyang,E7: third child, topmost: the send burst layer (ParticleView),20261014-->
+    <!--pri added by zhuyang,E7: clickable=false is mandatory - make it clickable and the whole page stops reacting to touch,20261014-->
+    <com.pri.nfctouchdemo.ui.ParticleView
+        android:id="@+id/particles"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:clickable="false" />
 </FrameLayout>

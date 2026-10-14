@@ -94,6 +94,9 @@ class Timeline(private val host: View) {
          */
         const val PHOTO_BLUR_MS = 500f
 
+        //pri added by zhuyang,E6: blur ramp-down on dissolve (video: 0.2-0.3s),20261014
+        const val BLUR_RELEASE_MS = 250f
+
         /**
          * 原型里水波用的缓入指数：1 - (1 - raw)^1.18。
          *
@@ -127,6 +130,12 @@ class Timeline(private val host: View) {
 
     private var startUptime = 0L
     private var lastEmitUptime = 0L
+
+    //pri added by zhuyang,E6: blur release state; -1 = not triggered this round,20261014,start
+    private var blurReleaseAt = -1L
+    private var blurReleaseFrom = 1f
+    private var blurReleaseMs = BLUR_RELEASE_MS
+    //pri added by zhuyang,E6: blur release state; -1 = not triggered this round,20261014,end
 
     private val ticker = object : Runnable {
         override fun run() {
@@ -169,8 +178,23 @@ class Timeline(private val host: View) {
      * 用 [PHOTO_BLUR_MS] 淡进去 —— 1500 → 2000ms：面板上来的同时背景开始糊，
      * 卡片 1600ms 落地时背景已糊了两成，之后继续退后，到 2000ms 是一张柔和的底。
      */
-    fun photoBlurAt(elapsed: Long): Float =
-        ((elapsed - PANEL_MS).toFloat() / PHOTO_BLUR_MS).coerceIn(0f, 1f)
+    fun photoBlurAt(elapsed: Long): Float {
+        //pri added by zhuyang,E6: once releaseBlur() ran, the ramp-down takes over this round,20261014,start
+        val at = blurReleaseAt
+        if (at >= 0L) {
+            return (blurReleaseFrom * (1f - (elapsed - at) / blurReleaseMs)).coerceIn(0f, 1f)
+        }
+        //pri added by zhuyang,E6: once releaseBlur() ran, the ramp-down takes over this round,20261014,end
+        return ((elapsed - PANEL_MS).toFloat() / PHOTO_BLUR_MS).coerceIn(0f, 1f)
+    }
+
+    //pri added by zhuyang,E6: start the ramp-down from the current value; a later call re-bases it,20261014,start
+    fun releaseBlur(ms: Float = BLUR_RELEASE_MS) {
+        blurReleaseFrom = photoBlurAt(elapsedMs)
+        blurReleaseAt = elapsedMs
+        blurReleaseMs = ms
+    }
+    //pri added by zhuyang,E6: start the ramp-down from the current value; a later call re-bases it,20261014,end
 
     /** 从头再演示一遍入场动效。 */
     fun play() {
@@ -179,6 +203,7 @@ class Timeline(private val host: View) {
         isPlaying = true
         startUptime = SystemClock.uptimeMillis()
         lastEmitUptime = 0L
+        blurReleaseAt = -1L //pri added by zhuyang,E6: a new round must not inherit the release ramp,20261014
         // 先回到 0 帧，确保上一轮的卡片 / 面板 / 白线状态被清干净。
         onFrame?.onFrame(0L, 0f)
         host.postOnAnimation(ticker)
@@ -197,6 +222,7 @@ class Timeline(private val host: View) {
     fun seek(ms: Long) {
         stop()
         elapsedMs = ms.coerceAtLeast(0L)
+        blurReleaseAt = -1L //pri added by zhuyang,E6: reset() goes through seek(0); every rewind clears the release ramp,20261014
         onFrame?.onFrame(elapsedMs, rippleAt(elapsedMs))
     }
 

@@ -140,7 +140,8 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
             if (sXfer != null) sXfer.rejectTransfer(); //pri added by zhuyang,Write the REJECT verdict back (no image was ever sent),20261014
             mRejected = true; //pri added by zhuyang,Set before hideIntent: the fallback path must not re-open the card,20261014
             Bus.unlockRole();
-            startService(OverlayService.hideIntent(this)); // 摘掉动效窗口(服务继续常驻,等下轮碰触)
+            //pri modify by zhuyang,E5: dissolve the card before the window goes,20261014
+            startService(OverlayService.hideIntent(this, OverlayService.DISSOLVE_MS)); // 摘掉动效窗口(服务继续常驻,等下轮碰触)
             mAccepted = false;
             // 清掉本轮接收状态,保证下一轮碰触从干净状态开始(原来靠 mReceivePage = null 达成)
             mReceiveShown = false;
@@ -151,6 +152,23 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
             mBmps.clear();
             mLastBmp = null;
         }
+        //pri added by zhuyang,E4: 取消 = local abort of this round; reported exactly like a reject,20261014,start
+        if (intent != null && OverlayService.ACTION_UI_RECEIVE_CANCEL.equals(intent.getAction())) {
+            Bus.log("已取消接收");
+            if (sXfer != null) sXfer.rejectTransfer();
+            mRejected = true;
+            Bus.unlockRole();
+            startService(OverlayService.hideIntent(this, OverlayService.DISSOLVE_MS));
+            mAccepted = false;
+            mReceiveShown = false;
+            mPreviewCount = 0;
+            mFullCount = 0;
+            mTotalCount = 0;
+            mTransferDone = false;
+            mBmps.clear();
+            mLastBmp = null;
+        }
+        //pri added by zhuyang,E4: 取消 = local abort of this round; reported exactly like a reject,20261014,end
         return START_STICKY;
     }
 
@@ -306,12 +324,13 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
                 mReceiveShown = false;
                 // 用户已经点过"接收":动效层没别的用途了,先摘掉它的窗口再开查看器
                 //pri modify by zhuyang,D4: viewer is now the system one, opened on the saved MediaStore Uri,20261014
-                startService(OverlayService.hideIntent(this));
+                startService(OverlayService.hideIntent(this, OverlayService.DISSOLVE_MS)); //pri modify by zhuyang,E5: dissolve before detaching (E5 main path),20261014
                 openSystemViewer();
                 Bus.unlockRole();
             }
         } else if (mAccepted) {
-            startService(OverlayService.hideIntent(this)); // 同上:进查看器前先摘掉动效窗口
+            //pri modify by zhuyang,E5: dissolve the card before the window goes,20261014
+            startService(OverlayService.hideIntent(this, OverlayService.DISSOLVE_MS)); // 同上:进查看器前先摘掉动效窗口
             openSystemViewer();
             Bus.unlockRole();
         }
@@ -326,7 +345,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         mSendShown = false; // 本轮结束,下一轮碰触重新拉起
         // 发送完成后摘掉动效窗口(动效层自己也会播"飞走"动画,这里再兜一次底;
         // 用 startService 而不是 stopIntent:服务继续常驻,只是窗口没了)
-        startService(OverlayService.hideIntent(this));
+        startService(OverlayService.hideIntent(this, OverlayService.DISSOLVE_MS)); //pri modify by zhuyang,E5: dissolve before detaching,20261014
     }
 
     @Override
@@ -350,7 +369,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         if (!mReceiveShown) return;
         mReceiveShown = false;
         mRejected = true; //pri added by zhuyang,This round must not re-open the card,20261014
-        startService(OverlayService.hideIntent(this));
+        startService(OverlayService.hideIntent(this, OverlayService.DISSOLVE_MS)); //pri modify by zhuyang,E5: dissolve before detaching,20261014
         Bus.unlockRole();
     }
 
