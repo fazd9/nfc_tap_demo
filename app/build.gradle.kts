@@ -63,4 +63,7 @@ dependencies {
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.espresso.core)
     androidTestImplementation(libs.androidx.junit)
+    //pri added by zhuyang,Change 2: framework @hide classes (TaskStackListener / ActivityTaskManager) come from the in-house systemlibs header jar,20261014
+    //pri added by zhuyang,compileOnly - needed at compile time only, never packaged into the APK (the device's own framework provides them at runtime),20261014
+    compileOnly(files("../systemlibs/framework-header.jar"))
 }
