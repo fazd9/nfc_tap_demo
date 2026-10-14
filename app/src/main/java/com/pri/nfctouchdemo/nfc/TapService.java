@@ -496,7 +496,8 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
             startActivity(new Intent(Intent.ACTION_VIEW)
                     .setDataAndType(u, "image/*")
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
-                            | Intent.FLAG_GRANT_READ_URI_PERMISSION));
+                            | Intent.FLAG_GRANT_READ_URI_PERMISSION
+                            | Intent.FLAG_ACTIVITY_NO_ANIMATION)); //pri added by zhuyang,No slide-in transition: the panel dissolves in place instead of handing off to a sliding Activity,20261014
         } catch (Throwable t) {
             Bus.log("打开系统查看器失败: " + t);
         }

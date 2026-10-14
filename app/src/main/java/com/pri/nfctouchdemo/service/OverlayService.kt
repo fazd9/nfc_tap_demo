@@ -318,7 +318,8 @@ class OverlayService : Service() {
         Thread {
             val picture = ImageLoader.decode(this, uri)
             val background = if (isReceive) ImageLoader.decodeCover(this, uri, displaySize().x, displaySize().y) else null
-            val info = ImageLoader.describe(this, uri)
+            //pri modify by zhuyang,The receive card must not show the cache file name (peer_preview.jpg) as card text,20261014
+            val info = if (isReceive) null else ImageLoader.describe(this, uri)
             mainHandler.post {
                 if (rootView == null) return@post
                 photoBitmap = picture
@@ -332,7 +333,7 @@ class OverlayService : Service() {
                     rippleView.setGallerySource(it)
                 }
                 photoInfo = info
-                overlay.setCardInfo(info.first, info.second)
+                info?.let { overlay.setCardInfo(it.first, it.second) } //pri modify by zhuyang,Receive mode keeps the built-in title,20261014
             }
         }.start()
     }
@@ -392,7 +393,6 @@ class OverlayService : Service() {
                 darkBackdrop()
             }
             val picture = uri?.let { ImageLoader.decode(this, it) }
-            val info = uri?.let { ImageLoader.describe(this, it) }
             mainHandler.post {
                 if (rootView == null) return@post
                 backdropBitmap = background
@@ -401,13 +401,10 @@ class OverlayService : Service() {
                 decodedPhoto = uri
                 decodedReceive = true
                 background?.let { rippleView.setGallerySource(it) }
+                photoInfo = null //pri modify by zhuyang,Receive mode never feeds describe() into the card: no cache file name,20261014
                 // 没照片时不动卡片：OverlayView 保持内置插画 + 默认文案
                 if (picture != null) {
                     overlay.setCardPhoto(picture)
-                    if (info != null) {
-                        photoInfo = info
-                        overlay.setCardInfo(info.first, info.second)
-                    }
                 }
                 applyContentAndPlay()
             }
