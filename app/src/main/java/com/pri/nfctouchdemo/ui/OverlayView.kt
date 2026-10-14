@@ -60,11 +60,50 @@ class OverlayView @JvmOverloads constructor(
         const val CARD_W = 292f
         const val CARD_H = 360f
 
+        /** 静止时卡片的圆角（dp）。形变开始后圆角按参考片的比例收，但不会比它更圆。 */
+        const val CARD_RADIUS_DP = 23f
+
+        /**
+         * 版面里"信息 + 卡片 + 上滑提示"这一整块**相对画面中线往上抬**多少（占可用高度的比例）。
+         *
+         * 量出来的 OPPO 值：参考帧（720×1584）那张卡片中心落在画面高度的 43.6%，比中线高 6.4%。
+         * 我们下面没有 OPPO 那排操作按钮，所以取 5% —— 想更贴参考就往上调，想回正中就写 0。
+         */
+        const val BLOCK_LIFT_FRAC = 0.05f
+
         const val EDGE_IGNITE_MS = 650f
         const val PANEL_TEXT_MS = 420f
         const val CARD_DELAY_MS = 100f
         const val CARD_ENTER_MS = 680f
         const val CARD_FADE_MS = 480f
+
+        /**
+         * **呼吸周期**（毫秒）。**2000** —— 从参考片上量出来的：
+         * 图片带上沿在 t = 0.0 / 2.0 s 是 486.5 / 486.8 px，在 t = 1.0 / 3.0 s 是
+         * 492.1 / 492.1 px —— 隔一个周期两次独立测量完全重合（差 0.06 px）。
+         * 后来又用 0.1s 密帧（67 帧）复测过一次：逐帧跟踪上下沿（间距恒为 415~416 px，
+         * 说明是纯平移），峰在 t≈0.65、谷在 t≈1.65（半周期 1.0s），且 t=0.4 与 t=2.4
+         * 量到 495.06 / 495.50 px（差 0.44 px，只占 14 px 振幅的 3%）—— 2000 再次成立。
+         */
+        const val PHOTO_BREATHE_MS = 2000f
+
+        /**
+         * 卡片呼吸的**幅度**：单边位移占卡片高度的比例。
+         *
+         * 参考片量到的是：图片带宽 415 px，上沿在 482.3（谷）～496.4（峰）之间走，
+         * 峰谷差 14.1 px = ±7.05 ref px = ±1.69% 的**带宽**；而且全程**纯上下平移**
+         * （带宽 415/414、宽 554 不变，亮度恒为 92），卡片本体和上下两行文字逐位不动
+         * （"发送给 xxx"的亮度质心两次都是 212.04、"上滑发送 1 张照片"都是 1195.88）。
+         *
+         * 折成屏幕尺寸：±7.05 ref px = **±3.7 设计px**（720 宽的参考帧 → 380 设计宽）。
+         * 我们这边卡片被图片铺满、高度还按照片比例自适应，**图片就是整张卡**，
+         * 若照搬同一个相对比例（1.69% × 卡高 360 = ±6.1 设计px）就是 1.6 倍，
+         * 而"整张卡在浮"本来就比"图在卡里滑"显眼得多 —— 所以这里直接对齐**绝对位移**：
+         * 0.0103 × 360 ≈ ±3.7 设计px。
+         *
+         * 想更安静写 0.008；想回到相对比例一致就写回 0.0169（版面间距会自动跟着放宽）。
+         */
+        const val PHOTO_BREATHE_FRAC = 0.0103f
         // ---- 边缘辉光：两层 ----
         // 1 核心高光线：**呼吸就在这条线上** —— 铺满之后粗细缓慢起伏（[LINE_THIN_PX] + [LINE_SWING_PX]），
         //   而且沿边**逐点不同步**（见 [LINE_JITTER_BLOCKS]）。
@@ -111,6 +150,67 @@ class OverlayView @JvmOverloads constructor(
          * 给太少（如 4）就变回"整条边一起胀"；给太多就成锯齿。
          */
         const val LINE_JITTER_BLOCKS = 10
+
+        /** [lineEdgeAt] 的返回值，也是 [EDGE_SWING_AMP] / [EDGE_SWING_PHASE] 的下标。 */
+        const val EDGE_TOP = 0
+        const val EDGE_RIGHT = 1
+        const val EDGE_BOTTOM = 2
+        const val EDGE_LEFT = 3
+
+        // ---- 上滑提示那枚箭头的几何（都在 24 格视口里，见 [arrowUp]）----
+        // 全部由参考帧**逐像素**反推（720 宽的帧，1 ref px = 380/720 设计px）：
+        // 竖杆 3 ref px 宽、整枚 20 × 26 ref px、两撇 45°、竖杆从尖端一直连到底。
+
+        // ---- 箭头的几何全用"格"写，而视口 24 格正好映射到 24dp，所以 **1 格 = 1dp**：
+        // 下面这些数既是格也是 dp，调的时候不用换算。
+
+        /** 描边宽度：参考帧量到 3 ref px ≈ 1.58dp，取整到 1.5。 */
+        private const val ARROW_STROKE = 1.5f
+
+        /** 两撇的水平半跨（45° 所以竖向同值）：参考帧量到 4.95，取 4.5。 */
+        private const val ARROW_HALF_SPAN = 4.5f
+
+        /**
+         * 箭头墨迹在视口里的左右边界 —— **由上面两个数推出来**，别手抄：
+         * 竖杆在 x = 12，两侧各外扩"半跨 + 半个线宽"。排版按它算（见 [drawSwipeTip]），
+         * 所以以后改箭头形状，整行居中会自动跟着走。
+         */
+        private const val ARROW_INK_L = 12f - ARROW_HALF_SPAN - ARROW_STROKE / 2f
+        private const val ARROW_INK_R = 12f + ARROW_HALF_SPAN + ARROW_STROKE / 2f
+
+        /**
+         * 箭头上下浮动的**周期**（ms）和**半幅**（设计px）—— 也就是"招呼一下"这个动作。
+         *
+         * 由参考帧逐帧量出（10fps，每 0.2s 采一帧，跟箭头尖端 y）：最高点在 0.4s 与 1.4s
+         * 各出现一次 → 周期 1000ms；尖端在 y 1177 ↔ 1189 往返，峰峰 12 ref px →
+         * 半幅 6 ref px × (380/720) ≈ 3.17，取整到 **3**（差 5%，在采样误差内）。
+         */
+        private const val TIP_FLOAT_MS = 1000L
+        private const val TIP_FLOAT_SWING = 3f
+
+        /**
+         * 四条边各自的呼吸**幅度**：`1` = 该边满幅（和原来一样），`0` = **这条边完全不呼吸**、
+         * 恒为最细的 [LINE_THIN_PX]。顺序：**上、右、下、左**。
+         *
+         * 只乘在每个点自己的幅度上（见 [lineJellyAt]），所以调它只影响那一条边，
+         * 边与边之间的"果冻"分布照旧。
+         *
+         * ⚠ 不要超过 1：半宽最大是 `(LINE_THIN_PX + 2 × LINE_SWING_PX) / 2 = 2.4`，
+         * 正好等于 [LINE_INSET_PX]，再大线体外沿会伸出屏幕被切平（见 [LINE_SWING_PX] 的约束）。
+         */
+        private val EDGE_SWING_AMP = floatArrayOf(1f, 1f, 1f, 1f)
+
+        /**
+         * 四条边各自的**相位偏移**（弧度）。顺序同上：**上、右、下、左**。
+         *
+         * 全 0 = 四条边共用同一套相位（原来的行为，只是每个点的幅度不同）。
+         * 给某条边一个偏移就把它错开，例如给下边 `3.14f`，上边正鼓的时候下边正瘪。
+         * 想"上下一起、左右慢半拍"就写 `floatArrayOf(0f, 1.57f, 0f, 1.57f)`。
+         *
+         * 相位本身还是每点各不相同（[linePh] 由 [ringNoise] 生成），这里只是再叠一个边的偏移，
+         * 所以同一条边内部依然不会整段一起胀。
+         */
+        private val EDGE_SWING_PHASE = floatArrayOf(0f, 0f, 0f, 0f)
 
         /**
          * 逐点相位散布（**周期**占比）：±这个值，所以相邻控制点最多错开约 0.16 个周期
@@ -536,22 +636,18 @@ class OverlayView @JvmOverloads constructor(
         /**
          * 光斑呼吸的摆幅：**只作用在纵向半轴**（横向恒定，见 [drawTopBloom]）。
          *
-         * 它**单独呼吸**：用的是同一枚 `breath()`，但相位是自己的 [TOP_BLOOM_BREATHE_PHASE]，
-         * 所以和边缘那圈（白线粗细、辉光）并不同步 —— 一枚自己一鼓一鼓的光斑。
+         * 呼吸用的是 [breathePhase] —— 和卡片里那张图片**同一枚相位、同一个周期**
+         * （[PHOTO_BREATHE_MS] = 2s），所以两者同频同相：图片往下浮的同时光斑变高，
+         * 读起来是"整机一起呼吸"，而不是两枚各走各的。
          * 给 0 = 高度也恒定，只剩 alpha 的微起伏。
          */
         const val TOP_BLOOM_HEIGHT_SWING = 0.35f
 
         /**
-         * 光斑呼吸的相位（**周期**占比）—— 它独立于边缘。
-         *
-         * 0.31 ≈ 1.5s：和"四边同时吸呼"的白线错开约三分之一周期，看的时候不会读成同一个动作。
-         * 同一枚弹簧、同一个周期，只是起点不同（想让它更"独自"一点，把相位再往 0.5 靠）。
+         * 发送收尾的时长。**650 ms** —— 参考片里这一下是"原地收成一个点、再上浮一点点"
+         * 然后淡掉，**不是飞出屏幕**（见 [layoutCard] 的 `flying` 分支）。
          */
-        const val TOP_BLOOM_BREATHE_PHASE = 0.31f
-
-        /** 卡片飞走（向上飘出屏幕）的时长。 */
-        const val FLY_MS = 460L
+        const val FLY_MS = 650L
 
         /**
          * 卡片飞走之后，隔多久复位时间轴、重播入场。
@@ -563,16 +659,73 @@ class OverlayView @JvmOverloads constructor(
          */
         const val RESET_DELAY_MS = 1750L
 
-        /** 上滑多少 dp 才算"发送"（松手时判断）。 */
-        const val SEND_THRESHOLD_DP = 85f
+        // ---- 卡片形变：照参考片量出来的关键帧 ----
+        //
+        // 参考片是 720×1584 的录屏，这里把它的 px **原样**搬过来，绘制时用
+        // `refScale = viewW / REF_W` 映射到本机。表里的数字一个都没换算过，
+        // 回原片核对时一眼就能对上。
+        //
+        // 竖直方向只取**相对 t=0 的位移**、不取绝对 y —— 版面还是我自己的，
+        // 参考片只负责"变形过程"，这样换机型也不会把卡片顶到别的版位上去。
+        const val REF_W = 720f
 
         /**
-         * 上滑淡出时，"发送给 xxx"跟着手指往上让开的比例（相对卡片自己的位移）。
+         * 卡片形变的**关键帧表**，每行
+         * `t(秒), top, bottom, tw, bw, bt, bb, tip, ry`：
          *
-         * 卡片是整段跟手（1.0），这行字只跟 0.35 —— 于是卡片往上顶时它被"挤"着往上走，
-         * 而不是原地不动只变淡；走向和卡片一致，不会读成两件事。
+         * - `top / bottom` 卡片上下边 y，`tw / bw` 上 / 下半宽 —— 上下**分开**插值，
+         *   所以压下去是"上窄下宽的梯形"，而不是等比缩小；
+         * - `bt / bb` 卡片里那张图片的上下边（全程占卡片高度的 49%，跟着一起缩）；
+         * - `tip` 上滑提示的基线、`ry` 接收方文字的基线。
+         *
+         * 这套数字来自对参考片的逐帧测量，和我这次直接从 `10月12日(1).mp4` 量到的互相印证：
+         * 图片带高 415 vs 416 px、灰度 92 vs 90、卡片宽 554 vs 551 px。
          */
-        const val PANEL_CHROME_DRAG_FOLLOW = 0.35f
+        private val CARD_KEYS = arrayOf(
+            floatArrayOf(0.00f, 279f, 1127f, 274f, 277f, 497f, 913f, 1200f, 219f),
+            floatArrayOf(1.00f, 243f, 1065f, 269f, 271f, 448f, 850f, 1150f, 176f),
+            floatArrayOf(1.70f, 248f, 947f, 249f, 263f, 418f, 758f, 1090f, 135f),
+            floatArrayOf(2.30f, 286f, 766f, 211f, 235f, 398f, 634f, 1019f, 120f),
+            floatArrayOf(2.80f, 309f, 668f, 187f, 211f, 391f, 566f, 970f, 120f),
+            floatArrayOf(3.30f, 317f, 638f, 175f, 202f, 390f, 548f, 970f, 120f)
+        )
+
+        /** [CARD_KEYS] 的列号（别在代码里写魔法数字）。 */
+        const val KEY_T = 0
+        const val KEY_TOP = 1
+        const val KEY_BOTTOM = 2
+        const val KEY_TW = 3
+        const val KEY_BW = 4
+        const val KEY_TIP = 7
+        const val KEY_RY = 8
+
+        /** 形变跑完的时刻（秒）—— 表里最后一帧。 */
+        const val DEFORM_END_S = 3.30f
+
+        /**
+         * 把卡片挤到底的上滑行程：**参考片里手指走了 706 px**（正好对应整条 3.3 s 时间轴）。
+         * 换算到本机是 `706 × refScale`，@720 屏约等于 373 dp。
+         */
+        const val DRAG_FULL_REF_PX = 706f
+
+        /**
+         * 松手时形变进度 ≥ 这个值才算"发送"。**0.70** —— 参考片里"发送给 xxx"
+         * 正好在 70% 处淡到 0，所以"那行字没了 = 松手必发"，两件事共用同一个刻度。
+         */
+        const val SEND_PROGRESS = 0.70f
+
+        /**
+         * 接收方文字 alpha 的三个拐点（**进度**，不是秒）：前 30% 一动不别，
+         * 52% 处淡到 0.56，70% 归零。参考片里它就是这么一条分段折线 ——
+         * 不是一离开原位就开始淡（那样会淡得太早）。
+         */
+        const val RECV_HOLD = 0.303f
+        const val RECV_MID = 0.516f
+        const val RECV_END = 0.697f
+        const val RECV_MID_ALPHA = 0.56f
+
+        /** 发送收尾时卡片再上浮多少（参考 px，250）—— 一边收成一个点一边往上走。 */
+        const val FLY_RISE_REF_PX = 250f
 
         const val SIDE_TOP = 0
         const val SIDE_BOTTOM = 1
@@ -725,7 +878,7 @@ class OverlayView @JvmOverloads constructor(
     /** 动效页的两种身份：发送（原来那套，默认）/ 接收确认页（本次新增的变体）。 */
     enum class Mode { SEND, RECEIVE }
 
-    /** 上滑越过 [SEND_THRESHOLD_DP] 判定成立的**那一刻**回调（先于飞走动画），一次手势只回调一次。 */
+    /** 上滑越过 [SEND_PROGRESS] 判定成立的**那一刻**回调（先于飞走动画），一次手势只回调一次。 */
     var onSendConfirmed: (() -> Unit)? = null
 
     /** 接收态点主按钮（「接收 N 张照片」）。 */
@@ -898,20 +1051,171 @@ class OverlayView @JvmOverloads constructor(
     private var dragY = 0f
     private var flying = false
     private var flyT = 0f
-    private var flyFromY = 0f
-    private var flyFromScale = 1f
 
     /**
-     * 卡片上滑时，面板上**除卡片之外**的东西（"发送给 xxx"、上滑提示）还剩多少可见度。
-     *
-     * 手指往上带满 [SEND_THRESHOLD_DP] 的行程 —— 也就是"松手就会发送"的那一刻 —— 正好淡到 0，
-     * 所以带得越高、画面上越只剩下那张卡片。
-     *
-     * [flying] 期间恒为 0：卡片飞走时这些字**不许弹回来**（原来 [dragY] 在飞走时被清零，
-     * 上滑提示就当着面又亮了一次）。回弹（[returnCard]）时 [dragY] 归零，它们跟着一起回来。
+     * 松手那一刻的形变进度。飞走期间 [deformProgress] 就冻在这个值上 ——
+     * 卡片从"你松手时的样子"接着收拢，而不是先弹到最扁再收。
      */
-    private val panelChromeFade: Float
-        get() = if (flying) 0f else (1f + dragY / (SEND_THRESHOLD_DP * k)).coerceIn(0f, 1f)
+    private var flyProgress = 0f
+
+    // ---- 卡片形变（每帧由 [layoutCard] 算一次）----
+
+    /** 形变后的卡片轮廓（上窄下宽的梯形 + 贝塞尔侧边）。 */
+    private val shapePath = Path()
+
+    /** 卡片轮廓的外接矩形：投影缩放用。 */
+    private val shapeRect = RectF()
+
+    /** 内容映射的目标矩形（单独一枚，免得和别处的 [scratch] 打架）。 */
+    private val contentRect = RectF()
+
+    /** 把"静止时的卡片矩形"映射到当前形状 —— 卡片里的东西照旧画，最后靠它变形。 */
+    private val contentMatrix = Matrix()
+
+    /** 接收方文字 / 上滑提示各自相对静止位置上移了多少（本机 px）。 */
+    private var recvShiftY = 0f
+    private var tipShiftY = 0f
+
+    /** 接收方文字还剩下多少可见度（参考片的分段曲线，见 [receiverAlphaOf]）。 */
+    private var recvAlpha = 1f
+
+    /**
+     * 当前形变进度 0..1（1 = 被挤到底）。
+     *
+     * 拖动时看手指：往上带满 [DRAG_FULL_REF_PX] 换算到本机的行程就是 1 ——
+     * 也就是参考片里手指走完 706 px、卡片挤到最扁的那一刻。
+     * 飞走期间冻结在松手时的进度（[flyProgress]）。
+     */
+    private val deformProgress: Float
+        get() = if (flying) flyProgress
+        else (-dragY / (DRAG_FULL_REF_PX * refScale)).coerceIn(0f, 1f)
+
+    /** 参考片 px → 本机 px。 */
+    private val refScale: Float get() = viewW / REF_W
+
+    /**
+     * 关键帧表在 t 秒处第 [ch] 列的值：Catmull-Rom 插值，结果**夹在相邻两帧之间**
+     * （`clamp(v, min(b,c), max(b,c))`）—— 和那份 HTML 复刻一致，不许过冲，
+     * 否则卡片会先鼓出去再缩回来。
+     */
+    private fun cardKey(t: Float, ch: Int): Float {
+        val key = CARD_KEYS
+        val last = key.size - 1
+        if (t <= key[0][KEY_T]) return key[0][ch]
+        if (t >= key[last][KEY_T]) return key[last][ch]
+        var i = 0
+        while (i < last - 1 && t > key[i + 1][KEY_T]) i++
+        val t0 = key[i][KEY_T]
+        val span = key[i + 1][KEY_T] - t0
+        val u = if (span <= 0f) 0f else (t - t0) / span
+        val a = key[max(0, i - 1)][ch]
+        val b = key[i][ch]
+        val c = key[i + 1][ch]
+        val d = key[min(last, i + 2)][ch]
+        val v = 0.5f * (2f * b + (c - a) * u +
+                (2f * a - 5f * b + 4f * c - d) * u * u +
+                (3f * b - 3f * c + d - a) * u * u * u)
+        return v.coerceIn(min(b, c), max(b, c))
+    }
+
+    /**
+     * 接收方文字的 alpha —— 参考片实测的分段折线：前 30% 一动不动（0.98），
+     * 52% 处淡到 0.56，70% 归零。飞走期间恒为 0（不许在卡片收拢时又亮回来）。
+     */
+    private fun receiverAlphaOf(p: Float): Float = when {
+        flying -> 0f
+        p <= RECV_HOLD -> 0.98f
+        p <= RECV_MID -> lerp(0.98f, RECV_MID_ALPHA, (p - RECV_HOLD) / (RECV_MID - RECV_HOLD))
+        p <= RECV_END -> RECV_MID_ALPHA * (1f - (p - RECV_MID) / (RECV_END - RECV_MID))
+        else -> 0f
+    }
+
+    /**
+     * 按当前进度算出：[shapePath] / [shapeRect]（卡片轮廓）、[contentMatrix]（内容映射）、
+     * 两行文字的位移和接收方 alpha。
+     *
+     * 全部走**相对 t=0 的比例与位移**，所以不拖动时结果和原来那张静止卡片完全一样
+     * （高度比 1、上下半宽比 1、中心不偏）—— 参考片只负责"变形过程"，不负责我的版面。
+     */
+    private fun layoutCard() {
+        val p = deformProgress
+        val t = p * DEFORM_END_S
+        val rs = refScale
+
+        val h0 = cardKey(0f, KEY_BOTTOM) - cardKey(0f, KEY_TOP)
+        var hR = (cardKey(t, KEY_BOTTOM) - cardKey(t, KEY_TOP)) / h0
+        var twR = cardKey(t, KEY_TW) / cardKey(0f, KEY_TW)
+        var bwR = cardKey(t, KEY_BW) / cardKey(0f, KEY_BW)
+        var centerY = cardRect.centerY() +
+                ((cardKey(t, KEY_TOP) + cardKey(t, KEY_BOTTOM)) / 2f -
+                        (cardKey(0f, KEY_TOP) + cardKey(0f, KEY_BOTTOM)) / 2f) * rs
+
+        if (flying) {
+            // 发送收尾：原地收成一个点，同时再上浮 [FLY_RISE_REF_PX]（参考片的「继续飞出」）
+            val u = smoothStep(flyT)
+            centerY -= FLY_RISE_REF_PX * rs * u
+            hR *= (1f - u)
+            twR *= (1f - u)
+            bwR *= (1f - u)
+        }
+
+        val halfH = cardRect.height() * hR * 0.5f
+        val top = centerY - halfH
+        val bottom = centerY + halfH
+        val halfW = cardRect.width() * 0.5f
+        val tw = halfW * twR
+        val bw = halfW * bwR
+        // 圆角：参考片的 rt = clamp(8,24, h·0.06)、rb = clamp(5,16, h·0.045)（单位是参考 px），
+        // 但**下限守住我自己的 [CARD_RADIUS_DP]** —— 静止时仍是原来那张 23dp 圆角的卡片，
+        // 只有被压扁时圆角才照参考片的比例收下去（压到底约 10dp）。
+        val hRef = h0 * hR
+        val rTop = max((hRef * 0.06f).coerceIn(8f, 24f) * rs, CARD_RADIUS_DP * k * hR)
+        val rBot = max((hRef * 0.045f).coerceIn(5f, 16f) * rs, CARD_RADIUS_DP * k * 0.7f * hR)
+
+        buildSilhouette(shapePath, cardRect.centerX(), top, bottom, tw, bw, rTop, rBot)
+        shapeRect.set(cardRect.centerX() - bw, top, cardRect.centerX() + bw, bottom)
+        contentRect.set(cardRect.centerX() - bw, top, cardRect.centerX() + bw, bottom)
+        // 内容**不做梯形扭曲**，只是被轮廓裁掉 —— 参考片也是填一个矩形再裁
+        contentMatrix.setRectToRect(cardRect, contentRect, Matrix.ScaleToFit.FILL)
+
+        recvShiftY = (cardKey(t, KEY_RY) - cardKey(0f, KEY_RY)) * rs
+        tipShiftY = (cardKey(t, KEY_TIP) - cardKey(0f, KEY_TIP)) * rs
+        recvAlpha = receiverAlphaOf(p)
+    }
+
+    /**
+     * 参考片的卡片轮廓：**上窄下宽的梯形**，两侧各一段贝塞尔（先向外张、再收回），
+     * 四角圆角随高度变。和那份 HTML 复刻的 `silhouette()` 逐行一致。
+     */
+    private fun buildSilhouette(
+        path: Path, cx: Float, top: Float, bottom: Float,
+        tw: Float, bw: Float, rTop: Float, rBot: Float
+    ) {
+        val h = bottom - top
+        val lt = cx - tw
+        val rt = cx + tw
+        val lb = cx - bw
+        val rb = cx + bw
+        path.reset()
+        path.moveTo(lt + rTop, top)
+        path.lineTo(rt - rTop, top)
+        path.quadTo(rt, top, rt, top + rTop)
+        path.cubicTo(
+            rt + (rb - rt) * 0.52f, top + h * 0.42f,
+            rb + (rt - rb) * 0.10f, bottom - h * 0.12f,
+            rb, bottom - rBot
+        )
+        path.quadTo(rb, bottom, rb - rBot, bottom)
+        path.lineTo(lb + rBot, bottom)
+        path.quadTo(lb, bottom, lb, bottom - rBot)
+        path.cubicTo(
+            lb + (lt - lb) * 0.10f, bottom - h * 0.12f,
+            lt + (lb - lt) * 0.52f, top + h * 0.42f,
+            lt, top + rTop
+        )
+        path.quadTo(lt, top, lt + rTop, top)
+        path.close()
+    }
 
     /** 卡片插画的缓存位图。 */
     private var artCache: Bitmap? = null
@@ -1062,13 +1366,27 @@ class OverlayView @JvmOverloads constructor(
     // 往卡片插画缓存里画用户照片时用（缩放要过滤，否则缩略图边缘会发硬）
     private val artPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val iconPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    // 上滑提示里那枚箭头是**描边细箭头**（OPPO 那种），不是实心的粗箭头。
+    // 尺寸按参考帧的逐像素测量来（见 [ARROW_STROKE] / [ARROW_HALF_SPAN]）。
+    private val iconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeWidth = ARROW_STROKE
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+    }
 
-    private val cardPath = Path()
-
+    /**
+     * 细箭头：竖杆 + 45° 两撇，**不闭合**（描边用）。
+     *
+     * 每个坐标都是整格或半格，而视口 24 格 = 24dp（见 [drawSwipeTip]），所以这些数就是 dp：
+     * 竖杆 x = 12、尖端 y = 6、竖杆底 y = 18；两撇落在 y = 6 + [ARROW_HALF_SPAN] = 10.5。
+     * 叠上 [ARROW_STROKE] 的半个线宽，墨迹是 x [ARROW_INK_L]..[ARROW_INK_R] × y 5.25..18.75
+     * = **10.5 × 13.5 dp**（参考帧量到 10.56 × 13.73，差 0.6% / 1.7%）。
+     */
     private val arrowUp = Path().apply {
-        moveTo(12f, 3f); lineTo(5f, 10f); lineTo(9f, 10f); lineTo(9f, 20f)
-        lineTo(15f, 20f); lineTo(15f, 10f); lineTo(19f, 10f); close()
+        val span = ARROW_HALF_SPAN
+        moveTo(12f, 18f); lineTo(12f, 6f)
+        moveTo(12f - span, 6f + span); lineTo(12f, 6f); lineTo(12f + span, 6f + span)
     }
 
     // ------------------------------------------------------------------ 对外接口
@@ -1231,8 +1549,9 @@ class OverlayView @JvmOverloads constructor(
      * 顶部波源光斑：顶边中点、贴着白线往屏幕里鼓出来的一枚**宽扁包**，独立一层。
      *
      * 白线出现（[Timeline.EDGE_START_MS] = 500ms）之后 0.5s 才冒头（[TOP_BLOOM_START_MS]），
-     * 之后**常驻**：纵向半轴和 alpha 跟着呼吸走，用的是同一枚 `breath()`，但相位是自己的
-     * [TOP_BLOOM_BREATHE_PHASE] —— 它**单独呼吸**，和边缘那圈（白线粗细）并不同步。
+     * 之后**常驻**：纵向半轴和 alpha 跟着呼吸走。呼吸读的是 [breathePhase] —— 和卡片里那张
+     * 图片**同一枚相位、同一个周期**（[PHOTO_BREATHE_MS] = 2s），两者同频同相；
+     * 现在**上下两条白线也换成了同一枚时钟**（见 [lineJellyAt]），只有左右两条和辉光还走各自的果冻 [breath]。
      * **横向恒定**：光斑只变高变矮，随呼吸变宽变窄会显得整块在缩放。
      *
      * **颜色跟着发送的图片走**：图片的主色（[PhotoTint]，稍微变浅一点）在
@@ -1250,13 +1569,15 @@ class OverlayView @JvmOverloads constructor(
         val appear = (since / TOP_BLOOM_IN_MS).coerceIn(0f, 1f)
         if (appear <= 0f) return
 
-        val jelly = breath(TOP_BLOOM_BREATHE_PHASE)
+        // 和卡片里那张图片**同一枚呼吸**（同频同相，见 [breathePhase]）：图片往下浮的同时
+        // 光斑变高，两者是一个动作，不再各走各的 4800ms 果冻。
+        val breathe = breathePhase()
         // 横向：只按屏宽比例给，**不参与呼吸**；纵向：跟着呼吸在 [0.77, 1.35] 之间变。
         val rBuilt = TOP_BLOOM_RX_FRAC * viewW
         val rx = rBuilt
-        val ry = TOP_BLOOM_RY_PX * k * (1f + TOP_BLOOM_HEIGHT_SWING * jelly)
+        val ry = TOP_BLOOM_RY_PX * k * (1f + TOP_BLOOM_HEIGHT_SWING * breathe)
         val alpha = TOP_BLOOM_PEAK_ALPHA *
-                (1f + GLOW_BREATHE_AMP[GLOW_NEAR] * jelly) * appear
+                (1f + GLOW_BREATHE_AMP[GLOW_NEAR] * breathe) * appear
 
         // 圆心在 y = 0 上：上半椭圆在屏幕外，露出来的正好是贴着白线的下半部分。
         topBloomOval.set(viewW * 0.5f - rx, -ry, viewW * 0.5f + rx, ry)
@@ -1625,6 +1946,20 @@ class OverlayView @JvmOverloads constructor(
     }
 
     /**
+     * 卡片图片与顶部光斑**共用**的呼吸相位，-1..1 —— 纯正弦，一圈 = [PHOTO_BREATHE_MS]（2s）。
+     *
+     * 两者读同一枚相位 ⇒ **同频同相**：图片往下浮的时候光斑同时变高，看起来是一个动作，
+     * 而不是两枚各走各的（原来光斑走的是 [breath] 那套 4800ms 的果冻 + 自带 0.31 相位）。
+     *
+     * **只有一个旋钮**：改 [PHOTO_BREATHE_MS] 就同时改掉两者的快慢（想更"呼吸"一点给
+     * 2500，想更急一点给 1500）；改 [PHOTO_BREATHE_FRAC] 只动图片的幅度，不动光斑。
+     * 想让两者重新错开，就在这里给某一方加相位偏移 —— 但那就不再同步了。
+     *
+     * [breath] 那枚欠阻尼果冻仍然只给白线 / 边缘辉光用，本函数不参与。
+     */
+    private fun breathePhase(): Float = sin(elapsed / PHOTO_BREATHE_MS * TWO_PI)
+
+    /**
      * 单边光晕的渐变：**脊线在白线上**，往屏幕边缘那侧（外侧辉光）和往屏幕内那侧（内侧辉光）
      * 各淡出一段。
      *
@@ -1831,7 +2166,7 @@ class OverlayView @JvmOverloads constructor(
      * 每段单独 `drawPath`，相邻两段各带半个 ROUND cap，叠在一起就是每 ~21px
      * 一个亮点 / 接缝 —— 常驻状态那圈线一直亮着，所以最明显。现在改成：
      *
-     * - 波前还没铺满 → 给 [edgeStroke] 挂一枚 [frontMask] 径向渐变，
+     * - 波前还没铺满 → 给 [lineRibbon] 挂一枚 [frontMask] 径向渐变，
      *   逐**像素**按 `1 - smoothstep()` 的剖面给 alpha。它和 [waveReached] 同源
      *   （同一个圆心、同一段过渡带），所以显形顺序一点没变，而且比分段采样更连续；
      * - 波前铺满 → 连渐变都不用，纯白一次画完，零接缝零亮点。
@@ -1947,12 +2282,42 @@ class OverlayView @JvmOverloads constructor(
     }
 
     /**
-     * 第 [i] 个采样点的果冻强度：`breath(自己的相位) × 自己的幅度`。
+     * 第 [i] 个采样点属于哪条边：**看法线的主方向**。
      *
-     * 幅度在 `[LINE_JITTER_AMP_FLOOR, 1]`，所以果冻仍在 `[−0.66, 1.0]` 之内（见 [breath]）、
-     * 且**每个位置都真的在动**；`(1 + 果冻) ≥ 0.34 > 0` 这条下限不变：线**只会比最细那一档粗**。
+     * [lineNx] / [lineNy] 是 [buildRibbon] 采样时算好的外法线（指向屏幕外侧），
+     * 所以这个判断和"路径从哪开始、顺着走还是逆着走"完全无关 —— 以后改中线的画法也不会错位。
+     * 返回 `0=上 / 1=右 / 2=下 / 3=左`，和 [EDGE_SWING_AMP] / [EDGE_SWING_PHASE] 的下标一致。
      */
-    private fun lineJellyAt(i: Int): Float = breath(linePh[i]) * lineAm[i]
+    private fun lineEdgeAt(i: Int): Int {
+        return if (abs(lineNy[i]) >= abs(lineNx[i])) {
+            if (lineNy[i] < 0f) 0 else 2
+        } else {
+            if (lineNx[i] > 0f) 1 else 3
+        }
+    }
+
+    /**
+     * 第 [i] 个采样点的果冻强度（−1..1，乘进线宽增量里）。
+     *
+     * - **上下两条边**：跟着**卡片**的呼吸走 —— 同一个时钟（[PHOTO_BREATHE_MS] = 2000ms），
+     *   而且**反相**。`cardBob = +breathePhase() × 卡高`（正 = 向下），所以这里取负号就是
+     *   "卡片往上 → 线变粗、卡片往下 → 线变细"，卡片到最高点那一刻线最粗。
+     *   整条边**一起**鼓，不再乘逐点噪声（[linePh] / [lineAm]）—— 否则读不出"这条线正在变粗"。
+     * - **左右两条边**：保持原来的果冻 —— [breath] 那条 4800ms 阻尼振荡，每点有自己的相位和
+     *   幅度（由 [ringNoise] 生成）。所以左右一点没动，只有上下换成了卡片的节奏。
+     *
+     * 果冻范围：左右仍在 `[−0.66, 1.0]`（见 [breath]），上下是 `[−1, 1]`。两边都满足
+     * `(1 + 果冻) ≥ 0`；最粗那一刻半宽 = `(LINE_THIN_PX + 2 × LINE_SWING_PX) / 2 = 2.4`，
+     * 正好等于 [LINE_INSET_PX]（不会伸出屏幕被切）。[EDGE_SWING_AMP] 仍会整体缩放它。
+     */
+    private fun lineJellyAt(i: Int): Float {
+        val e = lineEdgeAt(i)
+        val jelly = when (e) {
+            EDGE_TOP, EDGE_BOTTOM -> -breathePhase()
+            else -> breath(linePh[i] + EDGE_SWING_PHASE[e]) * lineAm[i]
+        }
+        return jelly * EDGE_SWING_AMP[e]
+    }
 
     /**
      * 按当前呼吸拼出线体：**外沿正向走一遍、内沿反向走一遍**，再闭合。
@@ -2130,7 +2495,7 @@ class OverlayView @JvmOverloads constructor(
 
     private fun drawTransferPanel(c: Canvas) {
         val since = (elapsed - Timeline.PANEL_MS).toFloat()
-        val appear = panelAppearAt(elapsed)
+        val appear = (since / Timeline.PANEL_FADE_MS).coerceIn(0f, 1f)
         val textAlpha = (since / PANEL_TEXT_MS).coerceIn(0f, 1f)
         val slide = (1f - easeOutQuint(appear)) * 8f * k
 
@@ -2150,34 +2515,52 @@ class OverlayView @JvmOverloads constructor(
         val padTop = max(56f * k, min(72f * k, 0.08f * viewH)) + topInset
         val padBottom = 28f * k + bottomInset
 
-        textPaint.typeface = bold
-        textPaint.textSize = 16f * k
-        val lineH = 16f * k * 1.35f
+        // **不用 bold**：接收方那行用 NORMAL。这里量的 lineH / fontMetrics 必须和
+        // [drawReceiverInfo] 实际绘制时用的字体一致，否则垂直居中会差零点几个 px。
+        // 字号 14dp（和上面那行 [drawSwipeTip] 一致），lineH 按同一个字号的行高算。
+        textPaint.typeface = normal
+        textPaint.textSize = 14f * k
+        val lineH = 14f * k * 1.35f
         val fm1 = textPaint.fontMetrics
-        // 信息与卡片之间留一口气，贴太紧会读成"卡片标题"
-        val infoGap = 14f * k
-        val infoH = lineH + infoGap
 
-        val tipGap = 18f * k
+        val available = viewH - padTop - padBottom
+        // 卡片宽高比**跟着图片走**（见 [cardAspect]）：OPPO 在不同图片高度下卡片也是不同高矮的。
+        val aspect = cardAspect()
+        var cardW = min(CARD_W * k, viewW - 100f * k)
+        var cardH = cardW * aspect
+
+        // 卡片会整卡上下浮（见 [drawCard] 的 cardBob），单侧最大浮量就是这个数。
+        // 上面那行"发送给 xxx"、下面那行"上滑发送"都按**卡片浮到极值时仍留一口气**来排版：
+        // 两个 gap 都在基础值上再加一个 bobAmp，否则卡片浮上来就把字压住了。
+        // 这里用的是 fit 之前的卡片高，偏保守（fit 之后卡片只会更矮、浮量更小）。
+        val bobAmp = cardH * PHOTO_BREATHE_FRAC
+        // 信息与卡片之间留一口气，贴太紧会读成"卡片标题"。**20dp**（原来 14dp）——
+        // 这个值是"卡片浮到最高点时仍要剩下的间距"，所以静止时看起来是 20 + bobAmp ≈ 23.7dp。
+        val infoGap = 20f * k + bobAmp
+        val infoH = lineH + infoGap
+        val tipGap = 18f * k + bobAmp
         val tipH = 16f * k * 1.6f
-        // 发送态这一行是「上滑发送」提示；接收态换成两个按钮，占位高度按按钮算。
+        // 接收态：原来「上滑发送」那一行换成两个按钮，占位高度按按钮算。
         // 发送态下 tailH 恒等于 tipH，下面几行算式一个数都没变。
         val tailH = if (mode == Mode.RECEIVE) receiveActionsHeight() else tipH
 
-        val available = viewH - padTop - padBottom
-        var cardW = min(CARD_W * k, viewW - 100f * k)
-        var cardH = cardW * CARD_H / CARD_W
         var blockH = infoH + cardH + tipGap + tailH
         if (blockH > available && available > 0f) {
             val fit = ((available - infoH - tipGap - tailH) / cardH).coerceIn(0.4f, 1f)
             cardW *= fit
-            cardH = cardW * CARD_H / CARD_W
+            cardH = cardW * aspect
             blockH = infoH + cardH + tipGap + tailH
         }
 
-        val top = padTop + ((available - blockH) / 2f).coerceAtLeast(0f)
+        // 整块（信息 + 卡片 + 上滑提示）纵向居中，但像 OPPO 那样**整体上移**一点（见 [BLOCK_LIFT_FRAC]）。
+        // 上移量最多只吃掉一半的上下余量，所以卡片再高也不会顶到 padTop 外面去。
+        val slack = ((available - blockH) / 2f).coerceAtLeast(0f)
+        val top = padTop + slack - min(available * BLOCK_LIFT_FRAC, slack)
         val cardTop = top + infoH
         cardRect.set(viewW / 2f - cardW / 2f, cardTop, viewW / 2f + cardW / 2f, cardTop + cardH)
+
+        // 卡片形变（拖动 / 飞走）先算一次：轮廓、内容映射、两行文字的位移都吃它
+        layoutCard()
 
         // 接收态：按钮的几何每帧在这里算一次（只跟 cardRect 有关），
         // 触摸命中判定调的是同一个函数 —— 画在哪就点得到哪（见 [layoutReceiveActions]）。
@@ -2188,25 +2571,23 @@ class OverlayView @JvmOverloads constructor(
         // 面板整体上浮 8px，与卡片自身的入场位移叠加
         val save = c.save()
         c.translate(0f, slide)
-        // 卡片以外的文字（接收方信息、上滑提示）按 [panelChromeFade] 淡出：手指往上带，
-        // 画面上只剩下那张卡片；松手飞走期间它恒为 0，所以不会在卡片飞出时又亮回来。
-        val chrome = panelChromeFade
-        val chromeAlpha = textAlpha * chrome
-        if (chromeAlpha > 0.003f) {
-            // 这行字只跟手指走 [PANEL_CHROME_DRAG_FOLLOW]，被卡片挤着往上让开
-            val infoSave = c.save()
-            c.translate(0f, dragY * PANEL_CHROME_DRAG_FOLLOW)
-            drawReceiverInfo(c, top, fm1, lineH, chromeAlpha)
-            c.restoreToCount(infoSave)
+        // 接收方信息：位置照参考片的 ry 走 —— 卡片被挤扁时它**向上让开**；
+        // alpha 照参考片的分段曲线（前 30% 一动不动、52% 到 0.56、70% 归零），
+        // 而 70% 正好又是"松手必发"的刻度 —— 那行字没了 = 一定发得出去。
+        if (textAlpha * recvAlpha > 0.003f) {
+            drawReceiverInfo(
+                c, top + lineH / 2f + recvShiftY - (fm1.ascent + fm1.descent) / 2f,
+                fm1, lineH, textAlpha * recvAlpha
+            )
         }
         drawCard(c)
-        if (chromeAlpha > 0.003f) {
-            if (mode == Mode.RECEIVE) {
-                // 接收态：原来「上滑发送」那一行换成两个按钮，淡入跟面板进度（appear）
-                drawReceiveActions(c, appear)
-            } else {
-                drawSwipeTip(c, cardTop + cardH + tipGap + tipH / 2f, chromeAlpha)
-            }
+        // 上滑提示：参考片里它**不淡出**，只是升到卡片底部行程的 47%（2.8s 之后停住）——
+        // 所以 alpha 只吃面板的 textAlpha，淡出那一份不再往上乘。
+        if (mode == Mode.RECEIVE) {
+            // 接收态：原来「上滑发送」那一行换成两个按钮，淡入跟面板进度（appear）
+            if (textAlpha > 0.003f) drawReceiveActions(c, appear)
+        } else if (textAlpha > 0.003f) {
+            drawSwipeTip(c, cardTop + cardH + tipGap + tipH / 2f + tipShiftY, textAlpha)
         }
         c.restoreToCount(save)
 
@@ -2221,8 +2602,12 @@ class OverlayView @JvmOverloads constructor(
         c: Canvas, top: Float,
         fm: Paint.FontMetrics, lineH: Float, alpha: Float
     ) {
-        textPaint.typeface = bold
-        textPaint.textSize = 16f * k
+        // **不用 bold**（需求）：SANS_SERIF.NORMAL，字重和下面"上滑发送"那行统一。
+        // 想要"不叫 bold 但略重一点"的系统观感，就把这里换成
+        // Typeface.create("sans-serif-medium", Typeface.NORMAL)。
+        // 字号 **14dp**，和 [drawSwipeTip] 那行是同一个值 —— 改一处就要改另一处。
+        textPaint.typeface = normal
+        textPaint.textSize = 14f * k
         textPaint.letterSpacing = 0.012f
         textPaint.color = withAlpha(0xFFFFFFFF.toInt(), alpha)
         textPaint.setShadowLayer(12f * k, 0f, 2f * k, withAlpha(0xFF000000.toInt(), 0.55f * alpha))
@@ -2243,126 +2628,128 @@ class OverlayView @JvmOverloads constructor(
         val fadeRaw = ((elapsed - Timeline.PANEL_MS - CARD_DELAY_MS) / CARD_FADE_MS).coerceIn(0f, 1f)
         val enter = easeOutQuint(enterRaw)
 
-        var scale = lerp(0.88f, 1f, enter)
-        var offsetY = lerp(22f * k, 0f, enter)
+        // 入场只剩"位移 + 一点放大"；**形变**（挤压 / 收拢）不在这里，在 [layoutCard]
+        val scale = lerp(0.88f, 1f, enter)
+        val offsetY = lerp(22f * k, 0f, enter)
         var alpha = fadeRaw
 
         if (flying) {
-            val e = easeOutCubic(flyT)
-            offsetY = lerp(flyFromY, -720f * k, e)
-            scale = lerp(flyFromScale, 0.72f, e)
-            alpha *= (1f - (flyT / 0.76f)).coerceIn(0f, 1f)
-        } else if (dragging || dragY != 0f) {
-            offsetY += dragY
-            scale *= max(0.94f, 1f + dragY / (900f * k))
+            // 发送收尾：跟着 [layoutCard] 的收拢一起淡掉（不再飞出屏幕）
+            alpha *= (1f - smoothStep(flyT)).coerceIn(0f, 1f)
         }
 
         if (alpha <= 0.003f) return
 
+        // 呼吸：**整张卡片一起上下浮**。
+        //
+        // 参考片里动的是"卡片里的图片"（卡主体和上下两行文字逐位不动），但那张卡四周留了
+        // 9dp 白边做缓冲 —— 图片在白边里滑动，露出来的是本来就该白的那一圈。我们把白边去掉、
+        // 图片又铺满整卡，卡片本身就是图片了，于是"图片在卡内滑动"必然露底。
+        // 所以改成**卡片整体移动**：图片和轮廓一起走，边缘永远不露，也就不需要"画大一圈再裁"。
+        // 上面那行"发送给 xxx"、下面那行"上滑发送"照旧不动。
+        //
+        // 幅度见 [PHOTO_BREATHE_FRAC]（已从"相对比例"改成对齐参考片的绝对位移）。
+        // 版面上 [drawTransferPanel] 会按同一个幅度给卡上/卡下两行文字留间距 —— 改这里要一起改。
+        val cardBob = breathePhase() * cardRect.height() * PHOTO_BREATHE_FRAC
         val save = c.save()
+        c.translate(0f, cardBob)
         c.translate(cardRect.centerX(), cardRect.centerY() + offsetY)
         c.scale(scale, scale)
         c.translate(-cardRect.centerX(), -cardRect.centerY())
 
-        val r = 23f * k
+        // 投影：**已去掉**。
+        //
+        // 原来"卡片四周那一圈"就是它：5 层半透明轮廓，以卡片中心为基准外扩 0/8/16/24/32 dp、
+        // 每层向下平移 22→11.4 dp、alpha 26→6（约 10%→2.4% 黑）。实测它在卡片外侧造成
+        // 13~20 个亮度级、延伸 14~46 dp 的**纯渐变**（细节能量 0.02~0.23，和远处背景一模一样
+        // ⇒ 是压暗不是模糊）；因为每层都往下平移，上方覆盖最少，所以看着"底部更宽"。
+        //
+        // 白描边去掉之后它变得格外显眼（卡片边缘是暗的，直接溶进影子里），所以整块删掉。
+        // 要恢复或调淡（26f → 12f 就是淡一半）：
+        //   shadowPaint.color = 0xFF000000.toInt()
+        //   for (i in 0..4) { val grow = i * 8f * k
+        //     shadowPaint.alpha = ((26f - i * 5f) * alpha).toInt().coerceIn(0, 255)
+        //     val sv = c.save(); c.translate(0f, 22f * k * (1f - i * 0.12f))
+        //     if (grow > 0f) c.scale(1f + grow / (shapeRect.width() * 0.5f),
+        //                            1f + grow / (shapeRect.height() * 0.5f),
+        //                            shapeRect.centerX(), shapeRect.centerY())
+        //     c.drawPath(shapePath, shadowPaint); c.restoreToCount(sv) }
 
-        // 投影：0 22px 55px #0007，用几层半透明圆角矩形近似
-        shadowPaint.color = 0xFF000000.toInt()
-        for (i in 0..4) {
-            val grow = i * 8f * k
-            shadowPaint.alpha = ((26f - i * 5f) * alpha).toInt().coerceIn(0, 255)
-            scratch.set(
-                cardRect.left - grow,
-                cardRect.top - grow + 22f * k * (1f - i * 0.12f),
-                cardRect.right + grow,
-                cardRect.bottom + grow + 22f * k * (1f - i * 0.12f)
-            )
-            c.drawRoundRect(scratch, r + grow, r + grow, shadowPaint)
-        }
+        // **不再画卡片底色**：照片铺满整个轮廓，卡底永远被盖住，画了也是白画。
+        // 去掉之后"卡片"只剩三件东西：轮廓（上窄下宽的形变 + 圆角）、照片本身、
+        // 以及下方那层投影 —— 卡片就是图片。[cardPaint] 这枚 Paint 留着，
+        // 万一哪次形变里发现轮廓边缘有极细的透底，加回来一行就够。
 
-        // 卡片本体
-        cardPaint.color = withAlpha(0xFFF8F8F8.toInt(), alpha)
-        c.drawRoundRect(cardRect, r, r, cardPaint)
+        // **卡片不再描边**。量了参考帧（720px 宽、t=6s 科比海报那帧）：卡片白底对着深色背景，
+        // 边缘是一条 `40 → 95 → 178 → 207 → 250` 的 3~4px **柔和**过渡，没有硬线；
+        // 我这枚 1px、α0.66 的白描边是多出来的，去掉才和 OPPO 一致。
+        // [edgeStroke] 这个 Paint 还留着，想加回来一行就够。
 
-        // 外侧 1px 白色描边（[edgeStroke] 和边缘光共用，先摘掉可能挂着的波前遮罩）
-        edgeStroke.shader = null
-        edgeStroke.strokeWidth = 1f * k
-        edgeStroke.color = withAlpha(0xFFFFFFFF.toInt(), 0.66f * alpha)
-        scratch.set(cardRect.left - 0.5f * k, cardRect.top - 0.5f * k, cardRect.right + 0.5f * k, cardRect.bottom + 0.5f * k)
-        c.drawRoundRect(scratch, r, r, edgeStroke)
+        // 卡片里的东西画在**静止时的卡片矩形**里，再用 [contentMatrix] 整体映射到当前形状、
+        // 并裁在轮廓里 —— 参考片也是填一个矩形再裁，内容不做梯形扭曲，只是被轮廓切掉。
+        val contentSave = c.save()
+        c.clipPath(shapePath)
+        c.concat(contentMatrix)
 
-        // 照片区：插画是静态的，用缓存位图，避免常驻微颤动画每帧重画所有路径与渐变
-        val photo = RectF(
-            cardRect.left + 9f * k,
-            cardRect.top + 9f * k,
-            cardRect.right - 9f * k,
-            cardRect.bottom - 53f * k
-        )
-        val pr = 15f * k
+        // 照片**铺满整张卡**，而且**不做自己的呼吸** —— 呼吸由 [drawCard] 开头那记
+        // `cardBob` 作用在整张卡片上（原因见那里）。图片和卡片是刚性一体，
+        // 任何相对位移都会在边缘露出卡片底色，所以这里必须是静止的矩形。
+        val photo = RectF(cardRect.left, cardRect.top, cardRect.right, cardRect.bottom)
         val art = artworkBitmap(photo.width().toInt(), photo.height().toInt())
         photoClip.alpha = (alpha * 255f).toInt().coerceIn(0, 255)
-        val save2 = c.save()
-        cardPath.reset()
-        cardPath.addRoundRect(photo, pr, pr, Path.Direction.CW)
-        c.clipPath(cardPath)
+        // 圆角不在这里裁：内容整体裁在 [shapePath] 上，照片四角自然跟着卡片的轮廓圆角走。
         c.drawBitmap(art, artSrc, photo, photoClip)
-        c.restoreToCount(save2)
 
-        // 文字区
-        textPaint.typeface = bold
-        textPaint.textSize = 12f * k
-        textPaint.letterSpacing = 0.008f
-        textPaint.clearShadowLayer()
-        val fmStrong = textPaint.fontMetrics
-        val strongH = fmStrong.descent - fmStrong.ascent
-
-        textPaint.typeface = normal
-        textPaint.textSize = 9f * k
-        textPaint.letterSpacing = 0f
-        val fmSpan = textPaint.fontMetrics
-        val spanH = fmSpan.descent - fmSpan.ascent
-
-        val boxBottom = cardRect.bottom - 13f * k
-        val spanTop = boxBottom - spanH
-        val strongTop = spanTop - 4f * k - strongH
-
-        textPaint.typeface = bold
-        textPaint.textSize = 12f * k
-        textPaint.color = withAlpha(0xFF252B31.toInt(), alpha)
-        c.drawText(cardTitle, cardRect.left + 17f * k, strongTop - fmStrong.ascent, textPaint)
-
-        textPaint.typeface = normal
-        textPaint.textSize = 9f * k
-        textPaint.color = withAlpha(0xFF737B82.toInt(), alpha)
-        c.drawText(cardMeta, cardRect.left + 17f * k, spanTop - fmSpan.ascent, textPaint)
-
+        c.restoreToCount(contentSave)
         c.restoreToCount(save)
     }
 
     private fun drawSwipeTip(c: Canvas, centerY: Float, alpha: Float) {
-        // tipFloat: 1.5s 上下浮动 + 明暗呼吸
-        val phase = (elapsed % 1500L) / 1500f
+        // tipFloat：上下"招呼一下" —— **只动位置，不动亮度**。
+        // **只有箭头跟着浮动** —— 文字钉在 centerY 上不动：整行一起晃会读成"这行在抖"，
+        // 而上滑提示要的动作本来就只有那个箭头。
+        // 周期和幅度按参考帧实测（见 [TIP_FLOAT_MS] / [TIP_FLOAT_SWING]）。
+        val phase = (elapsed % TIP_FLOAT_MS) / TIP_FLOAT_MS.toFloat()
         val tri = if (phase < 0.5f) phase * 2f else (1f - phase) * 2f
-        val floatY = -4f * k * smoothStep(tri)
-        // 上滑 / 飞走时的淡出由调用方按 [panelChromeFade] 算进 alpha 里了 —— 这里不再自己算
-        // 一份，否则同一个系数乘两遍，提示会比"发送给 xxx"先消失。
-        val a = alpha * lerp(0.72f, 1f, smoothStep(tri))
+        val ease = smoothStep(tri)
+        // 箭头浮动幅度（dp）：**上下各一半** —— 上 3dp、下 3dp（总行程 6dp）。
+        // 想更明显就加 [TIP_FLOAT_SWING]；注意上方余量是 tipGap(18dp)，上抬超过它箭头会贴到卡片底边上。
+        val arrowSwing = TIP_FLOAT_SWING * k
+        // 位置由调用方按参考片的 tip 曲线给（见 [layoutCard]）；这里只管浮动。
+        // 参考片里这条提示**不淡出**（只有"发送给 xxx"会淡），所以 alpha 只吃面板的 textAlpha。
+        // 亮度**恒定**，不再跟着 ease 走：以前它是 0.72→1.0 的明暗起伏，叠在 1.5s 浮动上，
+        // 看起来就是"文字和箭头在呼吸变色"。现在只保留浮动，亮度钉在面板的 alpha 上。
+        // （箭头和文字、以及下面那层阴影用的是同一个 a，所以三者一起恒定。）
+        val a = alpha
         if (a <= 0.003f) return
 
-        val iconSize = 16f * k
+        // 箭头视口：24 格 → 24dp，所以视口里 **1 格 = 1dp**（[ARROW_STROKE] / [ARROW_HALF_SPAN] 那组）。
+        // 墨迹占中间 10.5 × 13.5 dp —— 参考帧量到 10.56 × 13.73。
+        val iconSize = 24f * k
         textPaint.typeface = normal
-        textPaint.textSize = 13f * k
+        // 字号和卡片上方那行（[drawReceiverInfo] 的 14dp）**保持一致**（原来是 13dp，中间统一到 16dp 又一起降到 14dp）。
+        // 预留高度不用动：[drawTransferPanel] 里的 tipH 是固定 25.6dp，装得下 14dp 的文字和 13.5dp 的箭头。
+        textPaint.textSize = 14f * k
         textPaint.letterSpacing = 0f
         val textW = textPaint.measureText(swipeTipText)
-        val gap = 7f * k
-        val rowW = iconSize + gap + textW
-        val startX = viewW / 2f - rowW / 2f
-        val cy = centerY + floatY
+        // 排版按**墨迹**算，不按视口算：视口左右各有 6.75 格空白（= 墨迹左缘），拿视口宽排会多出这些空档。
+        // 参考帧里箭头墨迹右缘到文字左缘只有约 4 设计px，所以 gap 取 4dp、并按墨迹宽度起排。
+        // 墨迹边界跟着箭头几何走（见 [ARROW_INK_L] / [ARROW_INK_R]）—— 以后改箭头形状不用再动这里。
+        val iconInkPad = iconSize * ARROW_INK_L / 24f
+        val iconInkW = iconSize * (ARROW_INK_R - ARROW_INK_L) / 24f
+        val gap = 4f * k
+        val rowW = iconInkW + gap + textW
+        val startX = viewW / 2f - rowW / 2f - iconInkPad
+        // ease 是 0→1→0 的包络，映射成 -1→+1→-1 就成了"上下各一半"的往复；
+        // 屏幕 y 向下 ⇒ 负值在文字上方、正值在文字下方，offset = 0 时箭头正好和文字对齐。
+        // 文字不参与（下面画文字时用的是 centerY）。
+        val arrowOffset = (ease * 2f - 1f) * arrowSwing
+        val arrowCy = centerY + arrowOffset
 
         iconPaint.color = withAlpha(0xFFFFFFFF.toInt(), a * 0.93f)
         val save = c.save()
         val s = iconSize / 24f
-        c.translate(startX, cy - iconSize / 2f)
+        c.translate(startX, arrowCy - iconSize / 2f)
         c.scale(s, s)
         c.drawPath(arrowUp, iconPaint)
         c.restoreToCount(save)
@@ -2370,7 +2757,12 @@ class OverlayView @JvmOverloads constructor(
         textPaint.color = withAlpha(0xFFFFFFFF.toInt(), a * 0.93f)
         textPaint.setShadowLayer(8f * k, 0f, 2f * k, withAlpha(0xFF000000.toInt(), 0.5f * a))
         val fm = textPaint.fontMetrics
-        c.drawText(swipeTipText, startX + iconSize + gap, cy - (fm.ascent + fm.descent) / 2f, textPaint)
+        // 文字的位置**不含浮动**：整条提示里只有上面那个箭头在上下动。
+        // 起点 = 墨迹左缘 + 墨迹宽 + gap。注意 [startX] 是**视口**左缘（已经左移了一个 iconInkPad），
+        // 所以不能再拿 iconSize 去加 —— 那会让整行右移约 2.3dp（正好是视口两侧空白的一半）。
+        val textX = startX + iconInkPad + iconInkW + gap
+        // 基线用字体度量算，所以**跟着字号自动居中**：改 textSize 不需要动这里。
+        c.drawText(swipeTipText, textX, centerY - (fm.ascent + fm.descent) / 2f, textPaint)
         textPaint.clearShadowLayer()
     }
 
@@ -2509,7 +2901,8 @@ class OverlayView @JvmOverloads constructor(
                 if (!dragging) return false
                 dragging = false
                 parent?.requestDisallowInterceptTouchEvent(false)
-                if (dragY < -SEND_THRESHOLD_DP * k) startFlyAway() else returnCard()
+                // 挤到 70% 以上松手就发出去 —— 和"发送给 xxx"淡没了的刻度是同一个
+                if (deformProgress >= SEND_PROGRESS) startFlyAway() else returnCard()
                 return true
             }
         }
@@ -2579,6 +2972,25 @@ class OverlayView @JvmOverloads constructor(
      * 卡片里的插画是静态的，渲染一次缓存成 Bitmap。
      * 时间轴进入常驻段后画面会一直重绘，每帧重画十几条路径和渐变太浪费。
      */
+    /**
+     * 卡片的宽高比 —— **跟着图片走**。
+     *
+     * OPPO 对不同高度的图片会给不同高矮的卡片（参考素材里那两张图的卡片就分别是 1.0 和 1.22），
+     * 所以这里不写死 [CARD_H] / [CARD_W]：有用户照片就按照片自己的宽高比，
+     * [artworkBitmap] 里那套 cover 裁切于是退化成"几乎不裁"，图片不会被切掉边。
+     * 没照片（走插画）时仍然用设计好的固定比例。
+     *
+     * 夹在 0.66..1.6 之间：比 3:2 更扁、或比 8:5 更长的图会把版面顶爆 —— 那种图照旧由
+     * cover 裁掉一点，兜底逻辑没动。
+     */
+    private fun cardAspect(): Float {
+        val photo = cardPhoto
+        if (photo == null || photo.isRecycled || photo.width <= 0 || photo.height <= 0) {
+            return CARD_H / CARD_W
+        }
+        return (photo.height.toFloat() / photo.width).coerceIn(0.66f, 1.6f)
+    }
+
     private fun artworkBitmap(width: Int, height: Int): Bitmap {
         val w = width.coerceAtLeast(1)
         val h = height.coerceAtLeast(1)
@@ -2644,7 +3056,10 @@ class OverlayView @JvmOverloads constructor(
         }
     }
 
-    /** 越过阈值：卡片飞走，随后复位时间轴、重播入场（不再有任何「已发送」提示）。 */
+    /**
+     * 挤过 [SEND_PROGRESS] 松手：卡片从"你松手时的形状"**原地收成一个点**再淡掉
+     * （参考片的收尾动作，见 [layoutCard]），随后复位时间轴、重播入场。
+     */
     private fun startFlyAway() {
         // 越阈值判定成立的那一刻先回报（**在 flying / 飞走动画启动之前**）；
         // 一次手势只会走到这里一次（`flying` 挡住后续触摸），标志位是第二道保险。
@@ -2652,9 +3067,8 @@ class OverlayView @JvmOverloads constructor(
             sendConfirmedNotified = true
             onSendConfirmed?.invoke()
         }
+        flyProgress = deformProgress   // 先冻住"松手那一刻挤到哪儿了"
         flying = true
-        flyFromY = dragY
-        flyFromScale = max(0.94f, 1f + dragY / (900f * k))
         flyAnimator?.cancel()
         flyAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
             duration = FLY_MS
@@ -2671,6 +3085,7 @@ class OverlayView @JvmOverloads constructor(
     private fun finishSend() {
         flying = false
         flyT = 0f
+        flyProgress = 0f
         dragY = 0f
         // 这一轮发送结束（`onSendFinished` 是复位语义，这里只是让下一次上滑能再回报一次确认）
         sendConfirmedNotified = false
