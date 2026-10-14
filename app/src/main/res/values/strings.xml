@@ -14,6 +14,9 @@
     <string name="card_meta">JPG · 4.8 MB · 1 张照片</string>
     <string name="panel_swipe_tip">上滑发送 1 张照片</string>
 
+    <!--pri added by zhuyang,C-3: brand line drawn at the very bottom of both panels (send page + receive card),20261014-->
+    <string name="brand_line">一键互联</string>
+
     <!--
       带参数的那几条：NFC 层拿到了真实的对端标识 / 张数就换成这些。
       peer 为空（或张数 <= 0）时不动效层不换，继续用上面那几条默认文案 —— 保留单独演示的能力。

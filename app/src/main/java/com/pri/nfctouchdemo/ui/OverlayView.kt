@@ -711,6 +711,9 @@ class OverlayView @JvmOverloads constructor(
         /** 底部状态行那行小字离屏幕底边的高度（设计 px）：正好落在底部品牌文字上方。 */
         const val STATUS_BOTTOM_PX = 46f
 
+        //pri added by zhuyang,C-3: brand line "一键互联" at the very bottom, below the status line,20261014
+        const val BRAND_BOTTOM_PX = 20f
+
         /** 接收态按中的是哪个按钮（[pressedButton] 用）。 */
         const val BUTTON_NONE = 0
         const val BUTTON_PRIMARY = 1
@@ -1009,6 +1012,9 @@ class OverlayView @JvmOverloads constructor(
     private val defaultCardTitle = context.getString(R.string.card_title)
     private val defaultCardMeta = context.getString(R.string.card_meta)
 
+    //pri added by zhuyang,C-3: bottom brand line, drawn on both the send panel and the receive card,20261014
+    private val brandLineText = context.getString(R.string.brand_line)
+
     // 当前生效的文案：默认是上面那几条，[setPeerInfo] / [setCardInfo] 会覆盖
     private var receiverText = defaultReceiverText
     private var swipeTipText = defaultSwipeTipText
@@ -1035,7 +1041,7 @@ class OverlayView @JvmOverloads constructor(
      * 想要产品里那两句「发送给 用户XXXX」「上滑发送 N 张照片」时改成 true 即可。
      * 接收页**不受**这个开关影响：它本来就用对端标识和真实张数（Test 里没有这一页）。
      */
-    private val sendTextsFromPeer = false
+    private val sendTextsFromPeer = true //pri modify by zhuyang,C-3: send page title and swipe tip now use the real peer and count,20261014
 
     /**
      * 按当前 [mode] / [peer] / [peerCount] 重算这几条文案。
@@ -1061,7 +1067,7 @@ class OverlayView @JvmOverloads constructor(
         } else {
             defaultSwipeTipText
         }
-        if (count > 0) {
+        if (mode == Mode.RECEIVE && peerCount > 0) { //pri modify by zhuyang,C-3: keep the real file name/size subtitle on the send page, count meta only on the receive card,20261014
             cardMeta = context.getString(R.string.card_meta_count, metaType(), count)
         }
         receiveAcceptText = if (peerCount > 0) {
@@ -2289,6 +2295,10 @@ class OverlayView @JvmOverloads constructor(
         if (statusText != null && textAlpha > 0.003f) {
             drawStatusLine(c, textAlpha)
         }
+        //pri added by zhuyang,C-3: brand line, one row below the status line, fades in with the panel text,20261014
+        if (textAlpha > 0.003f) {
+            drawBrandLine(c, textAlpha)
+        }
     }
 
     /** 接收方信息：单行、居中，压在照片卡片正上方。 */
@@ -2582,6 +2592,17 @@ class OverlayView @JvmOverloads constructor(
         c.drawText(text, viewW / 2f - textPaint.measureText(text) / 2f, y, textPaint)
         textPaint.clearShadowLayer()
     }
+
+    //pri added by zhuyang,C-3: brand line "一键互联", smallest size, centred at the very bottom of both panels,20261014,start
+    private fun drawBrandLine(c: Canvas, alpha: Float) {
+        textPaint.typeface = normal
+        textPaint.textSize = 10f * k
+        textPaint.letterSpacing = 0f
+        textPaint.color = withAlpha(0xFFFFFFFF.toInt(), alpha * 0.55f)
+        val y = viewH - bottomInset - BRAND_BOTTOM_PX * k
+        c.drawText(brandLineText, viewW / 2f - textPaint.measureText(brandLineText) / 2f, y, textPaint)
+    }
+    //pri added by zhuyang,C-3: brand line "一键互联", smallest size, centred at the very bottom of both panels,20261014,end
 
     // ---------------------------------------------------------- 上滑手势
 
