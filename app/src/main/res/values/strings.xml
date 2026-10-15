@@ -74,6 +74,11 @@
     <string name="fail_timeout">对方未响应</string>
     <!--pri added by zhuyang,Fail banner (D1): TapService picks the two lines, OverlayService only renders,20261014,end-->
 
+    <!--pri added by zhuyang,D5: in-app image viewer (replaces the Google Photos pager),20261014,start-->
+    <string name="viewer_load_failed">图片加载失败</string>
+    <string name="viewer_position">%1$d / %2$d</string>
+    <!--pri added by zhuyang,D5: in-app image viewer (replaces the Google Photos pager),20261014,end-->
+
     <!-- ================= 提示 ================= -->
     <string name="toast_need_overlay">请先开启悬浮窗权限，动效才能盖在别的应用上</string>
     <string name="toast_need_images">先在主页选好要发送的那张照片</string>

@@ -99,6 +99,28 @@
         </activity>
 
         <!--
+          pri added by zhuyang,D5: in-app image viewer (replaces the Google Photos pager),20261014,start
+          Opened by nfc.TapService (explicit intent, FLAG_ACTIVITY_NEW_TASK) after a transfer completed,
+          showing only the photos of that transfer. It is a real Activity, not the overlay path.
+            · exported=false      - only our own service / app starts it, nobody else needs to
+            · launchMode=singleTop - a second transfer while the viewer is up updates this instance
+                                     (onNewIntent) instead of stacking a second viewer
+            · excludeFromRecents  - a transient viewer must not litter the recents stack (if the viewer
+                                     ever becomes the root of its own task, that task stays out of recents)
+            · configChanges       - rotation is handled in place (ZoomImageView refits itself), so the
+                                     photo is not decoded again and no Activity restart is involved
+            · theme               - windowAnimationStyle=@null: the transition is ours to kill, see themes.xml
+          pri added by zhuyang,D5: in-app image viewer (replaces the Google Photos pager),20261014,end
+        -->
+        <activity
+            android:name=".viewer.ImageViewerActivity"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:theme="@style/Theme.NFCTouchDemo.Viewer" />
+
+        <!--
           透明跳板：系统把 NFC 标签交给它 → 立即转交常驻服务处理（弹动效悬浮窗）→ 自身秒退。
           界面不可见，所以用透明主题，且不进最近任务。
         -->

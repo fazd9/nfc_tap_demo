@@ -123,6 +123,9 @@ public class Xfer {
     private volatile int mExpect;           //pri added by zhuyang,Total image count announced by TYPE_META this round,20261014
     private volatile int mRound;            //pri added by zhuyang,Round token: a stale verdict must not leak into the next round,20261014
     private volatile Uri mFirstSavedUri;    //pri added by zhuyang,MediaStore Uri of the first image saved this round,20261014
+    //pri added by zhuyang,Every MediaStore Uri saved this round in receive order: the in-app viewer pages through them,20261014
+    //pri added by zhuyang,CopyOnWriteArrayList because saveToGallery runs on the IO thread while the viewer list is read on the main thread,20261014
+    private final java.util.List<Uri> mSavedUris = new java.util.concurrent.CopyOnWriteArrayList<Uri>();
 
     private boolean mReceiverRole;
     private volatile boolean mCanSend;   //pri added by zhuyang,Holds photos and has not swiped: may still become the sender,20261014
@@ -244,6 +247,7 @@ public class Xfer {
         mDoneNotified = false;
         mExpect = 0;
         mFirstSavedUri = null;
+        mSavedUris.clear(); //pri added by zhuyang,New round: the viewer list of the previous round must not leak into this one,20261014
         //pri added by zhuyang,Bump the round token and drop the verdict session state of the previous round,20261014,end
         try { if (mServer != null) mServer.close(); } catch (Exception ignored) {}
         mServer = null;
@@ -850,8 +854,11 @@ public class Xfer {
                     @Override public void run() {
                         final Bitmap bmp = decode(data);
                         final Uri savedUri = saveToGallery(data); //pri added by zhuyang,saveToGallery now returns the MediaStore Uri,20261014
-                        if (savedUri != null && mFirstSavedUri == null) {
-                            mFirstSavedUri = savedUri; //pri added by zhuyang,Remember the first saved Uri of this round,20261014
+                        if (savedUri != null) {
+                            mSavedUris.add(savedUri); //pri added by zhuyang,Keep the whole round's list: the in-app viewer pages through it,20261014
+                            if (mFirstSavedUri == null) {
+                                mFirstSavedUri = savedUri; //pri added by zhuyang,Remember the first saved Uri of this round,20261014
+                            }
                         }
                         final boolean saved = savedUri != null;
                         synchronized (all) { all.add(bmp); }
@@ -1107,6 +1114,11 @@ public class Xfer {
     //pri added by zhuyang,MediaStore Uri of the first image saved this round (null = nothing saved),20261014
     public Uri firstSavedUri() {
         return mFirstSavedUri;
+    }
+
+    //pri added by zhuyang,Snapshot of every MediaStore Uri saved this round, in receive order (empty = nothing saved),20261014
+    public java.util.ArrayList<Uri> savedUris() {
+        return new java.util.ArrayList<Uri>(mSavedUris);
     }
     //pri added by zhuyang,Offer/verdict layer of the two-phase protocol,20261014,end
 

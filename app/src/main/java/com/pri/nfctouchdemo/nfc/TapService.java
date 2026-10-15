@@ -13,6 +13,7 @@ import android.os.Looper;
 import com.pri.nfctouchdemo.R; //pri added by zhuyang,D1: fail banner lines live in strings.xml,20261014
 import com.pri.nfctouchdemo.gfx.ScreenCapture; //pri added by zhuyang,Screen-capture backdrop (LongShotScreen silent ScreenCaptureInternal port),20261014
 import com.pri.nfctouchdemo.service.OverlayService;
+import com.pri.nfctouchdemo.viewer.ImageViewerActivity; //pri added by zhuyang,D5: viewer is our own Activity now,20261014
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -132,9 +133,9 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
             if (sXfer != null) sXfer.confirmReceived(); //pri added by zhuyang,Write the ACCEPT verdict back on the same socket,20261014
             if (mTransferDone && mFullCount > 0) { // 已经收完,直接看全部
                 mReceiveShown = false;
-                //pri modify by zhuyang,Detach the animation window; the viewer is the system one now,20261014
+                //pri modify by zhuyang,Detach the animation window; the in-app viewer takes over,20261014
                 startService(OverlayService.hideIntent(this));
-                openSystemViewer();
+                openViewer();
                 Bus.unlockRole();
             } else {
                 startService(OverlayService.statusIntent(this,
@@ -345,15 +346,15 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
             if (mAccepted) {
                 mReceiveShown = false;
                 // 用户已经点过"接收":动效层没别的用途了,先摘掉它的窗口再开查看器
-                //pri modify by zhuyang,D4: viewer is now the system one, opened on the saved MediaStore Uri,20261014
+                //pri modify by zhuyang,D5: viewer is our own Activity now, opened on this round's saved MediaStore Uris,20261014
                 startService(OverlayService.hideIntent(this, OverlayService.DISSOLVE_MS)); //pri modify by zhuyang,E5: dissolve before detaching (E5 main path),20261014
-                openSystemViewer();
+                openViewer();
                 Bus.unlockRole();
             }
         } else if (mAccepted) {
             //pri modify by zhuyang,E5: dissolve the card before the window goes,20261014
             startService(OverlayService.hideIntent(this, OverlayService.DISSOLVE_MS)); // 同上:进查看器前先摘掉动效窗口
-            openSystemViewer();
+            openViewer();
             Bus.unlockRole();
         }
     }
@@ -543,25 +544,30 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         }
     }
 
-    //pri added by zhuyang,D4: open the just-saved photo with the system viewer instead of the old overlay viewer,20261014,start
-    //pri added by zhuyang,Uri comes from the MediaStore record Xfer made while saving; nothing saved = log only,20261014
-    private void openSystemViewer() {
-        Uri u = (sXfer != null) ? sXfer.firstSavedUri() : null;
-        if (u == null) { Bus.log("接收完成:本轮没有落盘 Uri,不打系统查看器"); return; }
+    //pri added by zhuyang,D5: open this round's saved photos in our own viewer,20261014,start
+    //pri added by zhuyang,Uris come from the MediaStore records Xfer made while saving; nothing saved = log only,20261014
+    //pri added by zhuyang,Uris (not bitmaps) cross the Intent boundary: the saved list is already there and stays small,20261014
+    private void openViewer() {
+        Uri first = (sXfer != null) ? sXfer.firstSavedUri() : null;
+        if (first == null) { Bus.log("接收完成:本轮没有落盘 Uri,不打开查看器"); return; }
+        ArrayList<Uri> uris = sXfer.savedUris();
+        if (uris.isEmpty()) uris.add(first); //pri added by zhuyang,Defensive: never open the viewer with an empty list,20261014
         try {
-            //pri added by zhuyang,D4: no slide-in transition: explicit zero animations; FLAG_ACTIVITY_NO_ANIMATION
-            //pri added by zhuyang,alone is ignored by the modern ActivityOptions/transition system,20261014
-            startActivity(new Intent(Intent.ACTION_VIEW)
-                    .setDataAndType(u, "image/*")
-                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
-                            | Intent.FLAG_GRANT_READ_URI_PERMISSION
-                            | Intent.FLAG_ACTIVITY_NO_ANIMATION), //pri added by zhuyang,No slide-in transition: the panel dissolves in place instead of handing off to a sliding Activity,20261014
+            //pri added by zhuyang,D5: the target is our own Activity, so the transition is ours to kill: the viewer
+            //pri added by zhuyang,theme sets windowAnimationStyle=@null (the load-bearing part - a Service cannot call
+            //pri added by zhuyang,overridePendingTransition); the options below plus NO_ANIMATION are belt-and-braces,20261014
+            Bus.log("接收完成:打开应用内查看器 " + uris.size() + " 张");
+            startActivity(new Intent(this, ImageViewerActivity.class)
+                            .putParcelableArrayListExtra(ImageViewerActivity.EXTRA_URIS, uris)
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                                    | Intent.FLAG_ACTIVITY_CLEAR_TOP
+                                    | Intent.FLAG_ACTIVITY_NO_ANIMATION),
                     ActivityOptions.makeCustomAnimation(this, 0, 0).toBundle());
         } catch (Throwable t) {
-            Bus.log("打开系统查看器失败: " + t);
+            Bus.log("打开应用内查看器失败: " + t);
         }
     }
-    //pri added by zhuyang,D4: open the just-saved photo with the system viewer instead of the old overlay viewer,20261014,end
+    //pri added by zhuyang,D5: open this round's saved photos in our own viewer,20261014,end
 
     private static String field(String payload, String key) {
         for (String kv : payload.split("\\|")) {

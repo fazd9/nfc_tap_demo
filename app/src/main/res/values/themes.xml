@@ -27,4 +27,19 @@
     </style>
 
     <style name="Theme.NFCTouchDemo" parent="Base.Theme.NFCTouchDemo" />
+
+    <!--pri added by zhuyang,D5: in-app image viewer theme (replaces the Google Photos pager),20261014,start-->
+    <!--
+      The transition killer. The caller is a Service, so overridePendingTransition is not available
+      (it is an Activity method) and FLAG_ACTIVITY_NO_ANIMATION alone is not enough; @null makes
+      WindowManager.LayoutParams.windowAnimations 0 for this Activity, which kills the enter and the
+      exit animation however the Activity is started. This is the load-bearing part - the
+      ActivityOptions.makeCustomAnimation(0, 0) passed by the caller is only belt-and-braces.
+    -->
+    <style name="Theme.NFCTouchDemo.Viewer" parent="Theme.NFCTouchDemo">
+        <item name="android:windowAnimationStyle">@null</item>
+        <!-- first frame is already black: no white flash before the bitmap is decoded -->
+        <item name="android:windowBackground">@android:color/black</item>
+    </style>
+    <!--pri added by zhuyang,D5: in-app image viewer theme (replaces the Google Photos pager),20261014,end-->
 </resources>
