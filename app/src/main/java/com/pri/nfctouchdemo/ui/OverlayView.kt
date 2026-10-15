@@ -846,6 +846,13 @@ class OverlayView @JvmOverloads constructor(
         /** 按钮圆角（设计 px）：比卡片（23）小一档，和卡片摆在一起不抢。 */
         const val RECEIVE_BTN_R_PX = 14f
 
+        //pri added by zhuyang,E4: dark translucent scrim of the lower pill (reject / cancel): white and #DDDDDD
+        //pri added by zhuyang,text stay legible over both light and dark photos; the alpha is folded into the fade
+        //pri added by zhuyang,factor because withAlpha() overwrites the alpha byte of the colour,20261014,start
+        const val RECEIVE_PILL_SCRIM = 0.62f
+        const val RECEIVE_PILL_SCRIM_PRESSED = 0.78f
+        //pri added by zhuyang,E4: dark translucent scrim of the lower pill (reject / cancel),20261014,end
+
         /**
          * 卡片下沿到按钮区之间那一口气（设计 px）。
          *
@@ -2909,7 +2916,7 @@ class OverlayView @JvmOverloads constructor(
         (RECEIVE_PRIMARY_H_PX + RECEIVE_BTN_GAP_PX + RECEIVE_SECONDARY_H_PX) * k
 
     /**
-     * 接收态的两个按钮：主按钮（浅色底 + 深色字）在上、次按钮（半透明浅灰底 + 浅灰字）在下。
+     * 接收态的两个按钮：主按钮（浅色底 + 深色字）在上、次按钮（深灰半透明底 + 浅灰字）在下。
      *
      * 圆角矩形复用卡片那枚 [cardPaint]，文字复用 [textPaint]（字重取标题那档 [bold]、
      * 字号 15 设计 px，和 16 的接收方信息、12 的卡片标题同一档量级）。
@@ -2918,12 +2925,16 @@ class OverlayView @JvmOverloads constructor(
      *
      * 按下的那一枚压深一档底色，给一个"按到了"的反馈（[pressedButton] 由 [onReceiveTouch] 维护）。
      */
+    //pri modify by zhuyang,E4: the lower pill (reject / cancel) is a dark scrim now, not the old light fill,20261014
     private fun drawReceiveActions(c: Canvas, appear: Float) {
         if (appear <= 0.003f) return
         if (receivePrimaryRect.width() <= 0f) return
         val r = RECEIVE_BTN_R_PX * k
         //pri added by zhuyang,E4: while accepting, the two pills fade out by (1 - cancelMix),20261014
         val pills = appear * (1f - cancelMix)
+        //pri added by zhuyang,E4: the scrim alpha rides on the fade factor (withAlpha() drops the colour's own alpha),20261014
+        val pillScrim =
+            if (pressedButton == BUTTON_SECONDARY) RECEIVE_PILL_SCRIM_PRESSED else RECEIVE_PILL_SCRIM
 
         // 主按钮：浅色底（#EDF7FF），按下时压深一档
         cardPaint.shader = null
@@ -2933,11 +2944,9 @@ class OverlayView @JvmOverloads constructor(
         )
         c.drawRoundRect(receivePrimaryRect, r, r, cardPaint)
 
-        // 次按钮：半透明浅灰底（#14FFFFFF），按下时同样压深一档
-        cardPaint.color = withAlpha(
-            if (pressedButton == BUTTON_SECONDARY) 0x29FFFFFF else 0x14FFFFFF,
-            pills
-        )
+        // 次按钮：深灰半透明底（#111923），按下时同样压深一档
+        //pri modify by zhuyang,E4: 0x14FFFFFF lost its alpha byte in withAlpha(), so the pill was drawn opaque white,20261014
+        cardPaint.color = withAlpha(0xFF111923.toInt(), pillScrim * pills)
         c.drawRoundRect(receiveSecondaryRect, r, r, cardPaint)
 
         // 文字：主按钮深色（#111923）、次按钮浅灰（#DDDDDD），都居中
@@ -2953,10 +2962,8 @@ class OverlayView @JvmOverloads constructor(
         //pri added by zhuyang,E4: single cancel pill drawn in the reject slot (same rect as its hit test),20261014,start
         if (acceptInProgress && cancelMix > 0.003f) {
             val one = appear * cancelMix
-            cardPaint.color = withAlpha(
-                if (pressedButton == BUTTON_SECONDARY) 0x47FFFFFF else 0x33FFFFFF,
-                one
-            )
+            //pri modify by zhuyang,E4: same dark scrim as the reject pill (0x33FFFFFF was drawn opaque white),20261014
+            cardPaint.color = withAlpha(0xFF111923.toInt(), pillScrim * one)
             c.drawRoundRect(receiveSecondaryRect, r, r, cardPaint)
             textPaint.color = withAlpha(0xFFFFFFFF.toInt(), one)
             drawCenteredLabel(c, receiveSecondaryRect, receiveCancelText)

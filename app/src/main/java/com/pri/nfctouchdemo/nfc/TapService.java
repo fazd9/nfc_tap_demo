@@ -1,5 +1,6 @@
 package com.pri.nfctouchdemo.nfc;
 
+import android.app.ActivityOptions; //pri added by zhuyang,D4: launch the viewer with zero animations,20261014
 import android.app.Service;
 import android.content.Context;
 import android.content.Intent;
@@ -548,11 +549,14 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         Uri u = (sXfer != null) ? sXfer.firstSavedUri() : null;
         if (u == null) { Bus.log("接收完成:本轮没有落盘 Uri,不打系统查看器"); return; }
         try {
+            //pri added by zhuyang,D4: no slide-in transition: explicit zero animations; FLAG_ACTIVITY_NO_ANIMATION
+            //pri added by zhuyang,alone is ignored by the modern ActivityOptions/transition system,20261014
             startActivity(new Intent(Intent.ACTION_VIEW)
                     .setDataAndType(u, "image/*")
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
                             | Intent.FLAG_GRANT_READ_URI_PERMISSION
-                            | Intent.FLAG_ACTIVITY_NO_ANIMATION)); //pri added by zhuyang,No slide-in transition: the panel dissolves in place instead of handing off to a sliding Activity,20261014
+                            | Intent.FLAG_ACTIVITY_NO_ANIMATION), //pri added by zhuyang,No slide-in transition: the panel dissolves in place instead of handing off to a sliding Activity,20261014
+                    ActivityOptions.makeCustomAnimation(this, 0, 0).toBundle());
         } catch (Throwable t) {
             Bus.log("打开系统查看器失败: " + t);
         }
