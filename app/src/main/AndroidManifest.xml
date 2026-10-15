@@ -28,6 +28,12 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- pri added by zhuyang,Copied from the reference (LongShotScreen app/src/main/AndroidManifest.xml), which declares them for the same ScreenshotHelper call. INTERACT_ACROSS_USERS is the one its ROM side whitelists for priv-app; SYSTEM_OVERLAY_WINDOW is not even defined by this platform build, so it stays an inert request,20261014,start -->
+    <uses-permission android:name="android.permission.SYSTEM_OVERLAY_WINDOW" />
+    <uses-permission android:name="android.permission.INTERACT_ACROSS_USERS" />
+    <uses-permission android:name="android.permission.INTERACT_ACROSS_USERS_FULL" />
+    <!-- pri added by zhuyang,Copied from the reference (LongShotScreen app/src/main/AndroidManifest.xml), which declares them for the same ScreenshotHelper call. INTERACT_ACROSS_USERS is the one its ROM side whitelists for priv-app; SYSTEM_OVERLAY_WINDOW is not even defined by this platform build, so it stays an inert request,20261014,end -->
+
     <!-- 传输通道：同 Wi-Fi 直连 / 本地热点 / Wi-Fi Direct / 蓝牙名 -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />

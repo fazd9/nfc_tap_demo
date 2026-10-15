@@ -10,6 +10,7 @@ import android.os.IBinder;
 import android.os.Looper;
 
 import com.pri.nfctouchdemo.R; //pri added by zhuyang,D1: fail banner lines live in strings.xml,20261014
+import com.pri.nfctouchdemo.gfx.ScreenCapture; //pri added by zhuyang,Screen-capture backdrop (LongShotScreen ScreenshotHelper port),20261014
 import com.pri.nfctouchdemo.service.OverlayService;
 
 import java.io.File;
@@ -50,6 +51,9 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
 
     /** 相册推送过来的"当前选中照片"。 */
     private static final ArrayList<Uri> PENDING = new ArrayList<Uri>();
+
+    //pri added by zhuyang,Hard cap on the backdrop capture: past this the send page is raised with the photo backdrop instead,20261014
+    private static final long CAPTURE_TIMEOUT_MS = 500L;
 
     /** 本机是否有选中的照片(=本机是发送方)。 */
     public static boolean hasPending() {
@@ -236,18 +240,29 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         if (PENDING.isEmpty()) return; // 没有待发照片(正常不会走到这):直接返回
         if (mSendShown) return;        // 本轮已经拉起过:幂等,避免重复 start 动效层(替代原来 mSendPage != null 的判断)
         mSendShown = true;
-        // UI 动作统一回主线程再发(与原实现一致:原来创建 View / show 悬浮窗也在主线程做)
-        mMain.post(new Runnable() { @Override public void run() {
-            if (PENDING.isEmpty()) return; // 极端情况:期间照片被清空,保持 mSendShown=true 不再补弹
-            // NFC 场景拿不到"对方屏幕画面",就把要发送的第一张照片自己当折射背景:
-            // 涟漪/折射的取色与卡片内容一致,视觉上像"这张照片从对方那边荡开",不需要额外截图权限。
-            final Uri backdrop = PENDING.get(0);
-            // 带上对端标识和张数:动效页标题就是产品里那句「发送给 用户XXXX」,
-            // 上滑提示是「上滑发送 N 张照片」(不给 peer 时会退回动效层自带的默认文案)。
-            startForegroundService(OverlayService.intent(
-                    TapService.this, backdrop, backdrop, mPeerLabel, PENDING.size()));
-            startService(OverlayService.statusIntent(TapService.this, "正在连接对方…"));
-        }});
+        //pri added by zhuyang,Screen-capture backdrop (LongShotScreen ScreenshotHelper port): the capture must complete BEFORE the,20261014,start
+        //pri added by zhuyang,overlay window is attached, or the captured frame would contain our own page. Done on a worker thread,20261014
+        //pri added by zhuyang,because ScreenshotHelper delivers its result on the main looper - a main-thread wait would deadlock,20261014
+        new Thread(new Runnable() { @Override public void run() {
+            final Uri captured = ScreenCapture.captureBackdrop(TapService.this, CAPTURE_TIMEOUT_MS);
+            mMain.post(new Runnable() { @Override public void run() {
+                // UI 动作统一回主线程再发(与原实现一致:原来创建 View / show 悬浮窗也在主线程做)
+                if (PENDING.isEmpty()) return; // 极端情况:期间照片被清空,保持 mSendShown=true 不再补弹
+                if (!mSendShown) return;       //pri added by zhuyang,Round ended while the capture was in flight: do not raise the page,20261014
+                final Uri photo = PENDING.get(0);
+                // NFC 场景拿不到"对方屏幕画面",就把要发送的第一张照片自己当折射背景:
+                // 涟漪/折射的取色与卡片内容一致,视觉上像"这张照片从对方那边荡开",不需要额外截图权限。
+                if (captured == null) Bus.log("截屏失败/超时,背景回退为照片");
+                //pri added by zhuyang,No capture = the original behaviour above stands: the photo itself is the backdrop,20261014
+                final Uri backdrop = (captured != null) ? captured : photo;
+                // 带上对端标识和张数:动效页标题就是产品里那句「发送给 用户XXXX」,
+                // 上滑提示是「上滑发送 N 张照片」(不给 peer 时会退回动效层自带的默认文案)。
+                startForegroundService(OverlayService.intent(
+                        TapService.this, backdrop, photo, mPeerLabel, PENDING.size()));
+                startService(OverlayService.statusIntent(TapService.this, "正在连接对方…"));
+            }});
+        }}).start();
+        //pri added by zhuyang,Screen-capture backdrop (LongShotScreen ScreenshotHelper port): the capture must complete BEFORE the,20261014,end
     }
 
     // ---------- Xfer 事件(仅发送侧处理) ----------
