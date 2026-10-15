@@ -44,7 +44,6 @@ import com.pri.nfctouchdemo.gfx.RippleSurfaceView
 import com.pri.nfctouchdemo.nfc.TapService
 import com.pri.nfctouchdemo.nfc.Ui
 import com.pri.nfctouchdemo.ui.OverlayView
-import com.pri.nfctouchdemo.ui.ParticleView //pri added by zhuyang,E7: send burst layer (third child of overlay_root),20261014
 import kotlin.math.abs
 
 /**
@@ -89,9 +88,6 @@ class OverlayService : Service() {
     private var rootView: View? = null
     private lateinit var rippleView: RippleSurfaceView
     private lateinit var overlay: OverlayView
-
-    //pri added by zhuyang,E7: topmost child of overlay_root - the particle layer of the send burst,20261014
-    private lateinit var particleView: ParticleView
     private lateinit var timeline: Timeline
 
     //pri added by zhuyang,Change 2: top-task watcher (Home / Recents) - a real TaskStackListener, alive for the life of the service,20261014
@@ -442,7 +438,6 @@ class OverlayService : Service() {
         rippleView.setRipple(0f)
         rippleView.setBlur(0f)
         rippleView.setGallerySource(darkBackdrop()) // 旧的折射背景同样不能留
-        particleView.clear() //pri added by zhuyang,E7: particles that have not died out must not carry over,20261014
     }
 
     /** 把已经解好的位图重新灌回视图（擦干净之后复用上一轮的缓存，必须重灌一遍）。 */
@@ -614,7 +609,6 @@ class OverlayService : Service() {
         val content = LayoutInflater.from(this).inflate(R.layout.overlay_root, null)
         rippleView = content.findViewById(R.id.ripple)
         overlay = content.findViewById(R.id.overlay)
-        particleView = content.findViewById(R.id.particles) //pri added by zhuyang,E7: topmost layer,20261014
         rootView = content
 
         //pri added by zhuyang,Exit path: the window eats every touch, so a stalled page used to lock the whole phone; Back now dismisses it,20261014,start
@@ -652,7 +646,6 @@ class OverlayService : Service() {
         overlay.onReceiveRejected = { notifyNfc(ACTION_UI_RECEIVE_REJECT) }
         overlay.onReceiveCancel = { notifyNfc(ACTION_UI_RECEIVE_CANCEL) }
         //pri modify by zhuyang,E4: 接收 also switches the local motion layer into the receiving state,20261014,end
-        overlay.onSendBurst = { cx, cy -> particleView.burst(cx, cy, SEND_PARTICLE_N) } //pri added by zhuyang,E7: send burst,20261014
     }
 
     /** 把视图树挂上窗口并铺满屏幕。 */
@@ -1347,9 +1340,6 @@ class OverlayService : Service() {
 
         //pri added by zhuyang,E5: the panel itself fades over 150ms inside the DISSOLVE_MS window,20261014
         private const val PANEL_DISSOLVE_MS = 150L
-
-        //pri added by zhuyang,E7: particles per send burst (video: 30-60),20261014
-        private const val SEND_PARTICLE_N = 48
 
         /**
          * 通知里点「重播」之后等多久才真的播。

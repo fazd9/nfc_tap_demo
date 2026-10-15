@@ -649,12 +649,6 @@ class OverlayView @JvmOverloads constructor(
          */
         const val FLY_MS = 650L
 
-        //pri added by zhuyang,E7: photo over-exposure to white at the send moment (video ~0.1s),20261014
-        const val SEND_WHITE_IN_MS = 100f
-
-        //pri added by zhuyang,E7: hold the whitened card for this long before the fly-away starts (video holds until the transfer ends; a fixed 700ms is the agreed compromise),20261014
-        const val SEND_HOLD_MS = 700L
-
         /**
          * 卡片飞走之后，隔多久复位时间轴、重播入场。
          *
@@ -892,9 +886,6 @@ class OverlayView @JvmOverloads constructor(
 
     /** 上滑越过 [SEND_PROGRESS] 判定成立的**那一刻**回调（先于飞走动画），一次手势只回调一次。 */
     var onSendConfirmed: (() -> Unit)? = null
-
-    //pri added by zhuyang,E7: particle burst origin (centre of the photo area); wired by OverlayService,20261014
-    var onSendBurst: ((Float, Float) -> Unit)? = null
 
     /** 接收态点主按钮（「接收 N 张照片」）。 */
     var onReceiveAccepted: (() -> Unit)? = null
@@ -1302,12 +1293,8 @@ class OverlayView @JvmOverloads constructor(
     private var flyAnimator: ValueAnimator? = null
     private var resetRunnable: Runnable? = null
 
-    //pri added by zhuyang,Round-scoped state of E5 (dissolve) and E7 (send whitening + hold),20261014,start
+    //pri added by zhuyang,Round-scoped state of E5 (dissolve),20261014
     private var fadeOutAnimator: ValueAnimator? = null
-    private var photoWhite = 0f
-    private var whiteAnimator: ValueAnimator? = null
-    private var holdRunnable: Runnable? = null
-    //pri added by zhuyang,Round-scoped state of E5 (dissolve) and E7 (send whitening + hold),20261014,end
 
     // ---- 文案 ----
     // 内置默认文案：`peer == null` / `count <= 0` 时用的就是这几条（单独演示动效页的画面不变）
@@ -1502,14 +1489,11 @@ class OverlayView @JvmOverloads constructor(
         sendConfirmedNotified = false
         resetRunnable?.let { removeCallbacks(it) }
         resetRunnable = null
-        //pri added by zhuyang,Rebuild the round state of E4/E5/E7 (accept swap, dissolve alpha, whitening, hold),20261014,start
+        //pri added by zhuyang,Rebuild the round state of E4/E5 (accept swap, dissolve alpha),20261014,start
         acceptInProgress = false
         cancelMix = 0f
         alpha = 1f
-        photoWhite = 0f
-        holdRunnable?.let { removeCallbacks(it) }
-        holdRunnable = null
-        //pri added by zhuyang,Rebuild the round state of E4/E5/E7 (accept swap, dissolve alpha, whitening, hold),20261014,end
+        //pri added by zhuyang,Rebuild the round state of E4/E5 (accept swap, dissolve alpha),20261014,end
         invalidate()
     }
 
@@ -2786,15 +2770,6 @@ class OverlayView @JvmOverloads constructor(
         // 圆角不在这里裁：内容整体裁在 [shapePath] 上，照片四角自然跟着卡片的轮廓圆角走。
         c.drawBitmap(art, artSrc, photo, photoClip)
 
-        //pri added by zhuyang,E7: over-expose the card to white while sending - the card is the photo,20261014,start
-        //pri added by zhuyang,E7: the rect is the card rect, so the [shapePath] clip trims it to the deformed silhouette,20261014
-        if (photoWhite > 0.003f) {
-            cardPaint.shader = null
-            cardPaint.color = withAlpha(0xFFFFFFFF.toInt(), alpha * photoWhite)
-            c.drawRect(photo, cardPaint)
-        }
-        //pri added by zhuyang,E7: over-expose the card to white while sending - the card is the photo,20261014,end
-
         c.restoreToCount(contentSave)
         c.restoreToCount(save)
     }
@@ -3197,41 +3172,17 @@ class OverlayView @JvmOverloads constructor(
         }
         flyProgress = deformProgress   // 先冻住"松手那一刻挤到哪儿了"
         flying = true
-        //pri added by zhuyang,E7: particle burst + photo whitening at the send moment,20261014,start
-        //pri added by zhuyang,E7: the burst origin is the card rect mapped through the deformation, so it follows the card wherever the drag/compression put it,20261014
-        //pri added by zhuyang,E7: re-run the layout so the mapping is the release-moment one, not the last drawn frame,20261014
-        layoutCard()
-        scratch.set(cardRect)
-        contentMatrix.mapRect(scratch)
-        onSendBurst?.invoke(scratch.centerX(), scratch.centerY())
-        whiteAnimator?.cancel()
-        whiteAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
-            duration = SEND_WHITE_IN_MS.toLong()
+        flyAnimator?.cancel()
+        flyAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
+            duration = FLY_MS
             interpolator = LinearInterpolator()
-            addUpdateListener { va ->
-                photoWhite = va.animatedValue as Float
+            addUpdateListener {
+                flyT = it.animatedValue as Float
                 invalidate()
             }
             start()
         }
-        //pri added by zhuyang,E7: particle burst + photo whitening at the send moment,20261014,end
-        //pri added by zhuyang,E7: keep the whitened card still for SEND_HOLD_MS, then start the existing fly-away (FLY_MS + RESET_DELAY_MS),20261014,start
-        holdRunnable?.let { removeCallbacks(it) }
-        holdRunnable = Runnable {
-            holdRunnable = null
-            flyAnimator?.cancel()
-            flyAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
-                duration = FLY_MS
-                interpolator = LinearInterpolator()
-                addUpdateListener {
-                    flyT = it.animatedValue as Float
-                    invalidate()
-                }
-                start()
-            }
-            resetRunnable = Runnable { finishSend() }.also { postDelayed(it, RESET_DELAY_MS) }
-        }.also { postDelayed(it, SEND_HOLD_MS) }
-        //pri added by zhuyang,E7: keep the whitened card still for SEND_HOLD_MS, then start the existing fly-away (FLY_MS + RESET_DELAY_MS),20261014,end
+        resetRunnable = Runnable { finishSend() }.also { postDelayed(it, RESET_DELAY_MS) }
     }
 
     private fun finishSend() {
@@ -3249,17 +3200,15 @@ class OverlayView @JvmOverloads constructor(
     private fun cancelAnimators() {
         returnAnimator?.cancel(); returnAnimator = null
         flyAnimator?.cancel(); flyAnimator = null
-        //pri added by zhuyang,The E4/E5/E7 one-shot animators join the same cancel set,20261014,start
+        //pri added by zhuyang,The E4/E5 one-shot animators join the same cancel set,20261014,start
         cancelAnimator?.cancel(); cancelAnimator = null
         fadeOutAnimator?.cancel(); fadeOutAnimator = null
-        whiteAnimator?.cancel(); whiteAnimator = null
-        //pri added by zhuyang,The E4/E5/E7 one-shot animators join the same cancel set,20261014,end
+        //pri added by zhuyang,The E4/E5 one-shot animators join the same cancel set,20261014,end
     }
 
     override fun onDetachedFromWindow() {
         cancelAnimators()
         resetRunnable?.let { removeCallbacks(it) }
-        holdRunnable?.let { removeCallbacks(it) } //pri added by zhuyang,E7: the hold timer must not outlive the view,20261014
         artCache?.recycle()
         artCache = null
         super.onDetachedFromWindow()
