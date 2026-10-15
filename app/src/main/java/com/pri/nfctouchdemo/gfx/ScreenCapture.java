@@ -7,7 +7,6 @@ import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.Log;
-import android.view.WindowManager;
 
 import com.android.internal.util.ScreenshotHelper;
 
@@ -28,6 +27,14 @@ import java.util.function.Consumer;
 public final class ScreenCapture {
 
     private static final String TAG = "ScreenCapture";
+
+    //pri added by zhuyang,WindowManager.ScreenshotSource.SCREENSHOT_ACCESSIBILITY_ACTIONS is @hide and absent from the,20261014
+    //pri added by zhuyang,public android.jar this module compiles against; it is only ever an int argument to reflective,20261014
+    //pri added by zhuyang,invoke(), so use the literal (same value in systemlibs/framework-header.jar and the ROM framework.jar),20261014
+    private static final int SCREENSHOT_SOURCE_ACCESSIBILITY_ACTIONS = 4;
+
+    //pri added by zhuyang,WindowManager.TAKE_SCREENSHOT_FULLSCREEN is @hide and absent from the public android.jar as well,20261014
+    private static final int TAKE_SCREENSHOT_TYPE_FULLSCREEN = 1;
 
     //pri added by zhuyang,Cache file handed to the animation layer as the backdrop Uri (same pattern as TapService.peer_preview.jpg),20261014
     //pri added by zhuyang,Each capture gets a fresh file name: the animation layer keys its decoded bitmaps on the Uri and would,20261014
@@ -83,7 +90,7 @@ public final class ScreenCapture {
             throws Exception {
         Method modern = find(helper, "takeScreenshot", int.class, Handler.class, Consumer.class);
         if (modern != null) {
-            modern.invoke(helper, WindowManager.ScreenshotSource.SCREENSHOT_ACCESSIBILITY_ACTIONS,
+            modern.invoke(helper, SCREENSHOT_SOURCE_ACCESSIBILITY_ACTIONS,
                     handler, consumer);
             return;
         }
@@ -92,8 +99,8 @@ public final class ScreenCapture {
         if (legacy == null) {
             throw new NoSuchMethodException("ScreenshotHelper.takeScreenshot");
         }
-        legacy.invoke(helper, WindowManager.TAKE_SCREENSHOT_FULLSCREEN, true, true,
-                WindowManager.ScreenshotSource.SCREENSHOT_ACCESSIBILITY_ACTIONS, handler, consumer);
+        legacy.invoke(helper, TAKE_SCREENSHOT_TYPE_FULLSCREEN, true, true,
+                SCREENSHOT_SOURCE_ACCESSIBILITY_ACTIONS, handler, consumer);
     }
 
     private static Method find(Object target, String name, Class<?>... params) {
