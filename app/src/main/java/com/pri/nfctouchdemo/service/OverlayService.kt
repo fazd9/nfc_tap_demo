@@ -96,6 +96,11 @@ class OverlayService : Service() {
     /** 当前是哪一种确认页：发送（上滑发送）还是接收（接收 / 拒绝）。 */
     private var mode = OverlayView.Mode.SEND
 
+    //pri added by zhuyang,Empty state (E7): page up but no elements yet - the peer has not offered anything,20261014,start
+    //pri added by zhuyang,Explicit flag from the NFC layer (EXTRA_WAITING), never inferred from "photo == null",20261014
+    private var waitingForPeer = false
+    //pri added by zhuyang,Empty state (E7): page up but no elements yet - the peer has not offered anything,20261014,end
+
     /** 状态栏 / 刘海那一条的高度，发送面板往下让开。 */
     private var systemTop = 0
     private var touchThrough = false
@@ -218,6 +223,7 @@ class OverlayService : Service() {
     private fun startSendFlow(intent: Intent?) {
         hideFailBanner()
         cancelDissolve() //pri added by zhuyang,E5: the new round owns the window,20261014
+        waitingForPeer = false //pri added by zhuyang,Empty state: a send page never waits for a peer offer,20261014
         mode = OverlayView.Mode.SEND
         uriExtra(intent, EXTRA_BACKDROP)?.let { backdropUri = it }
         uriExtra(intent, EXTRA_PHOTO)?.let { photoUri = it }
@@ -276,11 +282,24 @@ class OverlayService : Service() {
         if (intent?.hasExtra(EXTRA_STATUS) == true) statusText = intent.getStringExtra(EXTRA_STATUS)
         uriExtra(intent, EXTRA_PHOTO)?.let { photoUri = it }
 
+        //pri added by zhuyang,Empty state (E7): page up with the captured screen as backdrop, every element held back,20261014,start
+        val waiting = intent?.getBooleanExtra(EXTRA_WAITING, false) == true
+        waitingForPeer = waiting
+        //pri added by zhuyang,Capture failures arrive as an empty/missing extra: decodeReceiveImage then keeps its own dark fill,20261014
+        val waitingBackdrop = if (waiting) uriExtra(intent, EXTRA_BACKDROP) else null
+        if (waiting) {
+            //pri added by zhuyang,Nothing from the previous round may leak into the empty page: its card photo and its status line,20261014
+            photoUri = null
+            statusText = null
+        }
+        //pri added by zhuyang,Empty state (E7): page up with the captured screen as backdrop, every element held back,20261014,end
+
         //pri added by zhuyang,Live switch: a SEND page visible at entry becomes the RECEIVE card in place,20261014,start
         if (rootView != null && attached && wasSend) {
             overlay.setMode(mode)
             overlay.setPeerInfo(peerLabel, peerCount)
             overlay.setStatus(statusText)
+            overlay.setWaitingForPeer(waitingForPeer) //pri added by zhuyang,This hand-rolled path applies the same identity state as applyContentAndPlay,20261014
             overlay.setAcceptInProgress(false) //pri added by zhuyang,E4: the swapped-in identity starts from the two-pill state,20261014
             return
         }
@@ -303,7 +322,7 @@ class OverlayService : Service() {
             applyDecodedVisuals()
             applyContentAndPlay()
         } else {
-            decodeReceiveImage(photo)
+            decodeReceiveImage(photo, waitingBackdrop)
         }
     }
 
@@ -316,6 +335,8 @@ class OverlayService : Service() {
     private fun updatePhoto(intent: Intent?) {
         val uri = uriExtra(intent, EXTRA_PHOTO) ?: return
         photoUri = uri
+        //pri added by zhuyang,Empty state ends here too: a photo from the peer means this phone is receiving,20261014
+        waitingForPeer = false
         if (rootView == null) return
         // 接收页里这张照片既是卡片也是折射背景；发送页里它只是卡片（背景是用户自己选的那张）
         val isReceive = mode == OverlayView.Mode.RECEIVE
@@ -329,6 +350,7 @@ class OverlayService : Service() {
                 photoBitmap = picture
                 decodedPhoto = uri
                 decodedReceive = isReceive
+                overlay.setWaitingForPeer(false) //pri added by zhuyang,Empty state: the peer is sending, so the card may show now,20261014
                 picture?.let { overlay.setCardPhoto(it) }
                 background?.let {
                     backdropUri = uri
@@ -344,6 +366,8 @@ class OverlayService : Service() {
 
     /** 状态行：NFC 层推过来的连接进度 / 失败原因，直接画在动效页底部。 */
     private fun updateStatus(intent: Intent?) {
+        //pri added by zhuyang,Empty state: nothing but the blurred backdrop - a status line pushed while waiting is dropped,20261014
+        if (waitingForPeer) return
         statusText = intent?.getStringExtra(EXTRA_STATUS)
         if (rootView != null) overlay.setStatus(statusText)
     }
@@ -355,7 +379,12 @@ class OverlayService : Service() {
     private fun updatePeer(intent: Intent?) {
         if (intent?.hasExtra(EXTRA_PEER) == true) peerLabel = intent.getStringExtra(EXTRA_PEER)
         peerCount = countExtra(intent, peerCount)
-        if (rootView != null) overlay.setPeerInfo(peerLabel, peerCount)
+        //pri added by zhuyang,Empty state ends here: this action is only sent when the peer actually swipes,20261014
+        waitingForPeer = false
+        if (rootView != null) {
+            overlay.setPeerInfo(peerLabel, peerCount)
+            overlay.setWaitingForPeer(false) //pri added by zhuyang,Releases the panel: it now plays its own entrance in place,20261014
+        }
     }
 
     /** 两张图都在后台线程解码 —— 大图放主线程会把首帧卡住。 */
@@ -387,21 +416,27 @@ class OverlayService : Service() {
      *
      * [uri] 为空 = 照片还没到：垫一张深色位图当折射源，让"屏幕暗下来 + 涟漪"先播起来，
      * 卡片退回动效层内置的那张插画（OverlayView 在没图时自己会用内置换的）。
+     *
+     *pri added by zhuyang,Empty state (E7): [backdrop] only matters while [uri] is null - it is the captured,20261014
+     *pri added by zhuyang,desktop of this phone, so the waiting stage blurs a real screen instead of a flat dark fill,20261014
+     *pri added by zhuyang,(the NFC layer passes null when the capture failed or timed out, and the dark fill stands),20261014
      */
-    private fun decodeReceiveImage(uri: Uri?) {
+    private fun decodeReceiveImage(uri: Uri?, backdrop: Uri?) {
         val screen = displaySize()
         Thread {
+            //pri modify by zhuyang,Empty state (E7): the captured desktop blurs instead of the flat dark fill,20261014,start
             val background = if (uri != null) {
                 ImageLoader.decodeCover(this, uri, screen.x, screen.y)
             } else {
-                darkBackdrop()
+                backdrop?.let { ImageLoader.decodeCover(this, it, screen.x, screen.y) } ?: darkBackdrop()
             }
+            //pri modify by zhuyang,Empty state (E7): the captured desktop blurs instead of the flat dark fill,20261014,end
             val picture = uri?.let { ImageLoader.decode(this, it) }
             mainHandler.post {
                 if (rootView == null) return@post
                 backdropBitmap = background
                 photoBitmap = picture
-                decodedBackdrop = uri
+                decodedBackdrop = uri ?: backdrop
                 decodedPhoto = uri
                 decodedReceive = true
                 background?.let { rippleView.setGallerySource(it) }
@@ -453,6 +488,7 @@ class OverlayService : Service() {
         overlay.setMode(mode)
         overlay.setPeerInfo(peerLabel, peerCount)
         overlay.setStatus(statusText)
+        overlay.setWaitingForPeer(waitingForPeer) //pri added by zhuyang,Empty state (E7): the wait flag is part of the page identity,20261014
         attachAndPlay()
     }
 
@@ -1196,6 +1232,9 @@ class OverlayService : Service() {
         /** 状态行文案。 */
         const val EXTRA_STATUS = "extra_status"
 
+        //pri added by zhuyang,Empty state (E7): ACTION_RECEIVE - page up, every element held back until the peer offers,20261014
+        const val EXTRA_WAITING = "extra_waiting"
+
         /**
          * 启动页 / NFC 联调页读这两个标记显示状态。**服务在跑 ≠ 动画在播**：
          * 启动服务只让 [isRunning] 变 true，动画要等一次 [ACTION_START] / [ACTION_RECEIVE]
@@ -1252,6 +1291,26 @@ class OverlayService : Service() {
                 .putExtra(EXTRA_PEER, peer)
                 .putExtra(EXTRA_COUNT, count)
                 .putExtra(EXTRA_PHOTO, preview?.toString() ?: "")
+
+        //pri added by zhuyang,Empty state (E7): the phone with no photo selected,20261014,start
+        /**
+         * Empty state: this phone has no photo, but a tap must still raise the page (both phones play the
+         * same entrance animation), with **no element shown** - [EXTRA_WAITING] holds the title / card /
+         * pills / status line back until the peer swipes (see [peerIntent]). There is no photo yet, so
+         * [EXTRA_BACKDROP] carries a **screen capture of this phone** as the refraction source: the empty
+         * state shows a blurred desktop instead of a flat dark fill. `backdrop == null` = the capture
+         * failed or timed out, and the motion layer keeps its old dark fill.
+         */
+        @JvmStatic
+        fun receiveIntent(context: Context, peer: String, backdrop: Uri?): Intent =
+            Intent(context, OverlayService::class.java)
+                .setAction(ACTION_RECEIVE)
+                .putExtra(EXTRA_PEER, peer)
+                .putExtra(EXTRA_COUNT, 1) //pri added by zhuyang,The real count is corrected by peerIntent on the peer's onSendStarted,20261014
+                .putExtra(EXTRA_PHOTO, "")
+                .putExtra(EXTRA_BACKDROP, backdrop?.toString().orEmpty())
+                .putExtra(EXTRA_WAITING, true)
+        //pri added by zhuyang,Empty state (E7): the phone with no photo selected,20261014,end
 
         /** 只换卡片照片（接收侧预览 / 整图到了再推）。 */
         @JvmStatic

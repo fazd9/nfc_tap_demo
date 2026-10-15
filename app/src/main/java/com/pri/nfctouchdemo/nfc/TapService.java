@@ -39,6 +39,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
     private volatile boolean mUserWantsSend;                            //pri added by zhuyang,Local user swiped: this phone is the sender,20261014
     private boolean mSendStarted;                                       //pri added by zhuyang,sendImages already handed over this round,20261014
     private boolean mRejected;                                          //pri added by zhuyang,Peer transfer rejected this round (blocks re-showing),20261014
+    private boolean mPeerOffered;                                       //pri added by zhuyang,Peer announced a transfer this round (Xfer onSendStarted),20261014
     private Bitmap mLastBmp;                                            // 最近一张预览 / 整图(动效层卡片 + 预览落盘都用它)
     private boolean mAccepted;
     private int mPreviewCount;
@@ -211,6 +212,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         mUserWantsSend = false; //pri added by zhuyang,New round: role flags reset,20261014,start
         mSendStarted = false;
         mRejected = false;
+        mPeerOffered = false;
         mLastBmp = null;        //pri added by zhuyang,Preview bitmap is sticky across rounds,20261014
         //pri added by zhuyang,New round: role flags reset,20261014,end
         final String label = peerName(payload);
@@ -227,6 +229,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
             showSendPage();
         } else {
             Bus.log("本机无照片 → 本机是接收候选,等对方上滑");
+            showReceivePageEmpty(); //pri added by zhuyang,Empty state: both phones play the same entrance; this one shows the blurred backdrop only,20261014
         }
         //pri modify by zhuyang,Both phones only prepare to receive; the role is decided at swipe time,20261014,end
     }
@@ -302,6 +305,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         //pri modify by zhuyang,Receive card appears here (with the real count) instead of at tap time,20261014,start
         if (mUserWantsSend) return;
         if (mRejected) return;
+        mPeerOffered = true; //pri added by zhuyang,Empty state: the peer swiped - a page raise still in flight must not arm the wait,20261014
         mTotalCount = Math.max(total, 0);
         mMain.post(new Runnable() { @Override public void run() {
             if (mReceiveShown) {
@@ -453,6 +457,42 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         startForegroundService(OverlayService.receiveIntent(this, label, Math.max(1, count), previewUriOrNull()));
         startService(OverlayService.statusIntent(this, mLinkReady ? "已连接,等待接收…" : "正在连接对方…"));
     }
+
+    //pri added by zhuyang,Empty state (E7): the phone with no photo selected raises the same page,20261014,start
+    /**
+     * Empty state: this phone has no photo, but a tap must still open the page so both phones play
+     * the same entrance animation (reference product). The difference is only what is visible:
+     * here the title / card / pills / status line are all held back by receiveIntent's waiting extra,
+     * and they appear when the peer swipes (peerIntent / photoIntent).
+     *
+     * The backdrop is the silent screen capture of this phone's own screen (same channel and the same
+     * bounded timeout as the send page, taken on a worker thread before the window is attached), so the
+     * empty state shows a blurred desktop instead of a flat dark fill. Capture failed / timed out ->
+     * null, and the motion layer keeps its dark fill fallback.
+     */
+    private void showReceivePageEmpty() {
+        if (mReceiveShown) return; //pri added by zhuyang,Idempotent like showReceivePage: this round already raised a page,20261014
+        mReceiveShown = true;
+        mAccepted = false; mPreviewCount = 0; mFullCount = 0;
+        mTransferDone = false; mBmps.clear();
+        new Thread(new Runnable() { @Override public void run() {
+            final Uri captured = ScreenCapture.captureBackdrop(TapService.this, CAPTURE_TIMEOUT_MS);
+            mMain.post(new Runnable() { @Override public void run() {
+                if (!mReceiveShown) return; //pri added by zhuyang,Round ended while the capture was in flight (timeout / reject): do not raise,20261014
+                if (mPeerOffered) {
+                    //pri added by zhuyang,The peer swiped while the capture was in flight: raise the ordinary receive card instead,20261014
+                    //pri added by zhuyang,(nothing is waiting any more, so the wait must not be armed again),20261014
+                    mReceiveShown = false; //pri added by zhuyang,Let the idempotent showReceivePage do the real raise of this round,20261014
+                    showReceivePage(mPeerLabel, mTotalCount);
+                    return;
+                }
+                if (captured == null) Bus.log("截屏失败/超时,空态页背景回退为深色");
+                startForegroundService(OverlayService.receiveIntent(TapService.this, mPeerLabel, captured));
+                //pri added by zhuyang,No statusIntent at all: the empty state shows nothing but the backdrop,20261014
+            }});
+        }}).start();
+    }
+    //pri added by zhuyang,Empty state (E7): the phone with no photo selected raises the same page,20261014,end
 
     //pri added by zhuyang,Loser side of the race: the live send page becomes the receive card in place,20261014,start
     private void switchSendPageToReceive() {

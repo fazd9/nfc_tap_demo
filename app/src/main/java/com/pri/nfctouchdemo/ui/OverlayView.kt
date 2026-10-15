@@ -903,6 +903,14 @@ class OverlayView @JvmOverloads constructor(
     /** 接收态底部状态行；null = 不画（见 [setStatus]）。 */
     private var statusText: String? = null
 
+    //pri added by zhuyang,Empty state: the page is up but every element waits for the peer's offer,20261014,start
+    //pri added by zhuyang,An explicit flag, not "photo == null": a receive card may lack a photo for other reasons,20261014
+    private var waitingForPeer = false
+
+    //pri added by zhuyang,Panel timeline shift in ms: releasing the wait restarts the panel entrance from that frame,20261014
+    private var panelShiftMs = 0L
+    //pri added by zhuyang,Empty state: the page is up but every element waits for the peer's offer,20261014,end
+
     /** 接收态两个按钮的矩形（屏幕 px）。**绘制和命中判定读的是同一份**，见 [layoutReceiveActions]。 */
     private val receivePrimaryRect = RectF()
     private val receiveSecondaryRect = RectF()
@@ -977,6 +985,26 @@ class OverlayView @JvmOverloads constructor(
         statusText = text
         invalidate()
     }
+
+    //pri added by zhuyang,Empty state: page up, no elements until the peer actually offers,20261014,start
+    /**
+     * Empty state: this phone has no photo, the page still comes up (blurred backdrop + ripple + edge line),
+     * but **nothing is drawn on it** - title / card / pills / status line / brand line all wait until the
+     * peer really swipes (this method receives false).
+     *
+     * That is a different thing from "no photo": a receive card may legitimately have no photo yet (the
+     * peer has not sent a preview), and then the title and the pills are drawn as usual. Hence an explicit
+     * flag instead of inferring it from a null card photo.
+     */
+    fun setWaitingForPeer(v: Boolean) {
+        if (waitingForPeer == v) return
+        waitingForPeer = v
+        //pri added by zhuyang,Released after the entrance already ran: move the panel timeline back to its start, so the panel,20261014
+        //pri added by zhuyang,plays its own entrance now instead of snapping in fully formed,20261014
+        if (!v && elapsed > Timeline.PANEL_MS) panelShiftMs = Timeline.PANEL_MS - elapsed
+        invalidate()
+    }
+    //pri added by zhuyang,Empty state: page up, no elements until the peer actually offers,20261014,end
 
     /**
      * 换掉卡片里那张照片（主页选的那张）。
@@ -1478,6 +1506,11 @@ class OverlayView @JvmOverloads constructor(
     private fun panelAppearAt(elapsedMs: Long): Float =
         ((elapsedMs - Timeline.PANEL_MS) / Timeline.PANEL_FADE_MS).coerceIn(0f, 1f)
 
+    //pri added by zhuyang,Panel timeline (see panelShiftMs): the panel runs on this, not on the raw elapsed,20261014,start
+    //pri added by zhuyang,Equal to [elapsed] except right after an empty-state release, when it restarts at Timeline.PANEL_MS,20261014
+    private val panelElapsed: Long get() = elapsed + panelShiftMs
+    //pri added by zhuyang,Panel timeline (see panelShiftMs): the panel runs on this, not on the raw elapsed,20261014,end
+
     /** 清掉发送流程留下的临时状态。 */
     fun resetSendState() {
         cancelAnimators()
@@ -1494,6 +1527,7 @@ class OverlayView @JvmOverloads constructor(
         cancelMix = 0f
         alpha = 1f
         //pri added by zhuyang,Rebuild the round state of E4/E5 (accept swap, dissolve alpha),20261014,end
+        panelShiftMs = 0L //pri added by zhuyang,A replayed timeline must not inherit the empty-state panel shift (see setWaitingForPeer),20261014
         invalidate()
     }
 
@@ -1590,7 +1624,8 @@ class OverlayView @JvmOverloads constructor(
         // 动画段里没有这条从左到右的亮带，它是原型自己加的氛围光，不是一碰互联的一部分。
         // 白线的显形由 edgeReveal 决定（水波出现 0.5s 后才起步，见 applyTimeline）；
         // 在那之前整圈不画 —— 包括辉光，否则边框会先于水波出现。
-        if (elapsed >= Timeline.PANEL_MS) drawTransferPanel(canvas)
+        //pri added by zhuyang,Empty state: page up (blur + ripple + edge line only), panel held back until the peer offers,20261014
+        if (!waitingForPeer && panelElapsed >= Timeline.PANEL_MS) drawTransferPanel(canvas)
         if (edgeReveal > 0f) drawEdgeGlow(canvas)
     }
 
@@ -2560,7 +2595,7 @@ class OverlayView @JvmOverloads constructor(
     // ---------------------------------------------------------- 3. 发送面板
 
     private fun drawTransferPanel(c: Canvas) {
-        val since = (elapsed - Timeline.PANEL_MS).toFloat()
+        val since = (panelElapsed - Timeline.PANEL_MS).toFloat() //pri modify by zhuyang,Panel timeline (see panelShiftMs),20261014
         val appear = (since / Timeline.PANEL_FADE_MS).coerceIn(0f, 1f)
         val textAlpha = (since / PANEL_TEXT_MS).coerceIn(0f, 1f)
         val slide = (1f - easeOutQuint(appear)) * 8f * k
@@ -2694,8 +2729,10 @@ class OverlayView @JvmOverloads constructor(
         if (cardRect.width() <= 0f) return
 
         // 入场：delay .1s / 位移 .68s / 淡入 .48s
-        val enterRaw = ((elapsed - Timeline.PANEL_MS - CARD_DELAY_MS) / CARD_ENTER_MS).coerceIn(0f, 1f)
-        val fadeRaw = ((elapsed - Timeline.PANEL_MS - CARD_DELAY_MS) / CARD_FADE_MS).coerceIn(0f, 1f)
+        //pri modify by zhuyang,Panel timeline (see panelShiftMs); breathePhase stays on the raw elapsed,20261014,start
+        val enterRaw = ((panelElapsed - Timeline.PANEL_MS - CARD_DELAY_MS) / CARD_ENTER_MS).coerceIn(0f, 1f)
+        val fadeRaw = ((panelElapsed - Timeline.PANEL_MS - CARD_DELAY_MS) / CARD_FADE_MS).coerceIn(0f, 1f)
+        //pri modify by zhuyang,Panel timeline (see panelShiftMs); breathePhase stays on the raw elapsed,20261014,end
         val enter = easeOutQuint(enterRaw)
 
         // 入场只剩"位移 + 一点放大"；**形变**（挤压 / 收拢）不在这里，在 [layoutCard]
@@ -3015,6 +3052,9 @@ class OverlayView @JvmOverloads constructor(
      * - `ACTION_MOVE` / `ACTION_CANCEL` 只维护按下状态，不触发任何回调。
      */
     private fun onReceiveTouch(event: MotionEvent): Boolean {
+        //pri added by zhuyang,Empty state: the pills are not drawn, so they must not be tappable either (the rects below,20261014
+        //pri added by zhuyang,would otherwise be recomputed from a stale cardRect of the previous round),20261014
+        if (waitingForPeer) return false
         if (elapsed < Timeline.PANEL_MS) return false
         // 触摸可能先于第一帧到来：按同一套几何补算一次，保证判定用的矩形就是将要画出来的那两个
         layoutReceiveActions()
