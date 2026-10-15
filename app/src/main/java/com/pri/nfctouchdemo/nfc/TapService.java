@@ -10,7 +10,7 @@ import android.os.IBinder;
 import android.os.Looper;
 
 import com.pri.nfctouchdemo.R; //pri added by zhuyang,D1: fail banner lines live in strings.xml,20261014
-import com.pri.nfctouchdemo.gfx.ScreenCapture; //pri added by zhuyang,Screen-capture backdrop (LongShotScreen ScreenshotHelper port),20261014
+import com.pri.nfctouchdemo.gfx.ScreenCapture; //pri added by zhuyang,Screen-capture backdrop (LongShotScreen silent ScreenCaptureInternal port),20261014
 import com.pri.nfctouchdemo.service.OverlayService;
 
 import java.io.File;
@@ -52,8 +52,8 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
     /** 相册推送过来的"当前选中照片"。 */
     private static final ArrayList<Uri> PENDING = new ArrayList<Uri>();
 
-    //pri added by zhuyang,Hard cap on the backdrop capture: past this the send page is raised with the photo backdrop instead,20261014
-    private static final long CAPTURE_TIMEOUT_MS = 500L;
+    //pri modify by zhuyang,Hard cap on the silent capture: 1500ms is ~2.5x the device-measured 578ms of the old SystemUI path and stays below the framework's own 4s wait; past it the send page is raised with the photo backdrop instead,20261014
+    private static final long CAPTURE_TIMEOUT_MS = 1500L;
 
     /** 本机是否有选中的照片(=本机是发送方)。 */
     public static boolean hasPending() {
@@ -240,9 +240,9 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         if (PENDING.isEmpty()) return; // 没有待发照片(正常不会走到这):直接返回
         if (mSendShown) return;        // 本轮已经拉起过:幂等,避免重复 start 动效层(替代原来 mSendPage != null 的判断)
         mSendShown = true;
-        //pri added by zhuyang,Screen-capture backdrop (LongShotScreen ScreenshotHelper port): the capture must complete BEFORE the,20261014,start
-        //pri added by zhuyang,overlay window is attached, or the captured frame would contain our own page. Done on a worker thread,20261014
-        //pri added by zhuyang,because ScreenshotHelper delivers its result on the main looper - a main-thread wait would deadlock,20261014
+        //pri added by zhuyang,Screen-capture backdrop (LongShotScreen silent ScreenCaptureInternal port): the capture must complete,20261014,start
+        //pri added by zhuyang,BEFORE the overlay window is attached, or the captured frame would contain our own page. Done on a,20261014
+        //pri added by zhuyang,worker thread because the capture blocks on a binder round trip to system_server,20261014
         new Thread(new Runnable() { @Override public void run() {
             final Uri captured = ScreenCapture.captureBackdrop(TapService.this, CAPTURE_TIMEOUT_MS);
             mMain.post(new Runnable() { @Override public void run() {
@@ -262,7 +262,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
                 startService(OverlayService.statusIntent(TapService.this, "正在连接对方…"));
             }});
         }}).start();
-        //pri added by zhuyang,Screen-capture backdrop (LongShotScreen ScreenshotHelper port): the capture must complete BEFORE the,20261014,end
+        //pri added by zhuyang,Screen-capture backdrop (LongShotScreen silent ScreenCaptureInternal port): the capture must complete,20261014,end
     }
 
     // ---------- Xfer 事件(仅发送侧处理) ----------

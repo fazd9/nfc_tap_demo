@@ -2,126 +2,181 @@ package com.pri.nfctouchdemo.gfx;
 
 import android.content.Context;
 import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
+import android.graphics.Rect;
+import android.hardware.HardwareBuffer;
 import android.net.Uri;
-import android.os.Handler;
-import android.os.Looper;
 import android.util.Log;
-
-import com.android.internal.util.ScreenshotHelper;
+import android.view.Display;
+import android.view.WindowManager;
 
 import java.io.File;
 import java.io.FileOutputStream;
-import java.io.InputStream;
-import java.lang.reflect.Method;
-import java.util.concurrent.LinkedBlockingQueue;
+import java.lang.reflect.Constructor;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.FutureTask;
 import java.util.concurrent.TimeUnit;
-import java.util.function.Consumer;
+import java.util.concurrent.TimeoutException;
 
-//pri added by zhuyang,Screen-capture backdrop, ported from the in-house reference LongShotScreen,20261014,start
-//pri added by zhuyang,Reference entry: ScreenshotUtils.takeScreenshot -> FrameworkUtils.takeScreenshot,20261014
-//pri added by zhuyang,Reference impl: new ScreenshotHelper(context.getApplicationContext()) + takeScreenshot(helper,,20261014
-//pri added by zhuyang,SCREENSHOT_ACCESSIBILITY_ACTIONS, new Handler(Looper.getMainLooper()), completionConsumer),20261014
-//pri added by zhuyang,The reference calls it through FrameworkReflectUtils (its own build setup); the same call is reflective here because,20261014
-//pri added by zhuyang,systemlibs/framework-header.jar and this ROM disagree on which overload exists,20261014
+//pri added by zhuyang,Silent screen-capture backdrop, ported from the in-house reference LongShotScreen,20261014,start
+//pri added by zhuyang,Reference entry: FrameworkUtils.createScreenshot -> (SDK_INT >= UPSIDE_DOWN_CAKE) createScreenshotU ->,20261014
+//pri added by zhuyang,FrameworkReflectUtils.createScreenshotU(windowManagerService, Display.DEFAULT_DISPLAY, crop),20261014
+//pri added by zhuyang,The capture goes straight to WindowManagerService, so nothing is saved into the gallery and no preview UI,20261014
+//pri added by zhuyang,is raised - the old ScreenshotHelper route went through SystemUI and did both,20261014
 public final class ScreenCapture {
 
     private static final String TAG = "ScreenCapture";
 
-    //pri added by zhuyang,WindowManager.ScreenshotSource.SCREENSHOT_ACCESSIBILITY_ACTIONS is @hide and absent from the,20261014
-    //pri added by zhuyang,public android.jar this module compiles against; it is only ever an int argument to reflective,20261014
-    //pri added by zhuyang,invoke(), so use the literal (same value in systemlibs/framework-header.jar and the ROM framework.jar),20261014
-    private static final int SCREENSHOT_SOURCE_ACCESSIBILITY_ACTIONS = 4;
-
-    //pri added by zhuyang,WindowManager.TAKE_SCREENSHOT_FULLSCREEN is @hide and absent from the public android.jar as well,20261014
-    private static final int TAKE_SCREENSHOT_TYPE_FULLSCREEN = 1;
+    //pri added by zhuyang,Android 16+ classes of the silent path; none of them is in systemlibs/framework-header.jar nor in the,20261014
+    //pri added by zhuyang,public SDK, so every member below is looked up reflectively (the reference does the same),20261014
+    private static final String SCREEN_CAPTURE_CLASS = "android.window.ScreenCaptureInternal";
+    private static final String WINDOW_MANAGER_GLOBAL_CLASS = "android.view.WindowManagerGlobal";
+    private static final String WINDOW_MANAGER_INTERFACE = "android.view.IWindowManager";
 
     //pri added by zhuyang,Cache file handed to the animation layer as the backdrop Uri (same pattern as TapService.peer_preview.jpg),20261014
     //pri added by zhuyang,Each capture gets a fresh file name: the animation layer keys its decoded bitmaps on the Uri and would,20261014
     //pri added by zhuyang,otherwise replay the previous round's screenshot out of its cache when the same photo is sent twice,20261014
     private static final String CACHE_PREFIX = "screen_backdrop_";
 
-    //pri added by zhuyang,Failure marker for the hand-off queue: a LinkedBlockingQueue rejects null elements,20261014
-    private static final Uri FAILED = Uri.EMPTY;
-
     private ScreenCapture() {}
 
     //pri added by zhuyang,Captures the current screen and returns it as a file:// Uri ready to be the overlay backdrop,20261014
-    //pri added by zhuyang,BLOCKING: waits up to timeoutMs for ScreenshotHelper's completion consumer, so it must NOT run on the main,20261014
-    //pri added by zhuyang,thread - that consumer is delivered on the main looper and would deadlock against a main-thread wait,20261014
-    //pri added by zhuyang,Returns null on every failure path (request, timeout, null Uri, decode); the caller then keeps the old backdrop,20261014
+    //pri added by zhuyang,BLOCKING: the capture itself is synchronous (the framework listener waits up to 4s), so it must NOT run,20261014
+    //pri added by zhuyang,on the main thread; run it on a throwaway thread and give up on the result after timeoutMs,20261014
+    //pri added by zhuyang,Returns null on every failure path (WMS handle, builder, captureDisplay, null buffer, asBitmap, encode),20261014
     public static Uri captureBackdrop(Context context, long timeoutMs) {
         final Context app = context.getApplicationContext();
-        final LinkedBlockingQueue<Uri> box = new LinkedBlockingQueue<Uri>(1);
-        //pri added by zhuyang,The reference passes a main-looper Handler; ScreenshotHelper builds its reply Messenger on that looper,20261014
-        final Handler handler = new Handler(Looper.getMainLooper());
-        final Consumer<Uri> consumer = new Consumer<Uri>() {
-            @Override
-            public void accept(Uri uri) {
-                box.offer(uri == null ? FAILED : uri);
-            }
-        };
         Log.i(TAG, "开始截屏取背景,最多等 " + timeoutMs + "ms");
+        FutureTask<Uri> task = new FutureTask<Uri>(new Callable<Uri>() {
+            @Override public Uri call() { return captureDisplayToCache(app); }
+        });
+        new Thread(task, "screen-capture").start();
         try {
-            takeScreenshot(new ScreenshotHelper(app), handler, consumer);
-        } catch (Throwable t) {
-            Log.e(TAG, "截屏请求下发失败,背景回退照片", t);
-            return null;
-        }
-        Uri shot = null;
-        try {
-            Uri got = box.poll(timeoutMs, TimeUnit.MILLISECONDS);
-            if (got != null && !FAILED.equals(got)) shot = got;
+            return task.get(timeoutMs, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            Log.e(TAG, "截屏超时(" + timeoutMs + "ms 内未回执),背景回退照片");
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            Log.e(TAG, "截屏等待被中断,背景回退照片");
+        } catch (ExecutionException e) {
+            Log.e(TAG, "截屏异常,背景回退照片", e);
         }
-        if (shot == null) {
-            Log.e(TAG, "截屏无结果(超时或系统未回执),背景回退照片");
-            return null;
-        }
-        Log.i(TAG, "截屏完成: " + shot);
-        return writeCache(app, shot);
+        return null;
     }
 
-    //pri added by zhuyang,The two overloads the reference switches between: Android 14+ (source, handler, consumer) and the older,20261014
-    //pri added by zhuyang,(type, hasStatus, hasNav, source, handler, consumer); found by name because systemlibs/framework-header.jar,20261014
-    //pri added by zhuyang,still carries only the older one while this ROM has the newer one - a direct call would not even compile,20261014
-    private static void takeScreenshot(ScreenshotHelper helper, Handler handler, Consumer<Uri> consumer)
-            throws Exception {
-        Method modern = find(helper, "takeScreenshot", int.class, Handler.class, Consumer.class);
-        if (modern != null) {
-            modern.invoke(helper, SCREENSHOT_SOURCE_ACCESSIBILITY_ACTIONS,
-                    handler, consumer);
-            return;
-        }
-        Method legacy = find(helper, "takeScreenshot",
-                int.class, boolean.class, boolean.class, int.class, Handler.class, Consumer.class);
-        if (legacy == null) {
-            throw new NoSuchMethodException("ScreenshotHelper.takeScreenshot");
-        }
-        legacy.invoke(helper, TAKE_SCREENSHOT_TYPE_FULLSCREEN, true, true,
-                SCREENSHOT_SOURCE_ACCESSIBILITY_ACTIONS, handler, consumer);
-    }
-
-    private static Method find(Object target, String name, Class<?>... params) {
+    //pri added by zhuyang,The silent capture, step by step:,20261014
+    //pri added by zhuyang,WindowManagerGlobal.getWindowManagerService().captureDisplay(DEFAULT_DISPLAY, CaptureArgs, listener),20261014
+    //pri added by zhuyang,then syncListener.getBuffer() -> ScreenshotHardwareBuffer -> asBitmap. No display token involved - this,20261014
+    //pri added by zhuyang,path takes a display id (the SurfaceControl version the old branch used is what needed the token),20261014
+    private static Uri captureDisplayToCache(Context app) {
+        Bitmap screenShot = null;
         try {
-            return target.getClass().getMethod(name, params);
-        } catch (NoSuchMethodException e) {
+            //pri added by zhuyang,Full-screen crop of the default display, taken from WindowManager (not hardcoded); this path only,20261014
+            //pri added by zhuyang,exists on Android 16+, where getMaximumWindowMetrics (API 30) is always available,20261014
+            WindowManager wm = (WindowManager) app.getSystemService(Context.WINDOW_SERVICE);
+            if (wm == null) {
+                Log.e(TAG, "截屏失败:拿不到 WindowManager,背景回退照片");
+                return null;
+            }
+            Rect bounds = wm.getMaximumWindowMetrics().getBounds();
+            int width = bounds.width();
+            int height = bounds.height();
+            if (width <= 0 || height <= 0) {
+                Log.e(TAG, "截屏失败:屏幕尺寸异常 " + width + "x" + height + ",背景回退照片");
+                return null;
+            }
+
+            Object wms = Class.forName(WINDOW_MANAGER_GLOBAL_CLASS)
+                    .getMethod("getWindowManagerService").invoke(null);
+            if (wms == null) {
+                Log.e(TAG, "截屏失败:WindowManagerGlobal.getWindowManagerService 返回空,背景回退照片");
+                return null;
+            }
+
+            Class<?> captureArgsClass = Class.forName(SCREEN_CAPTURE_CLASS + "$CaptureArgs");
+            Class<?> listenerClass = Class.forName(SCREEN_CAPTURE_CLASS + "$ScreenCaptureListener");
+            //pri added by zhuyang,Look the listener/buffer members up on these public classes, not on getClass(): the concrete,20261014
+            //pri added by zhuyang,listener is a package-private anonymous subclass, which invoke() could not reach,20261014
+            Class<?> syncListenerClass = Class.forName(SCREEN_CAPTURE_CLASS + "$SynchronousScreenCaptureListener");
+            Class<?> bufferClass = Class.forName(SCREEN_CAPTURE_CLASS + "$ScreenshotHardwareBuffer");
+            Class<?> builderClass = Class.forName(SCREEN_CAPTURE_CLASS + "$CaptureArgs$Builder");
+
+            Constructor<?> builderCtor = builderClass.getDeclaredConstructor();
+            Object builder = builderCtor.newInstance();
+            if (builder == null) {
+                Log.e(TAG, "截屏失败:CaptureArgs.Builder 构造失败,背景回退照片");
+                return null;
+            }
+            builderClass.getMethod("setSourceCrop", Rect.class)
+                    .invoke(builder, new Rect(0, 0, width, height));
+            Object captureArgs = builderClass.getMethod("build").invoke(builder);
+            if (captureArgs == null) {
+                Log.e(TAG, "截屏失败:CaptureArgs.build 返回空,背景回退照片");
+                return null;
+            }
+
+            Object syncListener = Class.forName(SCREEN_CAPTURE_CLASS)
+                    .getMethod("createSyncCaptureListener").invoke(null);
+            if (syncListener == null) {
+                Log.e(TAG, "截屏失败:createSyncCaptureListener 返回空,背景回退照片");
+                return null;
+            }
+
+            Object buffer;
+            try {
+                //pri added by zhuyang,One-way binder call into system_server; getBuffer() then blocks until the result arrives,20261014
+                Class.forName(WINDOW_MANAGER_INTERFACE)
+                        .getMethod("captureDisplay", int.class, captureArgsClass, listenerClass)
+                        .invoke(wms, Display.DEFAULT_DISPLAY, captureArgs, syncListener);
+                buffer = syncListenerClass.getMethod("getBuffer").invoke(syncListener);
+            } catch (Throwable t) {
+                Log.e(TAG, "截屏失败:captureDisplay 调用异常,背景回退照片", t);
+                return null;
+            }
+            if (buffer == null) {
+                Log.e(TAG, "截屏失败:captureDisplay 无回执(系统侧拒绝或等待超时),背景回退照片");
+                return null;
+            }
+
+            Object asBitmap = bufferClass.getMethod("asBitmap").invoke(buffer);
+            if (!(asBitmap instanceof Bitmap)) {
+                Log.e(TAG, "截屏失败:asBitmap 返回空或类型异常,背景回退照片");
+                return null;
+            }
+            //pri added by zhuyang,The wrapped Bitmap is hardware backed; copy the pixels into a software Bitmap (the documented,20261014
+            //pri added by zhuyang,recipe) because JPEG encoding needs to read them back on the CPU,20261014
+            Bitmap hwBitmap = (Bitmap) asBitmap;
+            screenShot = hwBitmap.copy(Bitmap.Config.ARGB_8888, false);
+            hwBitmap.recycle();
+            //pri added by zhuyang,The gralloc buffer is ours to release (the Bitmap kept its own reference),20261014
+            closeHardwareBuffer(bufferClass, buffer);
+            if (screenShot == null) {
+                Log.e(TAG, "截屏失败:转软件位图失败,背景回退照片");
+                return null;
+            }
+            return writeCache(app, screenShot);
+        } catch (Throwable t) {
+            Log.e(TAG, "截屏失败:静默截屏通道异常,背景回退照片", t);
             return null;
+        } finally {
+            if (screenShot != null) screenShot.recycle();
+        }
+    }
+
+    //pri added by zhuyang,Closing the captured hardware buffer is the caller's job (Bitmap.wrapHardwareBuffer only holds its own,20261014
+    //pri added by zhuyang,reference; same cleanup as AOSP's snapshot consumers); a failure here must not lose the capture,20261014
+    private static void closeHardwareBuffer(Class<?> bufferClass, Object screenshotBuffer) {
+        try {
+            Object hb = bufferClass.getMethod("getHardwareBuffer").invoke(screenshotBuffer);
+            if (hb instanceof HardwareBuffer) ((HardwareBuffer) hb).close();
+        } catch (Throwable t) {
+            Log.e(TAG, "截屏缓冲释放失败(不影响本次截屏)", t);
         }
     }
 
     //pri added by zhuyang,Mirrors TapService.previewUriOrNull(): the captured image becomes a cache JPEG the animation layer can read,20261014
-    private static Uri writeCache(Context app, Uri shot) {
-        InputStream in = null;
-        Bitmap bmp = null;
+    private static Uri writeCache(Context app, Bitmap bmp) {
         try {
-            in = app.getContentResolver().openInputStream(shot);
-            bmp = (in == null) ? null : BitmapFactory.decodeStream(in);
-            if (bmp == null) {
-                Log.e(TAG, "截屏读取/解码失败,背景回退照片: " + shot);
-                return null;
-            }
             File f = new File(app.getCacheDir(), CACHE_PREFIX + System.currentTimeMillis() + ".jpg");
             FileOutputStream os = new FileOutputStream(f);
             try {
@@ -137,9 +192,6 @@ public final class ScreenCapture {
         } catch (Throwable t) {
             Log.e(TAG, "截屏落盘失败,背景回退照片", t);
             return null;
-        } finally {
-            if (bmp != null) bmp.recycle();
-            if (in != null) { try { in.close(); } catch (Throwable ignored) {} }
         }
     }
 
@@ -152,4 +204,4 @@ public final class ScreenCapture {
         }
     }
 }
-//pri added by zhuyang,Screen-capture backdrop, ported from the in-house reference LongShotScreen,20261014,end
+//pri added by zhuyang,Silent screen-capture backdrop, ported from the in-house reference LongShotScreen,20261014,end
