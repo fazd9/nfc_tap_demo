@@ -5,34 +5,109 @@
   sits above the status bar / cutout, and the failure hint appears only when a decode came back null.
   pri added by zhuyang,D5: in-app image viewer (replaces the Google Photos pager),20261014,end
 -->
+<!--
+  pri added by zhuyang,D6: viewer chrome, the layout language of the reference viewer
+  (mtk_x .../filemanagement/ui/preview/ImagePreviewScreen.kt) rebuilt with plain Views,20261014,start
+  Top bar: white back arrow on the left, a two-line title block (date, white 16sp / file name, #A5A5A5 11sp)
+  and the "n / N" counter on the right, on solid black like the reference bar. Bottom: the strip of this
+  transfer's photos, the current cell framed in white and scaled up; it is hidden for a single photo.
+  The reference's share / delete / detail buttons are deliberately not copied - not our business.
+  The three pager pages are added by ViewerPager itself, so they are not in this file.
+  pri added by zhuyang,D6: viewer chrome, the layout language of the reference viewer,20261014,end
+-->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/viewer_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
     android:background="@android:color/black">
 
-    <com.pri.nfctouchdemo.viewer.ZoomImageView
-        android:id="@+id/viewer_image"
+    <!--pri added by zhuyang,D6: prev / current / next, dragged under the finger instead of switched on release,20261014-->
+    <com.pri.nfctouchdemo.viewer.ViewerPager
+        android:id="@+id/viewer_pager"
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 
-    <TextView
-        android:id="@+id/viewer_position"
-        android:layout_width="wrap_content"
+    <LinearLayout
+        android:id="@+id/viewer_top_bar"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:layout_gravity="top|center_horizontal"
-        android:layout_marginTop="18dp"
-        android:paddingStart="12dp"
-        android:paddingTop="4dp"
-        android:paddingEnd="12dp"
-        android:paddingBottom="4dp"
-        android:shadowColor="#CC000000"
-        android:shadowDx="0"
-        android:shadowDy="0"
-        android:shadowRadius="4"
-        android:textColor="@color/white"
-        android:textSize="14sp"
-        android:visibility="gone" />
+        android:layout_gravity="top"
+        android:background="@android:color/black"
+        android:gravity="center_vertical"
+        android:minHeight="56dp"
+        android:orientation="horizontal"
+        android:paddingStart="4dp"
+        android:paddingEnd="16dp">
+
+        <ImageButton
+            android:id="@+id/viewer_back"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:background="?attr/selectableItemBackgroundBorderless"
+            android:contentDescription="@string/viewer_back"
+            android:scaleType="centerInside"
+            android:src="@drawable/ic_viewer_back" />
+
+        <LinearLayout
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="4dp"
+            android:layout_weight="1"
+            android:orientation="vertical">
+
+            <TextView
+                android:id="@+id/viewer_title"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="end"
+                android:maxLines="1"
+                android:textColor="@color/white"
+                android:textSize="16sp" />
+
+            <TextView
+                android:id="@+id/viewer_subtitle"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:ellipsize="middle"
+                android:maxLines="1"
+                android:textColor="#A5A5A5"
+                android:textSize="11sp" />
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/viewer_position"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginStart="12dp"
+            android:textColor="@color/white"
+            android:textSize="14sp"
+            android:visibility="gone" />
+    </LinearLayout>
+
+    <!--pri added by zhuyang,D6: the strip of this transfer's photos; clipChildren / clipToPadding keep the
+        scaled-up current cell from being cut off by its own 30dp slot,20261014-->
+    <HorizontalScrollView
+        android:id="@+id/viewer_thumbs"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom"
+        android:background="@android:color/black"
+        android:clipToPadding="false"
+        android:paddingTop="7dp"
+        android:paddingBottom="7dp"
+        android:scrollbars="none"
+        android:visibility="gone">
+
+        <LinearLayout
+            android:id="@+id/viewer_thumbs_row"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:clipChildren="false"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp" />
+    </HorizontalScrollView>
 
     <TextView
         android:id="@+id/viewer_failure"
