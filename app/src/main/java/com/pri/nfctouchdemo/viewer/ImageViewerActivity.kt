@@ -62,8 +62,8 @@ class ImageViewerActivity : AppCompatActivity() {
     //pri added by zhuyang,is ever recycled and a late decode always knows the slot is still waiting for it,20261014
     private val slotShown = arrayOfNulls<Bitmap>(SLOT_COUNT)
     private val thumbBitmaps = ArrayList<Bitmap>()
-    private val thumbsRowPadding = IntArray(4) //pri added by zhuyang,The row's own padding, kept when half a viewport is added to centre a cell,20261014
-    private var thumbPad = 0
+    private var thumbPad = 0 //pri added by zhuyang,Half a viewport: the strip's own padding that lets an edge cell centre,20261014
+    private var stripPadding = intArrayOf(0, 0, 0, 0) //pri added by zhuyang,The strip's XML padding, kept when the centring pad is applied,20261014
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -87,7 +87,7 @@ class ImageViewerActivity : AppCompatActivity() {
         //pri added by zhuyang,The two bars keep clear of the status bar / cutout / navigation bar: bars push them, not cover,20261014
         val root = findViewById<View>(R.id.viewer_root)
         val barPadding = intArrayOf(topBar.paddingLeft, topBar.paddingTop, topBar.paddingRight, topBar.paddingBottom)
-        val stripPadding = intArrayOf(thumbs.paddingLeft, thumbs.paddingTop, thumbs.paddingRight, thumbs.paddingBottom)
+        stripPadding = intArrayOf(thumbs.paddingLeft, thumbs.paddingTop, thumbs.paddingRight, thumbs.paddingBottom)
         ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
             val bars = insets.getInsets(
                 WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout()
@@ -98,10 +98,12 @@ class ImageViewerActivity : AppCompatActivity() {
                 barPadding[2] + bars.right,
                 barPadding[3]
             )
+            //pri added by zhuyang,Vertical only: the strip's horizontal padding is the centring pad now, set by
+            //pri added by zhuyang,updateThumbSelection (adding the bars here would overwrite it and de-centre the cell),20261014
             thumbs.setPadding(
-                stripPadding[0] + bars.left,
+                thumbs.paddingLeft,
                 stripPadding[1],
-                stripPadding[2] + bars.right,
+                thumbs.paddingRight,
                 stripPadding[3] + bars.bottom
             )
             insets
@@ -112,12 +114,8 @@ class ImageViewerActivity : AppCompatActivity() {
 
         //pri added by zhuyang,The selected cell is centred, but the strip width is 0 until it is laid out: the pad
         //pri added by zhuyang,that makes an edge cell centre-able is applied once the width is known. The strip's own
-        //pri added by zhuyang,layout covers the first layout and a rotation, the row's covers the pass that follows the
-        //pri added by zhuyang,pad (a change inside the row does not lay the strip out again),20261014
-        thumbsRowPadding[0] = thumbsRow.paddingLeft
-        thumbsRowPadding[1] = thumbsRow.paddingTop
-        thumbsRowPadding[2] = thumbsRow.paddingRight
-        thumbsRowPadding[3] = thumbsRow.paddingBottom
+        //pri added by zhuyang,layout covers the first layout and a rotation; the row's covers a new list of cells (the
+        //pri added by zhuyang,strip's bounds do not change then, so its own listener does not fire),20261014
         thumbs.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateThumbSelection() }
         thumbsRow.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateThumbSelection() }
 
@@ -164,6 +162,10 @@ class ImageViewerActivity : AppCompatActivity() {
         syncSlots()
         updateChrome()
         ensureDecoded()
+        //pri added by zhuyang,A new list with the same number of photos leaves the row the same size, so no layout
+        //pri added by zhuyang,callback comes for it and the strip would keep the previous set's scroll position:
+        //pri added by zhuyang,re-centre once the new cells have been measured (runs after the layout pass),20261014
+        thumbs.post { updateThumbSelection() }
     }
 
     //pri added by zhuyang,Drop the whole set: the slots first so no view is drawing a bitmap when it is recycled,20261014
@@ -317,35 +319,34 @@ class ImageViewerActivity : AppCompatActivity() {
             //pri added by zhuyang,A fresh instance per call: sharing one Drawable would steal the callback back off the new cell,20261014
             cell.foreground = if (current) ContextCompat.getDrawable(this, R.drawable.viewer_thumb_frame) else null
         }
-        //pri added by zhuyang,Before layout (or after a rotation) the strip has no width: the layout listeners come
+        //pri added by zhuyang,Before layout (or after a rotation) the strip has no width: the layout listener comes
         //pri added by zhuyang,back through here once it has one,20261014
-        val viewport = thumbs.width - thumbs.paddingLeft - thumbs.paddingRight
-        if (viewport <= 0) return
+        if (thumbs.width <= 0) return
         val slot = thumbsRow.getChildAt(0).width
         if (slot <= 0) return
-        //pri added by zhuyang,Half a viewport at each end of the row: an edge cell can then reach the middle of the
-        //pri added by zhuyang,strip. Without it the first / last cell sit flush at the edge (the reference does the
-        //pri added by zhuyang,same with a LazyRow contentPadding of (maxWidth - slot) / 2),20261014
-        val pad = ((viewport - slot) / 2).coerceAtLeast(0)
+        //pri added by zhuyang,Half a viewport at each end of the SCROLL CONTAINER (the reference's LazyRow
+        //pri added by zhuyang,contentPadding does the same): an edge cell can then reach the middle of the strip.
+        //pri added by zhuyang,On the row this used to be a re-layout after every selection - the pad made the row
+        //pri added by zhuyang,grow, the grown row was measured again by the strip and the next pass added the pad on
+        //pri added by zhuyang,top of it, until the cells were squeezed into slivers. On the container the pad is a
+        //pri added by zhuyang,constant of the strip width, so nothing is re-measured and no pass is needed at all,20261014
+        val pad = ((thumbs.width - slot) / 2).coerceAtLeast(0)
         if (pad != thumbPad) {
             thumbPad = pad
-            thumbsRow.setPadding(
-                thumbsRowPadding[0] + pad,
-                thumbsRowPadding[1],
-                thumbsRowPadding[2] + pad,
-                thumbsRowPadding[3]
+            thumbs.setPadding(
+                stripPadding[0] + pad,
+                thumbs.paddingTop,
+                stripPadding[2] + pad,
+                thumbs.paddingBottom
             )
-            //pri added by zhuyang,The cells move by "pad" with this: the centring below must wait for the row to be
-            //pri added by zhuyang,laid out again (its layout listener calls this back),20261014
-            return
         }
-        //pri added by zhuyang,Only where the row is long enough to scroll: a short row would scroll the trailing pad
-        //pri added by zhuyang,into view and shift every cell left, and the row is already centred in the viewport,20261014
-        val range = thumbsRow.width - viewport
-        if (range <= 0) return
+        //pri added by zhuyang,The target is the cell's own left plus the strip's own lead: the cell then sits at
+        //pri added by zhuyang,(stripPadding[0] + pad + cell.left) - scrollX, and with scrollX = stripPadding[0] +
+        //pri added by zhuyang,cell.left that is pad + slot / 2 = half the strip - exactly the middle, for any lead.
+        //pri added by zhuyang,No range clamp is needed: dragging out of the pad is exactly what brings an edge cell
+        //pri added by zhuyang,to the middle, and scrollTo clamps to the content anyway,20261014
         val cell = thumbsRow.getChildAt(pager.index) ?: return
-        val target = cell.left - (viewport - cell.width) / 2
-        thumbs.smoothScrollTo(target.coerceIn(0, range), 0)
+        thumbs.smoothScrollTo(cell.left + stripPadding[0], 0)
     }
 
     private fun updateFailure() {
@@ -357,14 +358,8 @@ class ImageViewerActivity : AppCompatActivity() {
     private fun buildThumbs() {
         thumbsRow.removeAllViews()
         //pri added by zhuyang,The centring pad is a function of the strip width and the cell size: a new list has to
-        //pri added by zhuyang,be worked out from scratch,20261014
-        thumbPad = 0
-        thumbsRow.setPadding(
-            thumbsRowPadding[0],
-            thumbsRowPadding[1],
-            thumbsRowPadding[2],
-            thumbsRowPadding[3]
-        )
+        //pri added by zhuyang,be worked out from scratch. It is not removed here on purpose - the strip keeps its width,
+        //pri added by zhuyang,so the pad survives a new list and updateThumbSelection only re-applies it if it changed,20261014
         if (uris.size <= 1) return
         val size = dp(THUMB_DP)
         val gap = dp(THUMB_GAP_DP)

@@ -84,14 +84,17 @@
             android:visibility="gone" />
     </LinearLayout>
 
-    <!--pri added by zhuyang,D6: the strip of this transfer's photos; clipChildren / clipToPadding keep the
-        scaled-up current cell from being cut off by its own 30dp slot,20261014-->
+    <!--pri added by zhuyang,D6: the strip of this transfer's photos,20261014,start
+        clipChildren / clipToPadding keep the scaled-up current cell from being cut off: the row defaults to
+        clipToPadding=true, which clipped the 1.25x cell to its own 30dp band (the cell looked like a sliver),
+        the strip's clipChildren=true clipped it to the row's band,20261014,end-->
     <HorizontalScrollView
         android:id="@+id/viewer_thumbs"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:layout_gravity="bottom"
         android:background="@android:color/black"
+        android:clipChildren="false"
         android:clipToPadding="false"
         android:paddingTop="7dp"
         android:paddingBottom="7dp"
@@ -103,6 +106,7 @@
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:clipChildren="false"
+            android:clipToPadding="false"
             android:gravity="center_vertical"
             android:orientation="horizontal"
             android:paddingStart="8dp"
