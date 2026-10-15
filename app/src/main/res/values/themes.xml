@@ -40,6 +40,13 @@
         <item name="android:windowAnimationStyle">@null</item>
         <!-- first frame is already black: no white flash before the bitmap is decoded -->
         <item name="android:windowBackground">@android:color/black</item>
+        <!--pri added by zhuyang,D6: no system starting window (the icon flash before the first frame),20261014-->
+        <!--
+          Trade-off, chosen by the user: the system splash / starting window is not drawn either, so there can
+          be a brief moment of nothing before the first frame. Acceptable here precisely because the window
+          background above is already black - "nothing" and "the first frame" look the same.
+        -->
+        <item name="android:windowDisablePreview">true</item>
     </style>
     <!--pri added by zhuyang,D5: in-app image viewer theme (replaces the Google Photos pager),20261014,end-->
 </resources>
