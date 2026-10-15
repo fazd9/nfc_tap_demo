@@ -1,0 +1,6 @@
+--做事交给子代理做，主会话负责检查、整理
+--此工程为nfc碰一碰传输工程，参考成熟产品Temp/video.mp4实现
+--调试相册代码Temp\debuggallery
+--截屏、悬浮窗控制参考了超级截屏mtk_x\pri_project\android\os_app_src\LongShotScreen进行实现
+--后台服务、保活、开机启动打算参考mtk_x\pri_project\android\os_app_src\PriDynamicWindow灵动岛进行实现
+--图片查看器参考mtk_x\pri_project\android\os_app_src\PriFileManagement文件管理进行实现
