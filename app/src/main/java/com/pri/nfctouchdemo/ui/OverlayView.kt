@@ -1437,9 +1437,6 @@ class OverlayView @JvmOverloads constructor(
     private val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val photoClip = Paint(Paint.ANTI_ALIAS_FLAG)
 
-    //pri added by zhuyang,E7: rounded clip of the inset photo rect (reused, never allocated on the draw path),20261014
-    private val photoPath = Path()
-
     // 往卡片插画缓存里画用户照片时用（缩放要过滤，否则缩略图边缘会发硬）
     private val artPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -2709,21 +2706,6 @@ class OverlayView @JvmOverloads constructor(
         textPaint.clearShadowLayer()
     }
 
-    //pri added by zhuyang,E6/E7: photo rect inside the card; drawCard and the particle-burst origin both call it,20261014,start
-    //pri added by zhuyang,E6/E7: it is derived from [cardRect] (the layout authority this file already has), so it does not compete with layoutCard(),20261014
-    //pri added by zhuyang,E6/E7: the deformation is applied on top of it by [contentMatrix],20261014
-    private fun photoArea(out: RectF) {
-        //pri added by zhuyang,Receive card draws no title/meta lines, so the photo fills the card instead of leaving that band empty,20261014
-        val bottomInset = if (mode == Mode.RECEIVE) 9f * k else 53f * k
-        out.set(
-            cardRect.left + 9f * k,
-            cardRect.top + 9f * k,
-            cardRect.right - 9f * k,
-            cardRect.bottom - bottomInset
-        )
-    }
-    //pri added by zhuyang,E6/E7: photo rect inside the card; drawCard and the particle-burst origin both call it,20261014,end
-
     private fun drawCard(c: Canvas) {
         if (cardRect.width() <= 0f) return
 
@@ -2783,12 +2765,6 @@ class OverlayView @JvmOverloads constructor(
         // 去掉之后"卡片"只剩三件东西：轮廓（上窄下宽的形变 + 圆角）、照片本身、
         // 以及下方那层投影 —— 卡片就是图片。[cardPaint] 这枚 Paint 留着，
         // 万一哪次形变里发现轮廓边缘有极细的透底，加回来一行就够。
-        //pri added by zhuyang,C-3/E7: the card background is back,20261014,start
-        //pri added by zhuyang,C-3/E7: both modes now keep a 9dp photo margin (see photoArea), so the silhouette must be filled or the margin shows the background through;20261014
-        //pri added by zhuyang,C-3/E7: filled on [shapePath] instead of a rounded rect so it follows the deformation,20261014,end
-        cardPaint.shader = null
-        cardPaint.color = withAlpha(0xFFF8F8F8.toInt(), alpha)
-        c.drawPath(shapePath, cardPaint)
 
         // **卡片不再描边**。量了参考帧（720px 宽、t=6s 科比海报那帧）：卡片白底对着深色背景，
         // 边缘是一条 `40 → 95 → 178 → 207 → 250` 的 3~4px **柔和**过渡，没有硬线；
@@ -2804,61 +2780,20 @@ class OverlayView @JvmOverloads constructor(
         // 照片**铺满整张卡**，而且**不做自己的呼吸** —— 呼吸由 [drawCard] 开头那记
         // `cardBob` 作用在整张卡片上（原因见那里）。图片和卡片是刚性一体，
         // 任何相对位移都会在边缘露出卡片底色，所以这里必须是静止的矩形。
-        //pri modify by zhuyang,E7: the photo no longer fills the whole card - it sits in the 9dp-margin rect from photoArea(),20261014,start
-        //pri modify by zhuyang,E7: the draw path and the particle-burst origin share that one rect, and both are mapped by [contentMatrix] like the rest of the content,20261014,end
-        val photo = RectF()
-        photoArea(photo)
-        val pr = 15f * k
+        val photo = RectF(cardRect.left, cardRect.top, cardRect.right, cardRect.bottom)
         val art = artworkBitmap(photo.width().toInt(), photo.height().toInt())
         photoClip.alpha = (alpha * 255f).toInt().coerceIn(0, 255)
         // 圆角不在这里裁：内容整体裁在 [shapePath] 上，照片四角自然跟着卡片的轮廓圆角走。
-        //pri added by zhuyang,E7: the photo is inset now, so it needs its own 15dp round clip inside the card margin,20261014,start
-        val photoSave = c.save()
-        photoPath.reset()
-        photoPath.addRoundRect(photo, pr, pr, Path.Direction.CW)
-        c.clipPath(photoPath)
         c.drawBitmap(art, artSrc, photo, photoClip)
-        c.restoreToCount(photoSave)
-        //pri added by zhuyang,E7: the photo is inset now, so it needs its own 15dp round clip inside the card margin,20261014,end
 
-        //pri added by zhuyang,E7: over-expose the photo to a white rounded rect while sending,20261014,start
+        //pri added by zhuyang,E7: over-expose the card to white while sending - the card is the photo,20261014,start
+        //pri added by zhuyang,E7: the rect is the card rect, so the [shapePath] clip trims it to the deformed silhouette,20261014
         if (photoWhite > 0.003f) {
+            cardPaint.shader = null
             cardPaint.color = withAlpha(0xFFFFFFFF.toInt(), alpha * photoWhite)
-            c.drawRoundRect(photo, pr, pr, cardPaint)
+            c.drawRect(photo, cardPaint)
         }
-        //pri added by zhuyang,E7: over-expose the photo to a white rounded rect while sending,20261014,end
-
-        //pri added by zhuyang,C-3: receive card carries no card-level title/meta (reference frame: the receive card is just the photo),20261014,start
-        if (mode != Mode.RECEIVE) {
-            // 文字区
-            textPaint.typeface = bold
-            textPaint.textSize = 12f * k
-            textPaint.letterSpacing = 0.008f
-            textPaint.clearShadowLayer()
-            val fmStrong = textPaint.fontMetrics
-            val strongH = fmStrong.descent - fmStrong.ascent
-
-            textPaint.typeface = normal
-            textPaint.textSize = 9f * k
-            textPaint.letterSpacing = 0f
-            val fmSpan = textPaint.fontMetrics
-            val spanH = fmSpan.descent - fmSpan.ascent
-
-            val boxBottom = cardRect.bottom - 13f * k
-            val spanTop = boxBottom - spanH
-            val strongTop = spanTop - 4f * k - strongH
-
-            textPaint.typeface = bold
-            textPaint.textSize = 12f * k
-            textPaint.color = withAlpha(0xFF252B31.toInt(), alpha)
-            c.drawText(cardTitle, cardRect.left + 17f * k, strongTop - fmStrong.ascent, textPaint)
-
-            textPaint.typeface = normal
-            textPaint.textSize = 9f * k
-            textPaint.color = withAlpha(0xFF737B82.toInt(), alpha)
-            c.drawText(cardMeta, cardRect.left + 17f * k, spanTop - fmSpan.ascent, textPaint)
-        }
-        //pri added by zhuyang,C-3: receive card carries no card-level title/meta (reference frame: the receive card is just the photo),20261014,end
+        //pri added by zhuyang,E7: over-expose the card to white while sending - the card is the photo,20261014,end
 
         c.restoreToCount(contentSave)
         c.restoreToCount(save)
@@ -3263,10 +3198,10 @@ class OverlayView @JvmOverloads constructor(
         flyProgress = deformProgress   // 先冻住"松手那一刻挤到哪儿了"
         flying = true
         //pri added by zhuyang,E7: particle burst + photo whitening at the send moment,20261014,start
-        //pri added by zhuyang,E7: the burst origin is the photo rect mapped through the deformation, so it follows the card wherever the drag/compression put it,20261014
+        //pri added by zhuyang,E7: the burst origin is the card rect mapped through the deformation, so it follows the card wherever the drag/compression put it,20261014
         //pri added by zhuyang,E7: re-run the layout so the mapping is the release-moment one, not the last drawn frame,20261014
         layoutCard()
-        photoArea(scratch)
+        scratch.set(cardRect)
         contentMatrix.mapRect(scratch)
         onSendBurst?.invoke(scratch.centerX(), scratch.centerY())
         whiteAnimator?.cancel()
