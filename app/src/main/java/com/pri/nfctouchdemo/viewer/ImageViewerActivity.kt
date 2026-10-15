@@ -24,7 +24,6 @@ import com.pri.nfctouchdemo.gfx.ImageLoader
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
-import kotlin.math.max
 import kotlin.math.roundToInt
 
 //pri added by zhuyang,D5: in-app image viewer, opened by TapService after a transfer completed,20261014,start
@@ -58,8 +57,13 @@ class ImageViewerActivity : AppCompatActivity() {
     private val metas = HashMap<Int, Meta>() //pri added by zhuyang,Name / date per page, for the title block,20261014
     private val failed = HashSet<Int>()
     private val decoding = HashSet<Int>()
-    private val slotPages = IntArray(SLOT_COUNT) { -1 } //pri added by zhuyang,Which page each pager slot is showing,20261014
+    private val slotPages = IntArray(SLOT_COUNT) { NO_PAGE } //pri added by zhuyang,Which page each pager slot is showing,20261014
+    //pri added by zhuyang,The bitmap each slot draws right now - the slot's own record of it, so no bitmap on screen
+    //pri added by zhuyang,is ever recycled and a late decode always knows the slot is still waiting for it,20261014
+    private val slotShown = arrayOfNulls<Bitmap>(SLOT_COUNT)
     private val thumbBitmaps = ArrayList<Bitmap>()
+    private val thumbsRowPadding = IntArray(4) //pri added by zhuyang,The row's own padding, kept when half a viewport is added to centre a cell,20261014
+    private var thumbPad = 0
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -105,6 +109,17 @@ class ImageViewerActivity : AppCompatActivity() {
 
         //pri added by zhuyang,D6: the only way out used to be the physical Back key,20261014
         findViewById<View>(R.id.viewer_back).setOnClickListener { finish() }
+
+        //pri added by zhuyang,The selected cell is centred, but the strip width is 0 until it is laid out: the pad
+        //pri added by zhuyang,that makes an edge cell centre-able is applied once the width is known. The strip's own
+        //pri added by zhuyang,layout covers the first layout and a rotation, the row's covers the pass that follows the
+        //pri added by zhuyang,pad (a change inside the row does not lay the strip out again),20261014
+        thumbsRowPadding[0] = thumbsRow.paddingLeft
+        thumbsRowPadding[1] = thumbsRow.paddingTop
+        thumbsRowPadding[2] = thumbsRow.paddingRight
+        thumbsRowPadding[3] = thumbsRow.paddingBottom
+        thumbs.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateThumbSelection() }
+        thumbsRow.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> updateThumbSelection() }
 
         //pri added by zhuyang,D6: a settled turn rebinds the slots (still in the same frame, so nothing flashes),20261014
         pager.onPageChanged = {
@@ -157,7 +172,8 @@ class ImageViewerActivity : AppCompatActivity() {
         //pri added by zhuyang,setPages(0) also stops a settle that is still running - it must not rebind recycled bitmaps,20261014
         pager.setPages(0)
         for (i in 0 until SLOT_COUNT) {
-            slotPages[i] = -1
+            slotPages[i] = NO_PAGE
+            slotShown[i] = null
             pager.slots[i].setImageDrawable(null)
         }
         thumbsRow.removeAllViews()
@@ -171,33 +187,55 @@ class ImageViewerActivity : AppCompatActivity() {
     }
 
     //pri added by zhuyang,Hand every slot the bitmap of the page it stands for; slot 0 / 1 / 2 = index - 1 / index / index + 1,20261014
+    //pri added by zhuyang,INVARIANT (do not re-break): a slot draws exactly the bitmap held in slotShown[i], or nothing.
+    //pri added by zhuyang,Whatever the slot draws is never recycled (trim follows this record), and the slot is emptied
+    //pri added by zhuyang,before it moves to another page. So what may leave the canvas is decided by the slot binding,
+    //pri added by zhuyang,never by pager.index (a decode is asynchronous: by the time it lands the index may have moved)
+    //pri added by zhuyang,and never by "view.drawable == null" - setImageBitmap(null) installs an EMPTY BitmapDrawable,
+    //pri added by zhuyang,which is not null, so that test used to swallow the bitmap of the page being shown and left the
+    //pri added by zhuyang,pager black while the thumbnails (set straight on their cells) rendered fine,20261014
     private fun syncSlots() {
         for (i in 0 until SLOT_COUNT) {
             val page = pager.index + i - 1
             val view = pager.slots[i]
             if (page !in uris.indices) {
-                if (slotPages[i] != -1) {
-                    slotPages[i] = -1
-                    view.setImageDrawable(null)
+                if (slotPages[i] != NO_PAGE) {
+                    slotPages[i] = NO_PAGE
+                    slotShown[i] = null
+                    view.setImageDrawable(null) //pri added by zhuyang,The honest empty: nothing left for trim() to protect,20261014
                 }
                 continue
             }
             val bmp = bitmaps[page]
             if (slotPages[i] != page) {
+                //pri added by zhuyang,The slot moved to another page: give up what it was drawing NOW (the drawable is
+                //pri added by zhuyang,dropped, the page may be recycled afterwards) and wait for the new bitmap,20261014
                 slotPages[i] = page
-                //pri added by zhuyang,null is fine: the page is still decoding and the result lands in this slot later,20261014
-                view.setImageBitmap(bmp)
-            } else if (bmp != null && view.drawable == null) {
+                slotShown[i] = null
+                view.setImageDrawable(null)
+            }
+            //pri added by zhuyang,A bitmap that lands late still reaches its slot, even when the slot was already given
+            //pri added by zhuyang,something (or an empty placeholder) in the meantime,20261014
+            if (bmp != null && slotShown[i] !== bmp) {
+                slotShown[i] = bmp
                 view.setImageBitmap(bmp)
             }
         }
     }
 
+    //pri added by zhuyang,The neighbourhood that is kept: the three slots (what is actually bound, which is what a
+    //pri added by zhuyang,visible pager page can be drawing at any moment) plus the settled current page,20261014
+    private fun visibleRange(): IntRange = minOf(slotPages.min(), pager.index)..maxOf(slotPages.max(), pager.index)
     //pri added by zhuyang,The visible page loads first, the two neighbours with it so a drag has something to drag in,20261014
+    //pri added by zhuyang,Only the pages the slots cover: they all sit inside the range trim() keeps, so nothing asked
+    //pri added by zhuyang,for here can ever be recycled right after - that used to be an endless decode loop,20261014
     private fun ensureDecoded() {
+        val wanted = visibleRange()
         for (i in 0 until SLOT_COUNT) {
             val page = pager.index + i - 1
-            if (page in uris.indices && !bitmaps.containsKey(page) && !failed.contains(page) && decoding.add(page)) {
+            if (page in uris.indices && page in wanted &&
+                !bitmaps.containsKey(page) && !failed.contains(page) && decoding.add(page)
+            ) {
                 decodePage(page)
             }
         }
@@ -217,11 +255,15 @@ class ImageViewerActivity : AppCompatActivity() {
                 }
                 metas[page] = meta
                 if (decoded == null) {
-                    Log.e(TAG, "decode failed, showing the failure hint: $uri")
+                    //pri added by zhuyang,A null decode used to be silent on this ROM (INFO default hides Log.d) and
+                    //pri added by zhuyang,only the throwable path logged: a failing page was indistinguishable from an
+                    //pri added by zhuyang,empty one,20261014
+                    Log.e(TAG, "decode returned null, showing the failure hint: $uri")
                     failed.add(page)
                 } else {
                     failed.remove(page)
                     bitmaps[page] = decoded
+                    Log.i(TAG, "decoded page $page (${decoded.width}x${decoded.height})")
                 }
                 syncSlots() //pri added by zhuyang,Before trim: the slot moves off the old page first,20261014
                 trim()
@@ -230,12 +272,16 @@ class ImageViewerActivity : AppCompatActivity() {
         }.start()
     }
 
-    //pri added by zhuyang,Keep only the three pages around the current one; the slots were rebound just before,20261014
+    //pri added by zhuyang,Keep only the bitmaps the viewer can still draw: the ones the slots are bound to (slotShown
+    //pri added by zhuyang,is exactly what they draw) plus the settled current page. The range is what makes the bound
+    //pri added by zhuyang,never drop below three, so the memory bound stays at three full-size bitmaps per transfer,20261014
     private fun trim() {
+        val keep = visibleRange()
         val entries = bitmaps.entries.iterator()
         while (entries.hasNext()) {
             val entry = entries.next()
-            if (entry.key < pager.index - 1 || entry.key > pager.index + 1) {
+            val drawn = slotShown.any { it === entry.value }
+            if (!drawn && entry.key !in keep) {
                 entries.remove()
                 entry.value.recycle()
             }
@@ -258,8 +304,11 @@ class ImageViewerActivity : AppCompatActivity() {
     }
 
     //pri added by zhuyang,The current thumbnail is framed in white and scaled up, like the reference strip,20261014
+    //pri added by zhuyang,Selection scales the DRAWING (scaleX / scaleY), never the cell's layout size: the centring
+    //pri added by zhuyang,math below reads left / width, which must stay the uniform slot,20261014
     private fun updateThumbSelection() {
         if (thumbs.visibility != View.VISIBLE) return
+        if (thumbsRow.childCount == 0) return
         for (i in 0 until thumbsRow.childCount) {
             val cell = thumbsRow.getChildAt(i)
             val current = i == pager.index
@@ -268,9 +317,35 @@ class ImageViewerActivity : AppCompatActivity() {
             //pri added by zhuyang,A fresh instance per call: sharing one Drawable would steal the callback back off the new cell,20261014
             cell.foreground = if (current) ContextCompat.getDrawable(this, R.drawable.viewer_thumb_frame) else null
         }
+        //pri added by zhuyang,Before layout (or after a rotation) the strip has no width: the layout listeners come
+        //pri added by zhuyang,back through here once it has one,20261014
+        val viewport = thumbs.width - thumbs.paddingLeft - thumbs.paddingRight
+        if (viewport <= 0) return
+        val slot = thumbsRow.getChildAt(0).width
+        if (slot <= 0) return
+        //pri added by zhuyang,Half a viewport at each end of the row: an edge cell can then reach the middle of the
+        //pri added by zhuyang,strip. Without it the first / last cell sit flush at the edge (the reference does the
+        //pri added by zhuyang,same with a LazyRow contentPadding of (maxWidth - slot) / 2),20261014
+        val pad = ((viewport - slot) / 2).coerceAtLeast(0)
+        if (pad != thumbPad) {
+            thumbPad = pad
+            thumbsRow.setPadding(
+                thumbsRowPadding[0] + pad,
+                thumbsRowPadding[1],
+                thumbsRowPadding[2] + pad,
+                thumbsRowPadding[3]
+            )
+            //pri added by zhuyang,The cells move by "pad" with this: the centring below must wait for the row to be
+            //pri added by zhuyang,laid out again (its layout listener calls this back),20261014
+            return
+        }
+        //pri added by zhuyang,Only where the row is long enough to scroll: a short row would scroll the trailing pad
+        //pri added by zhuyang,into view and shift every cell left, and the row is already centred in the viewport,20261014
+        val range = thumbsRow.width - viewport
+        if (range <= 0) return
         val cell = thumbsRow.getChildAt(pager.index) ?: return
-        val target = cell.left - (thumbs.width - cell.width) / 2
-        thumbs.smoothScrollTo(target.coerceIn(0, max(0, thumbsRow.width - thumbs.width)), 0)
+        val target = cell.left - (viewport - cell.width) / 2
+        thumbs.smoothScrollTo(target.coerceIn(0, range), 0)
     }
 
     private fun updateFailure() {
@@ -281,6 +356,15 @@ class ImageViewerActivity : AppCompatActivity() {
     //pri added by zhuyang,Bottom strip of this transfer's photos; tapping one jumps to it (hidden for a single photo),20261014
     private fun buildThumbs() {
         thumbsRow.removeAllViews()
+        //pri added by zhuyang,The centring pad is a function of the strip width and the cell size: a new list has to
+        //pri added by zhuyang,be worked out from scratch,20261014
+        thumbPad = 0
+        thumbsRow.setPadding(
+            thumbsRowPadding[0],
+            thumbsRowPadding[1],
+            thumbsRowPadding[2],
+            thumbsRowPadding[3]
+        )
         if (uris.size <= 1) return
         val size = dp(THUMB_DP)
         val gap = dp(THUMB_GAP_DP)
@@ -298,6 +382,9 @@ class ImageViewerActivity : AppCompatActivity() {
     }
 
     private fun loadThumbs() {
+        //pri added by zhuyang,D6: a single photo hides the strip, so its cells are gone (removeAllViews above) - the
+        //pri added by zhuyang,decodes used to land in thumbBitmaps with no cell holding them and were never recycled,20261014
+        if (thumbs.visibility != View.VISIBLE) return
         val gen = generation
         val list = uris
         Thread {
@@ -362,6 +449,9 @@ class ImageViewerActivity : AppCompatActivity() {
         private const val TAG = "ImageViewer"
 
         private const val SLOT_COUNT = 3
+
+        //pri added by zhuyang,slotPages[i] when the slot stands for no page of this transfer,20261014
+        private const val NO_PAGE = -1
 
         //pri added by zhuyang,The strip is 30dp cells with 6dp gaps in a 44dp bar, like the reference LazyRow,20261014
         private const val THUMB_DP = 30f
