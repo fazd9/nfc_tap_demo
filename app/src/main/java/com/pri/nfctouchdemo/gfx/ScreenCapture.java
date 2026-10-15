@@ -29,7 +29,9 @@ public final class ScreenCapture {
 
     //pri added by zhuyang,Android 16+ classes of the silent path; none of them is in systemlibs/framework-header.jar nor in the,20261014
     //pri added by zhuyang,public SDK, so every member below is looked up reflectively (the reference does the same),20261014
-    private static final String SCREEN_CAPTURE_CLASS = "android.window.ScreenCaptureInternal";
+    //pri added by zhuyang,Name for this ROM: Android 16 merged ScreenCaptureInternal into android.window.ScreenCapture - only the latter,20261014
+    //pri added by zhuyang,is in our framework.jar, the old ScreenCaptureInternal name is what threw ClassNotFoundException on device,20261014
+    private static final String SCREEN_CAPTURE_CLASS = "android.window.ScreenCapture";
     private static final String WINDOW_MANAGER_GLOBAL_CLASS = "android.view.WindowManagerGlobal";
     private static final String WINDOW_MANAGER_INTERFACE = "android.view.IWindowManager";
 
@@ -39,6 +41,16 @@ public final class ScreenCapture {
     private static final String CACHE_PREFIX = "screen_backdrop_";
 
     private ScreenCapture() {}
+
+    //pri added by zhuyang,Every framework type below is resolved through the system class loader, never Class.forName(String): the,20261014
+    //pri added by zhuyang,single-argument form resolves with the caller's loader, whose DexPathList lists only our own APK, so a lookup,20261014
+    //pri added by zhuyang,that cannot be delegated reports "Didn't find class ... on path: DexPathList[[zip file ".../base.apk"]]" - a,20261014
+    //pri added by zhuyang,message that hides whether the class exists on the boot classpath (/system/framework/framework.jar) at all,20261014
+    //pri added by zhuyang,(that wording is what led the previous attempt to a wrong class-loading diagnosis; do not go back to the 1-arg form),20261014
+    //pri added by zhuyang,initialize=false because we only need the type and never want the lookup to trigger its static initialisers,20261014
+    private static Class<?> systemClass(String name) throws ClassNotFoundException {
+        return Class.forName(name, false, ClassLoader.getSystemClassLoader());
+    }
 
     //pri added by zhuyang,Captures the current screen and returns it as a file:// Uri ready to be the overlay backdrop,20261014
     //pri added by zhuyang,BLOCKING: the capture itself is synchronous (the framework listener waits up to 4s), so it must NOT run,20261014
@@ -86,20 +98,20 @@ public final class ScreenCapture {
                 return null;
             }
 
-            Object wms = Class.forName(WINDOW_MANAGER_GLOBAL_CLASS)
+            Object wms = systemClass(WINDOW_MANAGER_GLOBAL_CLASS)
                     .getMethod("getWindowManagerService").invoke(null);
             if (wms == null) {
                 Log.e(TAG, "截屏失败:WindowManagerGlobal.getWindowManagerService 返回空,背景回退照片");
                 return null;
             }
 
-            Class<?> captureArgsClass = Class.forName(SCREEN_CAPTURE_CLASS + "$CaptureArgs");
-            Class<?> listenerClass = Class.forName(SCREEN_CAPTURE_CLASS + "$ScreenCaptureListener");
+            Class<?> captureArgsClass = systemClass(SCREEN_CAPTURE_CLASS + "$CaptureArgs");
+            Class<?> listenerClass = systemClass(SCREEN_CAPTURE_CLASS + "$ScreenCaptureListener");
             //pri added by zhuyang,Look the listener/buffer members up on these public classes, not on getClass(): the concrete,20261014
             //pri added by zhuyang,listener is a package-private anonymous subclass, which invoke() could not reach,20261014
-            Class<?> syncListenerClass = Class.forName(SCREEN_CAPTURE_CLASS + "$SynchronousScreenCaptureListener");
-            Class<?> bufferClass = Class.forName(SCREEN_CAPTURE_CLASS + "$ScreenshotHardwareBuffer");
-            Class<?> builderClass = Class.forName(SCREEN_CAPTURE_CLASS + "$CaptureArgs$Builder");
+            Class<?> syncListenerClass = systemClass(SCREEN_CAPTURE_CLASS + "$SynchronousScreenCaptureListener");
+            Class<?> bufferClass = systemClass(SCREEN_CAPTURE_CLASS + "$ScreenshotHardwareBuffer");
+            Class<?> builderClass = systemClass(SCREEN_CAPTURE_CLASS + "$CaptureArgs$Builder");
 
             Constructor<?> builderCtor = builderClass.getDeclaredConstructor();
             Object builder = builderCtor.newInstance();
@@ -115,7 +127,7 @@ public final class ScreenCapture {
                 return null;
             }
 
-            Object syncListener = Class.forName(SCREEN_CAPTURE_CLASS)
+            Object syncListener = systemClass(SCREEN_CAPTURE_CLASS)
                     .getMethod("createSyncCaptureListener").invoke(null);
             if (syncListener == null) {
                 Log.e(TAG, "截屏失败:createSyncCaptureListener 返回空,背景回退照片");
@@ -125,7 +137,7 @@ public final class ScreenCapture {
             Object buffer;
             try {
                 //pri added by zhuyang,One-way binder call into system_server; getBuffer() then blocks until the result arrives,20261014
-                Class.forName(WINDOW_MANAGER_INTERFACE)
+                systemClass(WINDOW_MANAGER_INTERFACE)
                         .getMethod("captureDisplay", int.class, captureArgsClass, listenerClass)
                         .invoke(wms, Display.DEFAULT_DISPLAY, captureArgs, syncListener);
                 buffer = syncListenerClass.getMethod("getBuffer").invoke(syncListener);
