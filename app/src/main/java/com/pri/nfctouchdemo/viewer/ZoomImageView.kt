@@ -64,6 +64,11 @@ class ZoomImageView @JvmOverloads constructor(
                 swipeX = 0f
                 swipeY = 0f
             }
+            MotionEvent.ACTION_POINTER_DOWN -> {
+                //pri added by zhuyang,A second finger lands: this gesture is a pinch, so drop any pending page swipe,20261014
+                swipeX = 0f
+                swipeY = 0f
+            }
             MotionEvent.ACTION_POINTER_UP -> {
                 //pri added by zhuyang,One finger lifted: re-seed the anchor so the remaining finger cannot jump the image,20261014
                 lastX = event.getX(0)
