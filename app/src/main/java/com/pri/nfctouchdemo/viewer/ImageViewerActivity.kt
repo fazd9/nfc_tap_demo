@@ -145,8 +145,14 @@ class ImageViewerActivity : AppCompatActivity() {
     }
 
     //pri added by zhuyang,Page feedback inside the viewer (the image slides in from the swipe direction),20261014
+    //pri added by zhuyang,Bare `width` does not resolve in an Activity: take the view's own width (the image is full-bleed),20261014
+    //pri added by zhuyang,Before the first layout the width is 0, so skip the slide and just settle at offset 0,20261014
     private fun slideIn(direction: Float) {
-        image.translationX = direction * width * 0.12f
+        if (image.width <= 0) {
+            image.translationX = 0f
+            return
+        }
+        image.translationX = direction * image.width * 0.12f
         image.animate().translationX(0f).setDuration(SLIDE_MS).start()
     }
 
