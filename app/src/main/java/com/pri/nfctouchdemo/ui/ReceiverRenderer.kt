@@ -182,18 +182,6 @@ class ReceiverRenderer {
         /** 这一行的总高（发送端是"上滑发送"提示的 25.6dp）。 */
         const val ACTION_ROW_H = PRIMARY_H + ACTION_GAP + SECONDARY_H
 
-        //pri added by zhuyang,E4: cancel pill - dark scrim + white label, so it stays visible over light photos,20261014,start
-        /**
-         * 接收中那枚「取消」胶囊的底色透明度：**深灰 #111923 半透明 + 白字**。
-         *
-         * 这里曾经是浅底白字，浅色照片上整个胶囊看不见 —— 因为 [mul] / [withAlpha] 只改 alpha 字节，
-         * 填色一旦写成"带 alpha 的浅色"，乘完还是浅的；旧写法 0x14FFFFFF 更是直接被当成不透明白。
-         * 两个值就是那次对比度修复之后的取值（普通 0.62 / 按下 0.78）。
-         */
-        const val CANCEL_PILL_SCRIM = 0.62f
-        const val CANCEL_PILL_SCRIM_PRESSED = 0.78f
-        //pri added by zhuyang,E4: cancel pill - dark scrim + white label, so it stays visible over light photos,20261014,end
-
         /**
          * 粒子总数上限。
          *
@@ -272,8 +260,6 @@ class ReceiverRenderer {
         // 标签原文（v6）
         const val LABEL_ACCEPT = "接收 1 张照片"
         const val LABEL_REJECT = "拒绝"
-        //pri added by zhuyang,E4: the receiving state's single pill, drawn in the reject slot,20261014
-        const val LABEL_CANCEL = "取消"
         const val TOAST_RECEIVING = "正在接收照片…"
         const val TOAST_ACCEPTED = "已接收 1 张照片"
         const val TOAST_REJECTED = "已拒绝接收"
@@ -302,17 +288,6 @@ class ReceiverRenderer {
         val secondary = RectF()
         var activeActions = false
         var scrimBoost = 0f
-        //pri added by zhuyang,E4: receiving sub-state - the two pills crossfade into one cancel pill,20261014,start
-        /** 两枚按钮 → 单枚「取消」的混合度：0 = 两枚按钮，1 = 只有「取消」（`E4`）。 */
-        var cancelMix = 0f
-        /**
-         * 「取消」胶囊自己的不透明度。
-         *
-         * **不跟 [actionAlpha] 走**：v6 在按下「接收」之后会把整行淡掉，而「取消」是传输途中
-         * 唯一的退出口，必须一直留在屏幕上可点 —— 所以它只吃那次淡出**之前**的整行 alpha。
-         */
-        var cancelAlpha = 0f
-        //pri added by zhuyang,E4: receiving sub-state - the two pills crossfade into one cancel pill,20261014,end
         /** 相对卡片进场的毫秒数（粒子的相位要用它）。 */
         var sinceMs = 0f
     }
@@ -384,20 +359,6 @@ class ReceiverRenderer {
         private set
 
     private var decisionAtMs = 0f
-
-    //pri added by zhuyang,E4: receiving sub-state - host-driven crossfade into a single cancel pill,20261014,start
-    /**
-     * 「两枚按钮 → 单枚取消」的混合度，由宿主每帧同步（[OverlayView] 里那枚 220ms 的交叉淡入）。
-     *
-     * 为什么由宿主推、不在这里自己动：它跟的是"服务层宣布接收中"这件事，而那条时间轴
-     * （[OverlayView.setAcceptInProgress] 的动画器）本来就住在宿主里；这里只负责画。
-     * 0 = 两枚按钮（v6 原样），1 = 只有「取消」。
-     */
-    var cancelMix = 0f
-
-    /** 「取消」胶囊是不是正被按住（宿主每帧同步，和 [cancelMix] 一起）。 */
-    var cancelPressed = false
-    //pri added by zhuyang,E4: receiving sub-state - host-driven crossfade into a single cancel pill,20261014,end
 
     init {
         buildParticles()
@@ -489,19 +450,9 @@ class ReceiverRenderer {
         }
     }
 
-    //pri modify by zhuyang,E4: while receiving, the row stays live for the cancel pill in the secondary slot,20261014,start
-    /**
-     * 按钮能不能点：v6 是 t ≥ 6.9，相对卡片进场就是 800ms 之后。
-     *
-     * E4：接收中（[cancelMix] > 0）时**整个按钮行只剩次槽那枚「取消」可点** —— 它是传输途中
-     * 唯一的退出口，不能跟着 v6 那次"选完就自己淡出"一起失效。这里只负责放行，命中的是哪一枚
-     * 由宿主（[OverlayView.onReceiveTouch]）判：接收中只有次槽受理，落的是 [OverlayView.onReceiveCancel]。
-     */
-    fun actionsEnabled(elapsedMs: Long, cardStartMs: Long): Boolean {
-        if (cancelMix > 0.003f) return true
-        return decision == Decision.NONE && (elapsedMs - cardStartMs).toFloat() >= ACTION_ENABLE_MS
-    }
-    //pri modify by zhuyang,E4: while receiving, the row stays live for the cancel pill in the secondary slot,20261014,end
+    /** 按钮能不能点：v6 是 t ≥ 6.9，相对卡片进场就是 800ms 之后。 */
+    fun actionsEnabled(elapsedMs: Long, cardStartMs: Long): Boolean =
+        decision == Decision.NONE && (elapsedMs - cardStartMs).toFloat() >= ACTION_ENABLE_MS
 
     // ══════════════════════════ 每帧几何 ══════════════════════════
     /**
@@ -606,27 +557,19 @@ class ReceiverRenderer {
         )
         f.activeActions = s >= 0f
 
-        //pri added by zhuyang,E4: the cancel pill must outlive the v6 accept fade (it is the only way out),20261014,start
-        // 取消胶囊吃的是**淡出之前**的整行 alpha：v6 按下「接收」后把整行淡掉（下面那个分支），
-        // 而「取消」要一直留着可点，所以这两件事必须分开算。cancelMix = 0（没在接收中）时
-        // cancelAlpha 恒为 0，本行与取消胶囊都不参与，画面与 v6 逐帧一致。
-        f.cancelMix = cancelMix.coerceIn(0f, 1f)
-        f.cancelAlpha = f.actionAlpha * f.cancelMix
-        //pri added by zhuyang,E4: the cancel pill must outlive the v6 accept fade (it is the only way out),20261014,end
-
         when (decision) {
             Decision.ACCEPTED -> {
                 // v6：卡片轻轻放大一下，按钮淡出。
-                //pri modify by zhuyang,E4: clamp the accept window so a late tap still runs its own 230ms ramp,20261014,start
+                //pri modify by zhuyang,clamp the accept window so a late tap still runs its own 230ms ramp,20261014,start
                 // 窗口起点**不早于按下那一刻**：v6 那支 demo 是脚本在 7.02s（= 卡片进场 920ms）
                 // 自动点的，所以它可以直接用 `s`；真机上用户可能更晚才点，那种时候
                 // smooth(920, 1150, s) 一上来就是 1 —— 两枚按钮瞬间消失、卡片瞬间放大。
                 // 夹一下之后：卡在 920ms 点 = 与 v6 逐帧一致；更晚点 = 从按下那一刻起同样走
-                // [ACCEPT_ZOOM_MS]。E4 的交叉淡入也靠它才接得上（否则取消胶囊是"凭空出现"）。
+                // [ACCEPT_ZOOM_MS] 那 230ms 的反馈。
                 val tapS = (decisionAtMs - cardStartMs).toFloat() * TIME_RATE
                 val at = maxOf(ACCEPT_ZOOM_AT_MS, tapS)
                 val u = smooth(at, at + ACCEPT_ZOOM_MS, s)
-                //pri modify by zhuyang,E4: clamp the accept window so a late tap still runs its own 230ms ramp,20261014,end
+                //pri modify by zhuyang,clamp the accept window so a late tap still runs its own 230ms ramp,20261014,end
                 f.actionAlpha *= (1f - u)
                 val z = lerp(1f, 1.015f, u)
                 val cx = f.card.centerX()
@@ -740,26 +683,12 @@ class ReceiverRenderer {
      */
     var acceptLabel: String = LABEL_ACCEPT
 
-    /** E4：那枚「取消」胶囊上的字（宿主按 `R.string.receive_cancel` 覆盖，同 [acceptLabel]）。 */
-    //pri added by zhuyang,E4: label of the pill drawn while the receiving state is in progress,20261014
-    var cancelLabel: String = LABEL_CANCEL
-
-    /**
-     * 卡片下方那两个按钮：主（纯白 + 深色字）、次（半透明 + 白字）。
-     *
-     * E4：接收中（`cancelMix` → 1）时两枚按钮按 `1 - cancelMix` 交叉淡出，次按钮那一枚矩形
-     * 上换成「取消」胶囊（深灰半透明底 + 白字，见 [CANCEL_PILL_SCRIM]）—— 画的是**同一个矩形**，
-     * 所以宿主的命中判定不用另算几何。`cancelMix` = 0 时这一整段不生效，画面与 v6 逐帧一致。
-     */
+    /** 卡片下方那两个按钮：主（纯白 + 深色字）、次（半透明 + 白字）。 */
     fun drawActions(c: Canvas, f: Frame, k: Float, viewW: Float) {
-        //pri modify by zhuyang,E4: the two pills fade out by (1 - cancelMix); the cancel pill has its own alpha,20261014,start
-        val cm = f.cancelMix.coerceIn(0f, 1f)
-        val pills = f.actionAlpha.coerceIn(0f, 1f) * (1f - cm)
-        val cancel = f.cancelAlpha.coerceIn(0f, 1f)
-        //pri modify by zhuyang,E4: the two pills fade out by (1 - cancelMix); the cancel pill has its own alpha,20261014,end
-        if (!f.activeActions || (pills <= 0.003f && cancel <= 0.003f)) return
+        if (!f.activeActions || f.actionAlpha <= 0.003f) return
 
         // Canvas 没有 alpha，整行的淡入要乘进每个 Paint 的颜色里
+        val a = f.actionAlpha.coerceIn(0f, 1f)
         val save = c.save()
         c.translate(0f, f.actionShift * k)
 
@@ -771,8 +700,8 @@ class ReceiverRenderer {
         shapePaint.reset()
         shapePaint.isAntiAlias = true
         shapePaint.style = Paint.Style.FILL
-        shapePaint.color = mul(0xF7FFFFFF.toInt(), pills)
-        shapePaint.setShadowLayer(14f * k, 0f, 3f * k, mul(0x59000000, pills))
+        shapePaint.color = mul(0xF7FFFFFF.toInt(), a)
+        shapePaint.setShadowLayer(14f * k, 0f, 3f * k, mul(0x59000000, a))
         c.drawRoundRect(primary, PRIMARY_H / 2f * k, PRIMARY_H / 2f * k, shapePaint)
         shapePaint.clearShadowLayer()
 
@@ -780,36 +709,23 @@ class ReceiverRenderer {
         textPaint.isAntiAlias = true
         textPaint.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
         textPaint.textSize = 14f * k
-        textPaint.color = mul(0xFF101820.toInt(), pills)
+        textPaint.color = mul(0xFF101820.toInt(), a)
         textPaint.textAlign = Paint.Align.CENTER
         val fm = textPaint.fontMetrics
         c.drawText(acceptLabel, cx, primary.centerY() - (fm.ascent + fm.descent) / 2f, textPaint)
 
         // 次按钮：半透明胶囊 + 一道细边
-        shapePaint.color = mul(0x21FFFFFF, pills)
+        shapePaint.color = mul(0x21FFFFFF, a)
         c.drawRoundRect(secondary, SECONDARY_H / 2f * k, SECONDARY_H / 2f * k, shapePaint)
         shapePaint.style = Paint.Style.STROKE
         shapePaint.strokeWidth = 1f * k
-        shapePaint.color = mul(0x42FFFFFF, pills)
+        shapePaint.color = mul(0x42FFFFFF, a)
         c.drawRoundRect(secondary, SECONDARY_H / 2f * k, SECONDARY_H / 2f * k, shapePaint)
 
         textPaint.typeface = Typeface.create("sans-serif", Typeface.NORMAL)
-        textPaint.color = mul(0xEBFFFFFF.toInt(), pills)
+        textPaint.color = mul(0xEBFFFFFF.toInt(), a)
         val fm2 = textPaint.fontMetrics
         c.drawText(LABEL_REJECT, cx, secondary.centerY() - (fm2.ascent + fm2.descent) / 2f, textPaint)
-
-        //pri added by zhuyang,E4: the single cancel pill, drawn in the reject slot (same rect as its hit test),20261014,start
-        if (cancel > 0.003f) {
-            // 底是**深灰半透明**（#111923）：浅色照片上浅底白字等于看不见，见 [CANCEL_PILL_SCRIM]。
-            val scrim = if (cancelPressed) CANCEL_PILL_SCRIM_PRESSED else CANCEL_PILL_SCRIM
-            shapePaint.style = Paint.Style.FILL
-            shapePaint.clearShadowLayer()
-            shapePaint.color = mul(0xFF111923.toInt(), scrim * cancel)
-            c.drawRoundRect(secondary, SECONDARY_H / 2f * k, SECONDARY_H / 2f * k, shapePaint)
-            textPaint.color = mul(0xFFFFFFFF.toInt(), cancel)
-            c.drawText(cancelLabel, cx, secondary.centerY() - (fm2.ascent + fm2.descent) / 2f, textPaint)
-        }
-        //pri added by zhuyang,E4: the single cancel pill, drawn in the reject slot (same rect as its hit test),20261014,end
 
         c.restoreToCount(save)
     }

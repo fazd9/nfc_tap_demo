@@ -862,11 +862,6 @@ class OverlayView @JvmOverloads constructor(
         /** 按钮圆角（设计 px）：比卡片（23）小一档，和卡片摆在一起不抢。 */
         const val RECEIVE_BTN_R_PX = 14f
 
-        //pri added by zhuyang,E4: the dark scrim of the lower pill moved with the drawing - the two
-        //pri added by zhuyang,pills (and the cancel pill that replaces the lower one while receiving) are
-        //pri added by zhuyang,drawn by ReceiverRenderer now, so the constants live next to it,20261014
-        //pri added by zhuyang,See ReceiverRenderer.CANCEL_PILL_SCRIM / CANCEL_PILL_SCRIM_PRESSED,20261014
-
         /**
          * 卡片下沿到按钮区之间那一口气（设计 px）。
          *
@@ -886,9 +881,6 @@ class OverlayView @JvmOverloads constructor(
         const val BUTTON_NONE = 0
         const val BUTTON_PRIMARY = 1
         const val BUTTON_SECONDARY = 2
-
-        //pri added by zhuyang,E4: crossfade of the two pills into the single cancel pill (video 0.20-0.25s),20261014
-        const val CANCEL_SWAP_MS = 220f
     }
 
     /** 状态栏高度，避免面板文字被系统栏压住。 */
@@ -913,9 +905,6 @@ class OverlayView @JvmOverloads constructor(
 
     /** 接收态点次按钮（「拒绝」）。 */
     var onReceiveRejected: (() -> Unit)? = null
-
-    //pri added by zhuyang,E4: receiving-state cancel callback (same slot as onReceiveRejected),20261014
-    var onReceiveCancel: (() -> Unit)? = null
 
     /** 当前身份；默认 [Mode.SEND] —— 单独演示这个动效页时和以前一模一样。 */
     var mode: Mode = Mode.SEND
@@ -952,12 +941,6 @@ class OverlayView @JvmOverloads constructor(
     /** 底部那条提示（正在接收 / 已接收 / 已拒绝）；空串就不画。 */
     private var receiverToast = ""
 
-    //pri added by zhuyang,E4: receiving state - the two pills crossfade into one cancel pill,20261014,start
-    private var acceptInProgress = false
-    private var cancelMix = 0f //pri added by zhuyang,0 = two pills, 1 = cancel pill only,20261014
-    private var cancelAnimator: ValueAnimator? = null
-    //pri added by zhuyang,E4: receiving state - the two pills crossfade into one cancel pill,20261014,end
-
     /** 上滑确认是否已经回调过（一次手势只回调一次，见 [startFlyAway]）。 */
     private var sendConfirmedNotified = false
 
@@ -979,30 +962,6 @@ class OverlayView @JvmOverloads constructor(
         refreshTexts()
         invalidate()
     }
-
-    //pri added by zhuyang,E4: enter/leave the receiving state (two pills crossfade into one cancel pill),20261014,start
-    // [cancelMix] 是本层这一档的**动画值**，每帧由 [drawTransferPanel] 推给 [receiverRenderer] 去画
-    // （画在次按钮那一枚矩形上，见 [ReceiverRenderer.drawActions]）；命中判定在 [onReceiveTouch]。
-    // 不接收中就恒为 0 时，渲染器那边的取消胶囊整体不参与，画面与主线 v6 逐帧一致。
-    fun setAcceptInProgress(v: Boolean) {
-        if (acceptInProgress == v) return
-        acceptInProgress = v
-        pressedButton = BUTTON_NONE
-        cancelAnimator?.cancel()
-        val from = cancelMix
-        val to = if (v) 1f else 0f
-        cancelAnimator = ValueAnimator.ofFloat(from, to).apply {
-            duration = CANCEL_SWAP_MS.toLong()
-            interpolator = LinearInterpolator()
-            addUpdateListener { va ->
-                cancelMix = va.animatedValue as Float
-                invalidate()
-            }
-            start()
-        }
-        invalidate()
-    }
-    //pri added by zhuyang,E4: enter/leave the receiving state (two pills crossfade into one cancel pill),20261014,end
 
     /**
      * 对方标识 + 张数，改完面板文案跟着换。
@@ -1385,11 +1344,6 @@ class OverlayView @JvmOverloads constructor(
     /** 接收态次按钮文案（「拒绝」）。 */
     private var receiveRejectText = context.getString(R.string.receive_reject)
 
-    //pri added by zhuyang,E4: label of the single pill shown while the receiving state is in progress,20261014
-    // 同步自主线接收端：这枚「取消」胶囊已按主线做法撤掉（接收后两枚按钮自己淡出、没有取消入口），
-    // 字段与 [setAcceptInProgress] 都留着 —— 想要回去时不用重新找一遍。
-    private var receiveCancelText = context.getString(R.string.receive_cancel)
-
     /** 「已接收」提示条：有真实张数就用带张数那句，否则退回主线写死"1 张"的 [ReceiverRenderer.TOAST_ACCEPTED]。 */
     private var receiveToastAcceptedText = ReceiverRenderer.TOAST_ACCEPTED
 
@@ -1439,11 +1393,9 @@ class OverlayView @JvmOverloads constructor(
             context.getString(R.string.receive_accept)
         }
         receiveRejectText = context.getString(R.string.receive_reject)
-        receiveCancelText = context.getString(R.string.receive_cancel) //pri added by zhuyang,E4: cancel pill label,20261014
         // 同步自主线接收端：主按钮那一行字现在由 [ReceiverRenderer] 画（它自带的是写死"1 张"的主线文案），
         // 所以把按**真实张数**算出来的这一句交给它；「已接收」提示条同理，张数未知时退回主线那句。
         receiverRenderer.acceptLabel = receiveAcceptText
-        receiverRenderer.cancelLabel = receiveCancelText //pri added by zhuyang,E4: cancel pill label,20261014
         receiveToastAcceptedText = if (peerCount > 0) {
             context.getString(R.string.receive_toast_accepted_count, peerCount)
         } else {
@@ -1574,11 +1526,7 @@ class OverlayView @JvmOverloads constructor(
         sendConfirmedNotified = false
         resetRunnable?.let { removeCallbacks(it) }
         resetRunnable = null
-        //pri added by zhuyang,Rebuild the round state of E4/E5 (accept swap, dissolve alpha),20261014,start
-        acceptInProgress = false
-        cancelMix = 0f
-        alpha = 1f
-        //pri added by zhuyang,Rebuild the round state of E4/E5 (accept swap, dissolve alpha),20261014,end
+        alpha = 1f //pri added by zhuyang,E5: a replayed round must not inherit the dissolve alpha,20261014
         panelShiftMs = 0L //pri added by zhuyang,A replayed timeline must not inherit the empty-state panel shift (see setWaitingForPeer),20261014
         invalidate()
     }
@@ -2722,10 +2670,6 @@ class OverlayView @JvmOverloads constructor(
                 receiverRenderer.reset()
                 receiverToast = ""
             }
-            //pri added by zhuyang,E4: hand the cancel crossfade to the renderer once per frame (it owns the drawing),20261014,start
-            receiverRenderer.cancelMix = cancelMix
-            receiverRenderer.cancelPressed = acceptInProgress && pressedButton == BUTTON_SECONDARY
-            //pri added by zhuyang,E4: hand the cancel crossfade to the renderer once per frame (it owns the drawing),20261014,end
             receiverRenderer.compute(
                 elapsedMs = panelElapsed,
                 cardStartMs = (Timeline.PANEL_MS + CARD_DELAY_MS).toLong(),
@@ -3014,10 +2958,8 @@ class OverlayView @JvmOverloads constructor(
      */
     private fun receiveActionsHeight(): Float = ReceiverRenderer.ACTION_ROW_H * k
 
-    //pri added by zhuyang,E4: the two pills and the cancel pill that replaces the lower one are drawn
-    //pri added by zhuyang,by [ReceiverRenderer.drawActions] now (the receive card owns its own drawing);
-    //pri added by zhuyang,the cancel pill that used to be drawn from here was re-implemented there on top
-    //pri added by zhuyang,of the v6 button row, and the hit test stayed here - see [onReceiveTouch],20261014
+    //pri added by zhuyang,The two pills are drawn by [ReceiverRenderer.drawActions] now
+    //pri added by zhuyang,(the receive card owns its own drawing); the hit test stays here - see [onReceiveTouch],20261014
     // 因此 [RECEIVE_BTN_R_PX] 与 [drawCenteredLabel] 暂时没人读。
 
     /** 在一枚按钮矩形里居中画一行字（水平按测量宽度、垂直按 fontMetrics 校正）。 */
@@ -3116,22 +3058,17 @@ class OverlayView @JvmOverloads constructor(
         layoutReceiveActions()
         // 可点时刻跟 v6 走：卡片进场 800ms 之后（见 [ReceiverRenderer.actionsEnabled]）；
         // 选过一次（接收或拒绝）之后就再也点不动 —— 那时两枚按钮正在自己淡出。
-        // （接收中是唯一的例外：那时整个按钮行只剩次槽那枚「取消」，见 [ReceiverRenderer.actionsEnabled]。）
         if (!receiverRenderer.actionsEnabled(
                 panelElapsed, (Timeline.PANEL_MS + CARD_DELAY_MS).toLong()
             )
         ) return false
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
-                //pri modify by zhuyang,E4: while accepting, the cancel pill in the secondary slot is the only live target,20261014,start
                 pressedButton = when {
-                    acceptInProgress && receiveSecondaryRect.contains(event.x, event.y) -> BUTTON_SECONDARY
-                    acceptInProgress -> BUTTON_NONE
                     receivePrimaryRect.contains(event.x, event.y) -> BUTTON_PRIMARY
                     receiveSecondaryRect.contains(event.x, event.y) -> BUTTON_SECONDARY
                     else -> BUTTON_NONE
                 }
-                //pri modify by zhuyang,E4: while accepting, the cancel pill in the secondary slot is the only live target,20261014,end
                 if (pressedButton == BUTTON_NONE) return false
                 parent?.requestDisallowInterceptTouchEvent(true)
                 invalidate()
@@ -3159,13 +3096,9 @@ class OverlayView @JvmOverloads constructor(
                         onReceiveAccepted?.invoke()
                     }
                 } else if (receiveSecondaryRect.contains(event.x, event.y)) {
-                    //pri modify by zhuyang,E4: the secondary slot reports cancel while accepting, reject otherwise,20261014
-                    // 次槽在接收中就是那枚「取消」（v6 那两枚按钮此刻正在淡出，不再受理）
-                    if (acceptInProgress) onReceiveCancel?.invoke() else {
-                        receiverRenderer.reject(panelElapsed)
-                        receiverToast = ReceiverRenderer.TOAST_REJECTED
-                        onReceiveRejected?.invoke()
-                    }
+                    receiverRenderer.reject(panelElapsed)
+                    receiverToast = ReceiverRenderer.TOAST_REJECTED
+                    onReceiveRejected?.invoke()
                 }
                 invalidate()
                 return true
@@ -3317,10 +3250,8 @@ class OverlayView @JvmOverloads constructor(
     private fun cancelAnimators() {
         returnAnimator?.cancel(); returnAnimator = null
         flyAnimator?.cancel(); flyAnimator = null
-        //pri added by zhuyang,The E4/E5 one-shot animators join the same cancel set,20261014,start
-        cancelAnimator?.cancel(); cancelAnimator = null
+        //pri added by zhuyang,The E5 dissolve animator joins the same cancel set,20261014
         fadeOutAnimator?.cancel(); fadeOutAnimator = null
-        //pri added by zhuyang,The E4/E5 one-shot animators join the same cancel set,20261014,end
     }
 
     override fun onDetachedFromWindow() {

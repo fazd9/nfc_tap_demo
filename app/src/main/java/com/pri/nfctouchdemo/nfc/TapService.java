@@ -160,23 +160,6 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
             mBmps.clear();
             mLastBmp = null;
         }
-        //pri added by zhuyang,E4: 取消 = local abort of this round; reported exactly like a reject,20261014,start
-        if (intent != null && OverlayService.ACTION_UI_RECEIVE_CANCEL.equals(intent.getAction())) {
-            Bus.log("已取消接收");
-            if (sXfer != null) sXfer.rejectTransfer();
-            mRejected = true;
-            Bus.unlockRole();
-            startService(OverlayService.hideIntent(this, OverlayService.DISSOLVE_MS));
-            mAccepted = false;
-            mReceiveShown = false;
-            mPreviewCount = 0;
-            mFullCount = 0;
-            mTotalCount = 0;
-            mTransferDone = false;
-            mBmps.clear();
-            mLastBmp = null;
-        }
-        //pri added by zhuyang,E4: 取消 = local abort of this round; reported exactly like a reject,20261014,end
         return START_STICKY;
     }
 

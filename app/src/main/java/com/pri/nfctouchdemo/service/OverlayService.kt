@@ -300,7 +300,6 @@ class OverlayService : Service() {
             overlay.setPeerInfo(peerLabel, peerCount)
             overlay.setStatus(statusText)
             overlay.setWaitingForPeer(waitingForPeer) //pri added by zhuyang,This hand-rolled path applies the same identity state as applyContentAndPlay,20261014
-            overlay.setAcceptInProgress(false) //pri added by zhuyang,E4: the swapped-in identity starts from the two-pill state,20261014
             return
         }
         //pri added by zhuyang,Live switch: a SEND page visible at entry becomes the RECEIVE card in place,20261014,end
@@ -674,14 +673,8 @@ class OverlayService : Service() {
         // 上滑越过阈值那一刻：只回执给 NFC 层，动效自己继续把卡片飞走
         overlay.onSendConfirmed = { notifyNfc(ACTION_UI_SEND_CONFIRMED) }
         // 接收页的两个按钮
-        //pri modify by zhuyang,E4: 接收 also switches the local motion layer into the receiving state,20261014,start
-        overlay.onReceiveAccepted = {
-            overlay.setAcceptInProgress(true)
-            notifyNfc(ACTION_UI_RECEIVE_ACCEPT)
-        }
+        overlay.onReceiveAccepted = { notifyNfc(ACTION_UI_RECEIVE_ACCEPT) }
         overlay.onReceiveRejected = { notifyNfc(ACTION_UI_RECEIVE_REJECT) }
-        overlay.onReceiveCancel = { notifyNfc(ACTION_UI_RECEIVE_CANCEL) }
-        //pri modify by zhuyang,E4: 接收 also switches the local motion layer into the receiving state,20261014,end
     }
 
     /** 把视图树挂上窗口并铺满屏幕。 */
@@ -1213,9 +1206,6 @@ class OverlayService : Service() {
         const val ACTION_UI_SEND_CONFIRMED = "com.pri.nfctouchdemo.action.UI_SEND_CONFIRMED"
         const val ACTION_UI_RECEIVE_ACCEPT = "com.pri.nfctouchdemo.action.UI_RECEIVE_ACCEPT"
         const val ACTION_UI_RECEIVE_REJECT = "com.pri.nfctouchdemo.action.UI_RECEIVE_REJECT"
-
-        //pri added by zhuyang,E4: fourth UI receipt - the cancel pill of the receiving state,20261014
-        const val ACTION_UI_RECEIVE_CANCEL = "com.pri.nfctouchdemo.action.UI_RECEIVE_CANCEL"
 
         /** 背景图（水波折射的那张，产品里对应"对方的屏幕画面"）。 */
         const val EXTRA_BACKDROP = "extra_backdrop"

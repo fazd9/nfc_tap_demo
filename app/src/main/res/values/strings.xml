@@ -33,9 +33,6 @@
     <string name="receive_accept">接收</string>
     <string name="receive_reject">拒绝</string>
 
-    <!--pri added by zhuyang,E4: single pill label while the receiving state is in progress,20261014-->
-    <string name="receive_cancel">取消</string>
-
     <!-- ================= 启动页 ================= -->
     <string name="home_title">一碰互联 · 融合 Demo</string>
     <string name="home_sub">动效层（GL 水波 + 白线 + 卡片上滑发送）+ NFC「一碰互联」（HCE 碰触交换 + Wi-Fi 直连传图）合并在一个 app 里。选好一张要发送的照片，点下面的按钮交给常驻服务，两台手机碰一碰就走完整流程。</string>
