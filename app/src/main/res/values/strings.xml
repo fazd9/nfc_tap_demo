@@ -90,4 +90,7 @@
     <!-- ================= HCE 卡模拟（原 nfc_tap_demo 的 res/values/strings.xml） ================= -->
     <string name="hce_service_desc">NFC Tap Demo card emulation</string>
     <string name="aid_group_desc">NFC Tap Demo AID</string>
+
+    <!--pri added by zhuyang,Accessibility service description - this text is shown to the user in Settings > Accessibility,20261016-->
+    <string name="a11y_probe_desc">碰一碰需要它读取相册里当前打开或勾选的照片,这样碰一下就直接传,不必再点分享</string>
 </resources>

@@ -205,6 +205,44 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         mPeerOffered = false;
         mLastBmp = null;        //pri added by zhuyang,Preview bitmap is sticky across rounds,20261014
         //pri added by zhuyang,New round: role flags reset,20261014,end
+        //pri added by zhuyang,Gallery pickup (the product flow): if the user is in Google Photos looking at a photo, or with several,20261016,start
+        //pri added by zhuyang,tiles ticked, the tap must send exactly those - no share step. The lookup needs a screen capture, so it,20261016
+        //pri added by zhuyang,runs off the main thread and the rest of the round starts when it is done. When the gallery is not what,20261016
+        //pri added by zhuyang,the user is looking at, this costs nothing and the flow below is byte-for-byte the old one,20261016
+        if (GalleryPickup.isGalleryForeground()) {
+            Bus.log("碰一碰: 相册在前台,先拾取用户正在看/选中的照片");
+            new Thread(new Runnable() { @Override public void run() {
+                final ArrayList<Uri> picked = GalleryPickup.pickup(TapService.this);
+                mMain.post(new Runnable() { @Override public void run() {
+                    if (!picked.isEmpty()) {
+                        PENDING.clear();
+                        PENDING.addAll(picked);
+                        savePending();
+                        Bus.log("相册拾取: 拿到当前正在看/选中的 " + picked.size() + " 张照片,碰一碰直接发送");
+                    } else if (GalleryPickup.canReadGallery()) {
+                        //pri added by zhuyang,The gallery is on screen and readable, and the user has neither opened nor ticked,20261016,start
+                        //pri added by zhuyang,anything - so there is nothing to send from here. A selection left over from an earlier,20261016
+                        //pri added by zhuyang,round must NOT be sent as if it were what the user is looking at,20261016
+                        PENDING.clear();
+                        savePending();
+                        Bus.log("相册拾取: 相册在前台且可读,但用户没有打开或勾选照片,清掉上一轮留下的选择");
+                    } else {
+                        Bus.log("相册拾取: 读不到相册内容(无障碍未开启),沿用上一轮的选择");
+                    }
+                    //pri added by zhuyang,The gallery is on screen and readable, and the user has neither opened nor ticked,20261016,end
+                    beginPeerRound(payload);
+                }});
+            }}, "gallery-pickup").start();
+            return;
+        }
+        //pri added by zhuyang,Gallery pickup (the product flow): if the user is in Google Photos looking at a photo, or with several,20261016,end
+        beginPeerRound(payload);
+    }
+
+    //pri added by zhuyang,The body that used to be onPeer's tail, unchanged: it decides this round's role from PENDING,20261016,start
+    //pri added by zhuyang,Split out only so the gallery pickup above can run first without the NFC path waiting on it when the,20261016
+    //pri added by zhuyang,gallery is not involved,20261016,end
+    private void beginPeerRound(String payload) {
         final String label = peerName(payload);
         Xfer x = xfer(this);
         x.setExpectedPeer(field(payload,"n"), field(payload,"b"), field(payload,"p"),
@@ -223,6 +261,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         }
         //pri modify by zhuyang,Both phones only prepare to receive; the role is decided at swipe time,20261014,end
     }
+    //pri added by zhuyang,The body that used to be onPeer's tail, unchanged: it decides this round's role from PENDING,20261016,end
 
     /**
      * 拉起动效层的发送页(涟漪 + 白线 + 卡片堆叠 + 上滑发送)。

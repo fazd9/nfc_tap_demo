@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  pri added by zhuyang,Accessibility probe config (throwaway diagnostic),20261016,start
+  canRetrieveWindowContent is what lets the service read the node tree of the window on
+  screen; retrieveInteractiveWindows is not needed for the active window alone.
+  pri added by zhuyang,Accessibility probe config (throwaway diagnostic),20261016,end
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows"
+    android:canRetrieveWindowContent="true"
+    android:description="@string/a11y_probe_desc"
+    android:notificationTimeout="200" />

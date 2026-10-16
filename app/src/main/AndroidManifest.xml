@@ -171,6 +171,29 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="touch_anime_overlay" />
         </service>
+
+        <!--
+          pri added by zhuyang,Accessibility service behind the gallery pickup,20261016,start
+          Reads the gallery's node tree when the phones are tapped, to learn which photo is open
+          (or which tiles are ticked). The tree never names the file - only the capture time and
+          the on-screen position - so GalleryPickup turns that into a real MediaStore Uri by
+          filtering on the time and then matching the pixels.
+          Without it the tap still works; it just degrades to "this phone has nothing to send".
+          Class name says "Probe" for historical reasons (it started as a throwaway probe).
+          pri added by zhuyang,Accessibility service behind the gallery pickup,20261016,end
+        -->
+        <service
+            android:name=".nfc.AccessibilityProbeService"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_probe_config" />
+        </service>
     </application>
 
 </manifest>

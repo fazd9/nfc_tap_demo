@@ -76,11 +76,44 @@ public final class ScreenCapture {
         return null;
     }
 
+    //pri added by zhuyang,Same silent capture, but handed back as a Bitmap instead of a cached file: GalleryPickup compares the,20261016,start
+    //pri added by zhuyang,pixels of what the gallery is showing against MediaStore candidates, and it needs the pixels, not a Uri,20261016
+    //pri added by zhuyang,BLOCKING, same as captureBackdrop - call it off the main thread, the caller owns (and must recycle) the bitmap,20261016,end
+    public static Bitmap captureBitmap(Context context, long timeoutMs) {
+        final Context app = context.getApplicationContext();
+        FutureTask<Bitmap> task = new FutureTask<Bitmap>(new Callable<Bitmap>() {
+            @Override public Bitmap call() { return captureScreen(app); }
+        });
+        new Thread(task, "screen-capture-bmp").start();
+        try {
+            return task.get(timeoutMs, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            Log.e(TAG, "截屏超时(" + timeoutMs + "ms 内未回执)");
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            Log.e(TAG, "截屏等待被中断");
+        } catch (ExecutionException e) {
+            Log.e(TAG, "截屏异常", e);
+        }
+        return null;
+    }
+
     //pri added by zhuyang,The silent capture, step by step:,20261014
     //pri added by zhuyang,WindowManagerGlobal.getWindowManagerService().captureDisplay(DEFAULT_DISPLAY, CaptureArgs, listener),20261014
     //pri added by zhuyang,then syncListener.getBuffer() -> ScreenshotHardwareBuffer -> asBitmap. No display token involved - this,20261014
     //pri added by zhuyang,path takes a display id (the SurfaceControl version the old branch used is what needed the token),20261014
     private static Uri captureDisplayToCache(Context app) {
+        Bitmap screenShot = captureScreen(app);
+        if (screenShot == null) return null;
+        try {
+            return writeCache(app, screenShot);
+        } finally {
+            try { screenShot.recycle(); } catch (Throwable ignored) {}
+        }
+    }
+
+    //pri added by zhuyang,The raw capture. Returns a software Bitmap the caller owns, or null on every failure path,20261016
+    private static Bitmap captureScreen(Context app) {
         Bitmap screenShot = null;
         try {
             //pri added by zhuyang,Full-screen crop of the default display, taken from WindowManager (not hardcoded); this path only,20261014
@@ -166,12 +199,10 @@ public final class ScreenCapture {
                 Log.e(TAG, "截屏失败:转软件位图失败,背景回退照片");
                 return null;
             }
-            return writeCache(app, screenShot);
+            return screenShot;
         } catch (Throwable t) {
             Log.e(TAG, "截屏失败:静默截屏通道异常,背景回退照片", t);
             return null;
-        } finally {
-            if (screenShot != null) screenShot.recycle();
         }
     }
 
