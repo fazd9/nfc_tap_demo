@@ -100,6 +100,11 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
             Bus.log("调试: 模拟碰一碰,对方信息 = " + payload);
             Bus.onPeerData(payload, intent.getStringExtra("role"));
         }
+        //pri added by zhuyang,AssistContent probe triggered by am startservice: unlike am start it does not change the,20261016
+        //pri added by zhuyang,top activity, so the gallery can stay in the foreground while the probe runs,20261016
+        if (intent != null && "com.pri.nfcdemo.ASSIST_PROBE".equals(intent.getAction())) {
+            AssistProbe.run(this);
+        }
         if (intent != null && Intent.ACTION_SEND_MULTIPLE.equals(intent.getAction())) {
             ArrayList<Uri> uris = intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM);
             if (uris != null) {

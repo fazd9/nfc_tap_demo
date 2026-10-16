@@ -140,6 +140,10 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback,
         }
     }
 
+    //pri added by zhuyang,AssistContent probe: the logic lives in AssistProbe so the same code can also be triggered,20261016
+    //pri added by zhuyang,by adb (am startservice) without bringing this page to the foreground,20261016
+    private void probeAssistContent() { AssistProbe.run(this); }
+
     @Override
     protected void onDestroy() {
         // 千万别在这里 destroy():mXfer 是和 TapService **共用的同一个**传输器(TapService.xfer()),
@@ -278,6 +282,15 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback,
             }
         });
         root.addView(mSendButton);
+
+        //pri added by zhuyang,AssistContent probe: does the gallery hand out the photo it is showing,20261016,start
+        Button assistButton = new Button(this);
+        assistButton.setText("③ 测 AssistContent(相册当前图)");
+        assistButton.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { probeAssistContent(); }
+        });
+        root.addView(assistButton);
+        //pri added by zhuyang,AssistContent probe: does the gallery hand out the photo it is showing,20261016,end
 
         mPeerView = new TextView(this);
         mPeerView.setTextSize(15);
