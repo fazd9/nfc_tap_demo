@@ -107,6 +107,18 @@ class Timeline(private val host: View) {
 
         /** 常驻段的目标帧间隔，约 30fps。 */
         private const val AMBIENT_FRAME_MS = 33L
+
+        // 同步自 D:\A17\NFCTouchDemo 动效主线：降帧时点从 INTRO_MS 推迟到接收端那一段之后。
+        /**
+         * 帧率放宽的时点：在这之前一直跟着 vsync 跑满帧率，之后才降到 [AMBIENT_FRAME_MS]。
+         *
+         * 它**比 [INTRO_MS] 更晚**，因为接收端在落定之后还有一长段动效（按现在的速率折算：
+         * 卡片 1600ms 起落 → 2100ms 对焦完成、清晰可见 → 2300ms 收势结束
+         * （= 视频里的 14:40）→ 粒子一直飘到 **3900ms** 才完全消失（视频 16:00））。
+         * 这些原来都掉进了 30fps 区间，落地那一下的闪光/对焦收尾会看着发顿，
+         * 所以放宽时点取到它们之后。改接收端 [ReceiverRenderer] 那几段时间常量时，记得同步这一项。
+         */
+        private const val RELAX_FRAME_MS = 4000L
     }
 
     fun interface OnFrame {
@@ -143,8 +155,8 @@ class Timeline(private val host: View) {
             val now = SystemClock.uptimeMillis()
             val e = now - startUptime
 
-            // 常驻段只跑慢动效，限到约 30fps
-            if (e > INTRO_MS && now - lastEmitUptime < AMBIENT_FRAME_MS) {
+            // 常驻段只跑慢动效，限到约 30fps（但要等接收端那段落定动效也走完）
+            if (e > RELAX_FRAME_MS && now - lastEmitUptime < AMBIENT_FRAME_MS) {
                 host.postOnAnimation(this)
                 return
             }

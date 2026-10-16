@@ -26,6 +26,8 @@
     <string name="swipe_tip_count">上滑发送 %1$d 张照片</string>
     <string name="card_meta_count">%1$s · %2$d 张照片</string>
     <string name="receive_accept_count">接收 %1$d 张照片</string>
+    <!-- 同步自 D:\A17\NFCTouchDemo 动效主线：接收成功的提示条也按真实张数走（主线那句写死"1 张"）。 -->
+    <string name="receive_toast_accepted_count">已接收 %1$d 张照片</string>
 
     <!-- 张数拿不到（<= 0）时的裸文案：接收按钮就写两个字 -->
     <string name="receive_accept">接收</string>
