@@ -65,11 +65,11 @@ class ReceiverRenderer {
         const val FADE_IN_MS = 80f
 
         /**
-         * 照片**从糊到清楚**的窗口：参考片 6.55→6.98 ⇒ 相对卡片起点是 450→880ms。
+         * 照片**从过曝到本色**的窗口：参考片 6.55→6.98 ⇒ 相对卡片起点是 450→880ms。
          *
          * 这一段是关键：它落在**下落的尾段**，不是一出现就开始变清楚 —— 所以整个下落
-         * 过程中照片一直是"过曝 + 糊"的一团（brightness 3.3、saturate 0.72、blur 8.5px），
-         * 快落定才逐级对焦到 1/1/0。
+         * 过程中照片一直是"过曝 + 去饱和"的一团（brightness 3.3、saturate 0.72），
+         * 快落定才洗回 1/1。
          */
         const val FOCUS_AT_MS = 450f
         const val FOCUS_END_MS = 880f
@@ -90,10 +90,6 @@ class ReceiverRenderer {
 
         /** 清晰可见那一刻卡片的放大倍数（视频里"稍微放大了一点"）。改这一个数就能调幅度。 */
         const val ENLARGE_SCALE = 1.06f
-
-        /** 两级"糊"副本的长边（px）：12 最糊、30 次糊，然后接原图，构成连续对焦。 */
-        const val SOFT_BLUR_HI_LONG = 12
-        const val SOFT_BLUR_LO_LONG = 30
 
         /**
          * 分层开关 —— **只用来定位掉帧**：一次编译就能逐层关掉，看是哪一层在吃帧。
@@ -127,13 +123,32 @@ class ReceiverRenderer {
          * 所以窗口按真实时间给 1.6s，再乘 [TIME_RATE] 换到 s 的刻度；改 [TIME_RATE] 不会
          * 把这个 1.6s 带跑。
          *
-         * 注意：淡出曲线仍是参考片的 `preDissolve`（前 40% 的窗口淡掉约 60%），也就是
-         * **主体先散、最后那点很淡的余粒拖到窗口末尾**才彻底看不见 —— 和"整整到 16:00"
-         * 是一致的。想让淡出更均匀，把 [drawParticles] 里的 preDissolve 换成线性即可。
+         * 注意：这个窗口现在是**逐颗扫过**的（见 [PARTICLE_DEATH_MS]）—— 出场最早的粒子在窗口
+         * 开头就开始退场，最晚出场的那颗正好在窗口末尾散尽，总时长仍是这 1.6s。每颗自己的淡出
+         * 曲线仍是参考片那条（前 40% 掉 60%），所以整体仍是"主体先散、余粒拖到末尾"。
          */
         const val PARTICLE_DISSIPATE_REAL_MS = 1600f
         const val PARTICLE_OUT_AT_MS = SETTLE_END_MS
         const val PARTICLE_OUT_MS = PARTICLE_DISSIPATE_REAL_MS * TIME_RATE
+
+        /**
+         * 粒子"到场"的进度指数：第 index 颗在 `((index−4)/(N−4))^(1/POW)` 这个下落进度上出现。
+         * 出场顺序 = 序号顺序，所以这个指数同时也是**退场顺序**的依据（见 [PARTICLE_DEATH_MS]）。
+         */
+        const val PARTICLE_GROW_POW = 1.35
+
+        /**
+         * **每颗自己的退场时长**（s 的刻度）。
+         *
+         * 以前这里是一个全局时钟 `preDissolve`：所有粒子同时开始淡、同时淡完 —— 一整团"唰"地
+         * 一起消失。现在改成**每颗按自己的时刻退场**：出场越早的越早开始消失（先出现的先消失），
+         * 而每颗的淡出曲线都是**同一条** → 任何时刻，出场早的那颗一定比出场晚的更淡。
+         *
+         * 取整段窗口的 30%：既保证每颗都是软淡出（不是逐颗闪灭），又让最后一颗正好在
+         * [PARTICLE_OUT_AT_MS] + [PARTICLE_OUT_MS] 处散尽 —— 视频那条"整整到 16:00 才完全消失"
+         * 的总时长不变。
+         */
+        const val PARTICLE_DEATH_MS = PARTICLE_OUT_MS * 0.30f
 
         /** 6.10 → 6.20 粒子进来的淡入。 */
         const val PARTICLE_IN_MS = 120f
@@ -278,7 +293,7 @@ class ReceiverRenderer {
         var fall = 0f
         /** 照片自身的不透明度 0..1 —— 参考片里它只占 20→100ms（6.12→6.20），一闪就到位。 */
         var reveal = 0f
-        /** 清晰度 0..1：0 = 糊且过曝（blur 8.5px / brightness 3.3 / saturate .72）。 */
+        /** 清晰度 0..1：0 = 过曝且去饱和（brightness 3.3 / saturate .72），1 = 本色。 */
         var focus = 0f
         /** 落位闪光 0..1；也可以顺手加到顶部光斑上。 */
         var flash = 0f
@@ -334,13 +349,6 @@ class ReceiverRenderer {
     private val toastPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val clipPath = Path()
     private val matrix = ColorMatrix()
-
-    /**
-     * 两级"糊"副本（[SOFT_BLUR_HI_LONG] / [SOFT_BLUR_LO_LONG] 缩略图）+ 各自来自哪张原图。
-     * 缩略图放大绘制时天然就是糊的，比卷积便宜得多，而且只在换图时算一次。
-     */
-    private val softCache = arrayOfNulls<Bitmap>(2)
-    private val softCacheFrom = arrayOfNulls<Bitmap>(2)
 
     /** 亮度那一档单独用一个矩阵（ColorMatrix 的 setScale 不改变饱和度）。 */
     private val matrixScale = ColorMatrix()
@@ -454,6 +462,31 @@ class ReceiverRenderer {
     fun actionsEnabled(elapsedMs: Long, cardStartMs: Long): Boolean =
         decision == Decision.NONE && (elapsedMs - cardStartMs).toFloat() >= ACTION_ENABLE_MS
 
+    /**
+     * 接收端卡片的**起点**：屏幕最顶上那个 mini 卡片（设计空间坐标，调用方自己乘 k）。
+     *
+     * 发送端的收尾是"接收端下落的严格反向"，那条飞行的终点就是这里 —— 抽成一个函数是为了
+     * 两端共用同一份几何：改这里，接收端从哪儿出来、发送端收到哪儿去，一起变。
+     */
+    fun startCardRect(out: RectF, viewW: Float, viewH: Float) {
+        val w = START_W_FRAC * viewW
+        val h = START_H_FRAC * viewH
+        val cy = START_CY_FRAC * viewH
+        val left = viewW / 2f - w / 2f
+        out.set(left, cy - h / 2f, left + w, cy + h / 2f)
+    }
+
+    /**
+     * 下落那一段的**真实**时长（ms）。
+     *
+     * [FALL_MS] 是量在接收端自己的时间轴上的（[compute] 里 `s` 乘了 [TIME_RATE]），
+     * 所以真实时长要除回来：570 / 1.76 ≈ **324ms**。
+     *
+     * 发送端的收尾飞行直接拿这个数当 duration —— "发送飞上去"和"接收落下来"就是同一段时间
+     * 倒着放，两端的节奏永远同步；以后调 [FALL_MS] 或 [TIME_RATE]，发送端自动跟着变。
+     */
+    fun fallRealMs(): Float = FALL_MS / TIME_RATE
+
     // ══════════════════════════ 每帧几何 ══════════════════════════
     /**
      * @param viewW / viewH 设计空间（380×836，未乘 k）
@@ -485,7 +518,7 @@ class ReceiverRenderer {
         f.fall = smooth(0f, FALL_MS, s)
         // 不透明度：20→100ms 一闪到位（参考片 photo.opacity = reveal = smooth(6.12, 6.20)）
         f.reveal = smooth(FADE_IN_AT_MS, FADE_IN_AT_MS + FADE_IN_MS, s)
-        // 清晰度：450→880ms 才从"糊且过曝"逐级对焦（参考片 receiveP = smooth(6.55, 6.98)）
+        // 清晰度：450→880ms 才从"过曝且去饱和"洗回本色（参考片 receiveP = smooth(6.55, 6.98)）
         f.focus = smooth(FOCUS_AT_MS, FOCUS_END_MS, s)
 
         // 起手：v6 那个小尺寸（12.5% 屏宽 × 4.2% 屏高），中心在屏幕上方外面
@@ -624,18 +657,22 @@ class ReceiverRenderer {
         val cardAlpha = f.cardAlpha.coerceIn(0f, 1f)
         if (photo != null && !photo.isRecycled) {
             // 参考片：blur(8.5→0) brightness(3.3→1) saturate(.72→1)，而且这条曲线吃的是
-            // receiveP（6.55→6.98）—— 发生在**下落的尾段**。所以这里不能做成"糊图 ↔ 清晰图
-            // 互相淡入淡出"（两张图叠在一起会有重影），而是三级依次交叠：最糊 → 次糊 → 原图，
-            // 每级都乘同一个"过曝 + 去饱和"矩阵，合起来就是那条连续变清楚的曲线。
+            // receiveP（6.55→6.98）—— 发生在**下落的尾段**，整个下落过程中照片一直是
+            // "过曝 + 去饱和"的一团，快落定才洗回 1/1。
+            //
+            // 卡片不模糊（原来那套"最糊 → 次糊 → 原图"三级交叠已经整段删掉），所以过曝
+            // 全压在这一张清晰图上 —— 顺带省掉每帧最多三次整卡位图绘制。
             val focus = f.focus.coerceIn(0f, 1f)
             if (focus >= 0.995f) {
-                // 落定之后：糊层和中间层都被原图完全盖住（三层 alpha 都是 1），
-                // 再画就是每帧白扔一次整卡放大 + 一次 ColorMatrixColorFilter。
-                // 直接走发送端那张照片的画法 —— 像素结果一样，卡片也真正"回归一张图"。
+                // 落定之后矩阵已经退化成单位矩阵（bright/饱和都是 1），再挂一次滤镜就是每帧
+                // 白扔一次 ColorMatrixColorFilter。直接裸画 —— 像素结果一样，卡片真正"回归一张图"。
                 tintPaint.colorFilter = null
                 tintPaint.alpha = (cardAlpha * 255f).toInt().coerceIn(0, 255)
                 c.drawBitmap(photo, null, rect, tintPaint)
             } else {
+                // 只高亮、不模糊：整段过曝全压在这一张**清晰**的图上。
+                // focus → 1 时矩阵退化成单位矩阵，于是和上面那条"落定"分支无缝接上
+                //（不会在 0.995 处跳一下）。
                 val bright = lerp(3.3f, 1f, focus)
                 val sat = lerp(0.72f, 1f, focus)
                 matrix.setSaturation(sat)
@@ -643,21 +680,8 @@ class ReceiverRenderer {
                 matrix.postConcat(matrixScale)
                 tintPaint.colorFilter = ColorMatrixColorFilter(matrix)
                 tintPaint.alpha = (cardAlpha * 255f).toInt().coerceIn(0, 255)
-
-                // 最糊那张永远铺在最底下 —— 它就是那团"过曝的白"，后面两级按 focus 交叠上来
-                c.drawBitmap(softOf(photo, SOFT_BLUR_HI_LONG), null, rect, tintPaint)
-
-                val mid = smooth(0f, 0.58f, focus)
-                if (mid > 0.004f) {
-                    tintPaint.alpha = (cardAlpha * mid * 255f).toInt().coerceIn(0, 255)
-                    c.drawBitmap(softOf(photo, SOFT_BLUR_LO_LONG), null, rect, tintPaint)
-                }
-                val sharp = smooth(0.46f, 1f, focus)
+                c.drawBitmap(photo, null, rect, tintPaint)
                 tintPaint.colorFilter = null
-                if (sharp > 0.004f) {
-                    tintPaint.alpha = (cardAlpha * sharp * 255f).toInt().coerceIn(0, 255)
-                    c.drawBitmap(photo, null, rect, tintPaint)
-                }
             }
             tintPaint.alpha = 255
         } else {
@@ -666,7 +690,7 @@ class ReceiverRenderer {
         }
 
         // 主色光罩在照片之上（仍裁在卡片轮廓里）：下落时是"过曝 + 主色"的一团，
-        // 落定过程里这层收到 0，照片自己对焦洗净。
+        // 落定过程里这层收到 0，照片自己洗回本色。
         if (DEBUG_WASH && dom != 0 && lit > 0.01f) drawWash(c, rect, dom, lit)
         c.restoreToCount(save)
 
@@ -822,7 +846,7 @@ class ReceiverRenderer {
         val fp = f.fall
         val active = min(
             PARTICLE_COUNT,
-            maxOf(4, (4f + (PARTICLE_COUNT - 4) * fp.toDouble().pow(1.35)).roundToInt())
+            maxOf(4, (4f + (PARTICLE_COUNT - 4) * fp.toDouble().pow(PARTICLE_GROW_POW)).roundToInt())
         )
         if (active <= 0) return
 
@@ -859,10 +883,16 @@ class ReceiverRenderer {
             y -= (DRIFT_MIN_PCT + u * DRIFT_SPAN_PCT) * dissip
 
             val intro = (s / PARTICLE_IN_MS).coerceIn(0f, 1f)
-            // 参考片里淡出不是线性的：preDissolve 在 dissip 才 0.40 的时候就已经去掉 60%，
-            // 所以粒子是"先快速变淡、再慢慢散尽"，比我之前那条 (1 - dissip) 利落得多。
-            val preDissolve = 1f - smooth(0.40f, 1f, dissip)
-            val opacity = p.alpha * (0.36f + 0.64f * fp) * intro * preDissolve
+            // ── 每颗自己的退场时刻：先出现的先消失 ──
+            // b = 这颗"到场"时的下落进度（把上面 active 的公式反解出来，用同一个指数）。
+            // 出场顺序就是序号顺序，所以 b 随序号递增 → 退场时刻也随之递增。
+            // 淡出曲线仍是参考片那条（前 40% 掉 60%），只是**每颗各算各的**：
+            // 同一条曲线 + 递增的起始时刻 ⇒ 任何瞬间，早出场的都比晚出场的更淡。
+            val b = ((p.index - 4f) / (PARTICLE_COUNT - 4f)).coerceIn(0f, 1f)
+                .toDouble().pow(1.0 / PARTICLE_GROW_POW).toFloat()
+            val deathAt = PARTICLE_OUT_AT_MS + b * (PARTICLE_OUT_MS - PARTICLE_DEATH_MS)
+            val fadeOut = 1f - smooth(0.40f, 1f, ((s - deathAt) / PARTICLE_DEATH_MS).coerceIn(0f, 1f))
+            val opacity = p.alpha * (0.36f + 0.64f * fp) * intro * fadeOut
             if (opacity <= 0.01f) continue
 
             // 尺寸 = 基础 px × 参考片那个 scale(1 + fall*.35 − dissip*.22) × 整体缩小系数
@@ -957,27 +987,6 @@ class ReceiverRenderer {
     private fun withAlpha(color: Int, frac: Float): Int =
         (color and 0x00FFFFFF) or
             (((frac.coerceIn(0f, 1f) * 255f).toInt().coerceIn(0, 255)) shl 24)
-
-    /**
-     * 缩略图当"模糊"用：把原图缩到长边 [longSide] 再拉大铺进卡片，双线性插值出来就是一层糊。
-     *
-     * 两个级别（12px / 30px）加原图三者按 [Frame.focus] 依次交叠，观感就是参考片那条
-     * `blur(8.5px → 0)` **连续**变清楚的曲线 —— 比"糊图与清晰图互相淡入淡出"强，
-     * 后者是两张图叠在一起，会有重影。
-     */
-    private fun softOf(src: Bitmap, longSide: Int): Bitmap {
-        val slot = if (longSide == SOFT_BLUR_LO_LONG) 1 else 0
-        val cached = softCache[slot]
-        if (cached != null && softCacheFrom[slot] === src && !cached.isRecycled) return cached
-        val long = maxOf(src.width, src.height).coerceAtLeast(1)
-        val scale = (longSide.toFloat() / long).coerceAtMost(1f)
-        val w = (src.width * scale).toInt().coerceAtLeast(1)
-        val h = (src.height * scale).toInt().coerceAtLeast(1)
-        val made = Bitmap.createScaledBitmap(src, w, h, true)
-        softCache[slot] = made
-        softCacheFrom[slot] = src
-        return made
-    }
 
     private fun lerp(a: Float, b: Float, t: Float) = a + (b - a) * t.coerceIn(0f, 1f)
 
