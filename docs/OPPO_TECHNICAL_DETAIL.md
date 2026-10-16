@@ -23,7 +23,7 @@
 | 章 | 内容 | 备注 |
 |---|---|---|
 | §0 | 方法学突破（**混淆名还原** / jadx 装法与坑） | 决定全文可信度，建议先读 |
-| §1 | **结论先行** —— 体系全貌一页 + 最值得借鉴的五件事 | |
+| §1 | **结论先行** —— 体系全貌一页 + 最值得借鉴的六件事 | |
 | §2 | 组件与包全景（速览） | 完整版在 §9 |
 | §3 | **NFC 交互全流程** —— 两条契约链 / 状态机 / APDU / 事件常量 / 超时总表 | ★ 核心 |
 | §3.8 | 安全速览 | 完整版在 **§3A** |
@@ -143,7 +143,7 @@ com/heytap/accessory/beacon/pair/contract/d  → BeaconPairInitContract
 
 **一句话**：碰一碰（NFC）只负责"**确认双方身份 + 交换连接参数**"，真正传文件是 **BT-SPP 承载的 SCP 协议**，最终文件字节由 **OShare** 搬运；而**"传哪些照片"这件事，框架根本不查**——是**相册主动交给它的**。
 
-### 1.2 最值得借鉴的五件事
+### 1.2 最值得借鉴的六件事
 
 | # | 借鉴点 | 为什么值得 | 证据 |
 |---|---|---|---|
@@ -151,9 +151,10 @@ com/heytap/accessory/beacon/pair/contract/d  → BeaconPairInitContract
 | **2** | **数据源自报模型（share agent）**：数据不是"取"的，是数据源收到回调后主动 `startShare` 交上来的 | 一次解决"屏幕外项目、多选、不需要媒体权限、不需要无障碍"四个问题。**我们自己的相册/看图器就是数据源**，可以直接照抄，零 OPPO 依赖 | `[jadx]` `processor/ShareProcessors$StartShareProcessor`；详见既有研究 `docs/OPPO_QUICKCONNECT_STUDY.md` §3.3 |
 | **3** | **超时值按"人在哪一步"分级**：机器对机器的步骤 6 s，等用户确认的步骤 23 s / 65 s，真正传文件的步骤**24 小时** | 我们的实现是全局单超时。OPPO 的分级说明它明确区分了"**协议等待**"和"**人类反应等待**"——这是体验好坏的分水岭 | `[jadx]`/`[smali]` 见 §3.9 超时总表 |
 | **4** | **KSC 持久化（`ksc_info`）+ 协商结果落盘**：配对成功的密钥按 `deviceId + alias` 存库，二次互传免协商 | 老用户碰一下就传完，不用再走确认。我们的实现**每传一次都是全新一次**，没有任何记忆 | `[jadx]` `l.java:867-884` `savePairDevice`；`[smali]` `pair/contract/b.smali` `saveKsc` |
-| **5** | **iOS 走独立子系统**：iPhone 不能 HCE，于是**整条链路换承载**（BLE 广播唤醒 + ANCS/HFP 绑定），而不是硬塞进 NFC 协议 | 说明"同一功能、不同对端能力 → 换协议栈"是成熟做法。我们要支持 iPhone 的话必须同样处理 | 见 §8 |
+| **5** | **凭据"延迟注入 + 加密"**：NFC 广播 payload 里 `networkName=""` / `networkPwd=""` / `networkFreq=-1`，**凭据只在"被读到的那一瞬间"用现场值注入，并 AES-GCM 加密**（12B IV） | **防"路人贴一下偷走热点口令"**。我们的 payload **明文常驻**热点 SSID/密码/IP —— 这是本次研究里**对我们最直接、最该抄的一条**（改法也明确：我们已有 1200 ms 短缓存，把它从"性能优化"改成"延迟注入+加密"） | `[smali]` `OplusNfcProtocolImpl.d()`（见 §6.3.2） |
+| **6** | **iOS 走独立子系统**：iPhone 不能 HCE，于是**把卡/读角色对调**（Android 当 Type 4 NDEF 卡、iPhone 当读卡器）+ NDEF URI universal link，而不是硬塞进 NFC 协议 | 说明"同一功能、不同对端能力 → 换协议栈"是成熟做法。我们要支持 iPhone 的话必须同样处理 | 见 §8 |
 
-> 第 6 条算半个：**`@DebugMetadata` 的教训**——如果我们自己混淆，别留这个后门（§0.1）。
+> **另加一条元教训**：**`@DebugMetadata` 的教训**——如果我们自己混淆，别留这个后门（§0.1）。
 
 ---
 
@@ -1377,82 +1378,220 @@ for (item : list) {
 
 ## 6. 传输层
 
-> 本节由子代理深挖（`_Temp/afk/notes/transport.md`）。以下为已确证的核心事实。
+> 本节由子代理深挖（`_Temp/afk/notes/transport.md`，1039 行）。
+> ⚠️ **本节在收尾阶段做过一次重大修订**：§6.2 / §6.3 / §6.5 的初稿结论**被推翻**（初稿以为"只走 SPP"、"跨 NFC 只有四样东西"、"全链无重试"）。以下是修订后的版本。
 
 ### 6.1 字节怎么走（一句话）
 
-**NFC/APDU 只走"元数据 + 连接参数"；真正的字节走 BT-SPP 上的 SCP 协议；最终文件由 `com.coloros.oshare` 搬运。**
+**NFC/APDU 只走"身份 + 地址 + 能力位 + 会话参数 + 分享意图"；真正的字节走 SCP 协议（承载为 BT-SPP 或 Wi-Fi P2P）；最终文件由 `com.coloros.oshare` 搬运。**
 
-### 6.2 承载：`ConnectionType.SPP_INSECURE`
+### 6.2 承载：**两级**，不是一级（⭐ 初稿错误已修正）
 
-`[jadx] contract/d.java:110`（`NfcConnectAccessoryContract`）+ `[jadx] l.java:871`（`savePairDevice`）都硬编码 `ConnectionType.SPP_INSECURE`。
-→ **碰一碰的承载是 BT 串口（SPP），明文档**。`[jadx]`
+初稿断言"硬编码 `ConnectionType.SPP_INSECURE`"。**不准确** —— `SPP_INSECURE` 只是**缺省值**，实际是**两级承载 + 事前判据**：
 
-**为什么是 SPP 而不是 BLE GATT / Wi-Fi P2P**：`SPP_INSECURE` 的语义是"**无系统配对弹窗的 SPP**"。正常 BT SPP 需要先 `createBond` 弹配对框；而碰一碰把**连接参数（蓝牙地址 + KSC）经 NFC 传过去**，于是可以跳过系统配对直接连——这就是 §3.1 契约⑥ 里 `connect bt senseless BT accessory` 那句日志的含义。
+| bearer | 用否 | 实现 |
+|---|---|---|
+| **BT Classic RFCOMM/SPP insecure** | ✅ **缺省主通道** | `fc/n`(`InsecureBtRfConnection`) / `connector/h`；服务端 `fc/h` / `connector/spp/c` |
+| BT SPP secure / L2CAP / BLE GATT / BLE adv | 存在，**碰一碰不用** | `connector/k`、`connectivity/l2cap/*`、`connector/gatt/*` |
+| **Wi-Fi P2P (Direct)** | ✅ **条件升级** | `connector/p2p/j`(`PantaP2pManager`)；被碰方 `createGroup()` = **GO**，碰方 `connect()` = **GC**；`enablePersistentMode(false)` 硬编码 |
+| Wi-Fi Aware / NAN | ❌ **完全未用** | 仅一个从不解引用的惰性字段 |
+| SoftAP / 基础架构 Wi-Fi / NSD | 存在，**非碰一碰所选** | 热点开关让给 OShare |
+| **NFC** | ✅ 只走身份 + 凭证 + 意图 | 见 §6.3 |
 
-### 6.3 跨 NFC 边界的到底是什么
-
-这是最关键的一次"交接"。从 `[jadx] contract/d.java:85-180` 的 `CompatConnectAccessoryParams` 构造参数可以精确读出：
+**降级只有一级，且是"事前判据"而非"事后重试"** `[smali]` `pair/u.smali` `u.a(s7.c disc)`：
 
 ```java
-CompatConnectAccessoryParams(
-    deviceIdHex,        // ← 对端协议设备 ID（hex 字符串）
-    address,            // ← ★ 蓝牙地址（来自发现层）
-    kscBytes,           // ← ★ 契约⑤ 协商出的 KSC（可能为 null → new byte[0]）
-    localDeviceId,      // ← 本机设备 ID
-    ConnectionType.SPP_INSECURE,
-    nfcEvent,
-    isPhoneConnection
-)
+static boolean a(s7.c disc) {                    // 6 条全部短路
+    return  disc.b == DeviceType.PHONE           // 对端是手机
+         && local() == DeviceType.PHONE          // 本机也是手机
+         && disc.t == 0                          // 对端 wlanMode == 0（P2P 空闲）
+         && disc.p.length() != 0                 // 对端 networkName 非空
+         && disc.q.length() != 0                 // 对端 networkPwd 非空
+         && CompatScp.getWlanMode() == 0;        // 本机也 P2P 空闲
+}
 ```
 
-→ **跨 NFC 边界的是：`(对端蓝牙地址, 对端协议设备ID, KSC, 本机设备ID)`。** `[jadx]`
-→ 有了这四样，BT 连接就能**无感建立**。`[推断]`
+`true → P2P`，`false → SPP_INSECURE`。**P2P 选了但连不上就是失败，不会回落 SPP。**
+
+`getWlanMode()` 取值 `[smali]` `adapter/nfc/k.smali`：**0 = P2P 空闲 / 1 = SoftAP 开 / 2 = 组已成形 / 3 = OShare 不支持 P2P_TCP**
+
+> ⚠️ **一条关键推论**：**PAD（TLV 线格式）路径的 `.p`/`.q` 恒为空**（`p7/r` 构造器把这两个字段写死 `""`）→ **平板一定走 SPP**。判据里那两个 `length()!=0` 就是为此而设。
+> `[未确定]`：V1（`ClientNfcPairing`/`ServerNfcPairing`）侧 smali 中未见 `createP2pGroup`/`hasEmptyP2pGroup` 调用，**推测 V1 恒为 SPP_INSECURE，未证实**。
+
+**`disconnectAccessoryForTapShare` / `isP2PConnectorType` 的真相**（初稿标 `[未确定]`，现已定位）：
+
+> `isP2PConnectorType` **在本 APK 里只作为日志里的一个局部布尔变量名**出现，**不是一个方法**。
+> `[smali]` `connectionservice/active/d.smali:387` `const-string "disconnectAccessoryForTapShare isP2PConnectorType: "`
+
+### 6.3 跨 NFC 边界的到底是什么（⭐ 初稿错误已修正，且是本节的精华）
+
+初稿说"跨 NFC 的是 `(蓝牙地址, 协议设备ID, KSC, 本机设备ID)` 四样"。**这四样确实传，但远不止；而且初稿漏掉了最关键的机制。**
+
+#### 6.3.1 载荷模型 `p7/a`（18 字段，字段名由 `toString()` 直接打印）`[smali]`
+
+| 字段 | 类型 | 语义 |
+|---|---|---|
+| `a` | int | `discVersion`（**线格式版本 = payload 首字节**） |
+| `b` | int | `version`（协议版本，**`>=3` 才走 V3 契约**） |
+| `c` | DeviceType | `deviceType` |
+| `d` | int | `connectType`（广播时恒 `0x20` = 32） |
+| **`e`** | String | **`btMacAddress`（全大写）** |
+| `f` / `g` | boolean | `btEnabled` / `wifiEnabled` |
+| `h` | boolean | `isAway` |
+| `i` | boolean | `d2dEnabled` |
+| `j` | byte[] | `accountHash` —— ⚠️ **实际恒为空**（`p7/c` 从未被实例化，R8 已删其 ctor） |
+| **`k`** | String | **`networkName`（Wi-Fi Direct SSID）** |
+| **`l`** | String | **`networkPwd`（Wi-Fi 口令）** |
+| `m` | int | `networkFreq`（频点 MHz，未连 = -1） |
+| `n` | int | `capabilityFlags`（bit0/1/2 = P2P 能力位；bit3+ = `((freq-5745)/20+1)<<3` 的 5G 信道编码） |
+| **`o`** | int | **`wlanMode`**（0/1/2/3，同 `getWlanMode()`） |
+| `p` | int | `deviceMode`（0 = 正常，**4 = 游戏模式**） |
+| `q` | String | `topActivityPackageName`（**前台包名**） |
+| `r` | String | `peerPTCVersion` |
+| — | — | `nfcEvent = {packageName, InternalNfcAction, fileCount}`、`excludeEvents` |
+
+**三种互斥的线格式，按本机 DeviceType 分叉** `[smali]`：
+
+```
+discVersion = 3 → 本机 PHONE ：[0x03] + fd.d0 protobuf 序列化字节
+discVersion = 1 → 本机 PAD   ：[1][deviceType] + TLV 流
+discVersion = 2 → 只解不产（旧版 / 系统栈）：定长二进制
+```
+
+protobuf 字段号（`fd/d0` / `ai/c`）：
+```
+ 1 deviceType   2 connectType   3 btMacAddress   4 btEnabled    5 wifiEnabled
+ 6 nfcEvent{1 pkg, 2 action, 3 fileCount}        7 d2dEnabled   8 nfcExcludeEvent(repeated)
+ 9 version     10 serviceParams{1 protocolDeviceId, 2 accountHash}
+11 networkName 12 networkPwd   13 networkFreq   14 capabilityFlags  15 wlanMode
+16 deviceMode  17 topActivityPackageName        18 peerPTCVersion
+```
+
+#### 6.3.2 ⭐⭐ 最关键机制：**广播时不带凭据，凭证在"被碰的一瞬间"现场注入并加密**
+
+`[smali]` `OplusNfcProtocolImpl.d(DeviceType, needPayload, encrypt)`：
+
+```
+1) 取发布缓存 NfcPublishData{header, serviceData}
+2) 若 deviceType == PHONE（且非 needPayload 分支）→ updateFreqInServiceData：
+   反序列化成 protobuf，用 WlanModeManager 的【现场值】覆写：
+     networkName            ← groupNetworkName
+     networkPwd             ← groupNetworkPwd
+     networkFreq / wlanMode / capabilityFlags / topActivityPackageName ← 同为现场值
+3) encrypt == true → nf/d.a() = 【AES/GCM/NoPadding，12B 随机 IV】，输出 IV‖密文+tag
+   （可被 Secure 设置 nfc_tag_de_state 关闭）
+4) deviceType == IPHONE → 原样返回（不加密、不加头字节）
+   否则 → [header 1B] + 密文
+收侧：qf.a.a(of/a, NfcMode) 在 header<=3 时解密后重新 hex 成 NfcPublishData
+```
+
+**所以广播包里 `networkName=""` / `networkPwd=""` / `networkFreq=-1`（掩码 `0x7E809` 强制默认）—— 凭据只在被碰的瞬间注入。**
+
+→ **这是防"路过就被偷口令"的设计，非常重要。**
+→ ⚠️ **对我们的直接影响**：我们的 payload 里**明文放着热点 SSID / 密码 / IP**，而且**是常驻广播的**。**OPPO 的这套"延迟注入 + 加密"我们必须学** —— 这是 §11 里需要上调优先级的一条。
+
+#### 6.3.3 APDU 细节：**单帧 255 字节硬上限，无分块**
+
+**Android↔Android** `[smali]` `OplusHostApduService.smali`：
+
+```
+SELECT : 00 A4 04 00 0B F000004F50504F2E434F4D   → 9000（否则 FF9000）
+换数据 : 00 CA 01 01 <Lc(1B)> <payload...>        ← 复用 GET DATA 指令头
+   Lc = 1 字节 → payload ≤ 255 字节
+   代码只做 data+9000，【无分块、无 chaining】
+```
+
+> ⚠️ **255 字节硬上限** → **这就是为什么凭据 / 元数据必须小，而文件必须另开通道。** 这一条**正式解释**了"APDU 只传元数据"的物理原因（初稿只是 `[推断]`）。
+
+**iOS** `[smali]` `IosHostApduService.smali`：标准 NFC Forum Type 4 Tag（AID `D2760000850101`，**MLe = MLc = 250**，NDEF 文件 `E104`，上限 `0x3FFF`），内容是**公网 URL**：
+
+```
+https://connect.oppo.com/oshare/clips/(PAD 时 /clips/pad/) + 角色码
+#dataVersion=1&devId=…&code=<8B 随机>&devType=<n>&devName=<设备名>
+serviceID = tap_share_ios
+```
+
+→ **对 iOS 完全没有凭据交换**，走公网 URL + 云端兑换（`connect.oppo.com` 不在本 APK 内）。`[推断]`
+
+**明示「不含」清单**：IP（**从不出现**）、端口（在 SCP 本地决定）、文件内容 / 分片（**只有 `fileCount`**）、真实 `accountHash`（恒空）。
+
+> ⚠️ **一处与 §3A 的张力**：安全章说"账号比对只比 3 字节 hash"，但传输章发现 **NFC payload 里的 `accountHash` 字段恒为空**。两者不矛盾 —— 账号比对发生在 **SCP 契约链的 `NfcDataSync`**（protobuf `fd/g0` 那一族），**不在 NFC 广播载荷里**。**但这条仍需注意：不要在 NFC 载荷里指望拿到 accountHash。** `[推断]`
 
 ### 6.4 传输委托给 OShare
 
-`[smali]`
+```java
+FileTransferManager.getInstance().sendData(Context, Bundle, ArrayList<SharedRecord>, ResultCallback)
+// 服务："com.oplus.oshare.FILE_TRANSFER_SERVICE" @ com.coloros.oshare | com.oneplus.oshare
+// 先 contentResolver.call("com.oplus.oshare.nfc", "", "", Bundle) 预热
 ```
-com.coloros.oshare.FileTransferManager.getInstance()
-    .sendData(Context, Bundle, ArrayList<...>, ResultCallback)
-    → com.coloros.oshare.ITransferService.sendData(Intent)
-```
-框架侧实现的回调（`com/oplus/interconnect/nfc/share/d.smali`）：
-- `onFileInfoReceived(com.coloros.oshare.FileInfo)`
-- `onPercentChange(int, long)` ← **进度条**
-- `onResult(int, ArrayList)`
 
-`ITransferService` 的 **11 个事务**（`[smali]` 全量）：
-```
-registerCallback / unregisterCallback / pauseSeedlingCard / resumeSeedlingCard /
-notifyUserAckResult / sendData / cancel / notifyTaskStart / notifyBtConnected /
-notifyTaskFail / getTransferStatus
-```
-`TransferCallback` 的 **4 个回调**；`FileInfo` 5 字段；`SharedRecord`（OShare 侧）6 个 String + `byte[]`。
+**Bundle 键（全部）** `[jadx] SdkConstants`：
 
-**绑定方式**：`Intent("com.oplus.oshare.FILE_TRANSFER_SERVICE")` + `setPackage("com.coloros.oshare" | "com.oneplus.oshare")`；预热用 `contentResolver.call("com.oplus.oshare.nfc", ...)`。`[smali]`
+| key | 值 |
+|---|---|
+| `"package"` | 对端包名 |
+| `"deviceId"` | 对端协议设备 ID（**为空则直接 return，不发送**） |
+| `"exChange"` | 是否"换一换"（对端同时也要发给我） |
+| `"isIosNfc"` | iOS 对端 |
+| `"sharedRecords"` | 记录列表 JSON 字符串 |
 
-→ **对我们的含义**：**wire 格式全在这个 APK 内（27 个 smali 文件），可以字节级复刻；缺的只是服务端实现。** 这是好消息——意味着"传输层"不是黑盒。
+> ⚠️ **同一个 key 收发类型不同**：发是 **JSON String**，收（`onFileHandler`）是 **`ArrayList`**。`[jadx]`
 
-### 6.5 失败 / 超时 / 重试（总表）
+**记录模型** `com.coloros.oshare.model.SharedRecord`：`shareDataType`(=`MimeType.getValue()`) / `title` / `description` / `thumbnailUri` / `content` / `uri` / `extraData` —— 由 `e/c.v()` 从 `com.oplus.interconnect.share.sdk.data.SharedRecord` 逐字段搬运。`[smali]`
 
-**超时**：见 §3.9 与 §3.2 两张表（配对链 6/6/10/23/6/6 s；传输链 15/65/65/24h）。
+**回调的实际用途**（初稿说 `onPercentChange` 是进度条，**不准确**）：
+
+- `onFileInfoReceived` → 本 App **只打日志**
+- `onPercentChange` → 打日志 + **取消 25 s 看门狗**；**UI 进度环由 `ui/animation/u` 单独驱动，不是这里**
+- `onResult(status, records)` → 主分派：**1000 成功 → 拉起接收 App**；其余 → `SendFileException(2003)`
+
+`ITransferService` 的 **11 个事务**：`registerCallback / unregisterCallback / pauseSeedlingCard / resumeSeedlingCard / notifyUserAckResult / sendData / cancel / notifyTaskStart / notifyBtConnected / notifyTaskFail / getTransferStatus`；另有 `notifyUserAckResult(ack{OK=0, REJECT=1, TIMEOUT=2})`。
+
+→ **对我们的含义**：**wire 格式全在这个 APK 内（27 个 smali 文件），可以字节级复刻；缺的只是服务端实现。**
+
+### 6.5 失败 / 超时 / 重试
+
+**超时**：见 §3.9 与 §3.2 两张表（配对链 6/6/10/23/6/6 s，最坏 ~57 s；传输链 15/65/65/24 h）。补充确证的常量 `[smali]`/`[jadx]`：
+
+- `createP2pGroup()` 后 **9 s**；P2P GC/GO **20 s**；P2P 空组 **10 min** 清理
+- **`sendData` 看门狗 25 s** → `SendFileException(2003)`
+- **卡片等用户 61 s**（发 / 收两侧）
+- 接收端进度心跳 **10 s** 步长，**两轮无变化 → `BT_DISCONNECTED`**
+- raw 连接：收 5 s / 发 3 s；SCP 交互 21 s；`CompatAccessoryConnect` 11 s
+- **SCP 心跳 10 s 或 90 s（端口 10155）—— 这才是真正的 keep-alive**
+- SCP 建链：V1 **7 s** / V3 **9 s**（服务端 9 s → code −8000）
+- 调度器 21 s（→ code 111）/ 61 s
 
 **失败路径**：
+
 - 配对层任一步超时 → 抛对应异常（§3.9 表），整链 `finally` 清理，`isPairing` 复位
 - 用户取消 → `NfcPairCancellation` 通知"当前契约"的 `onCancel(reason)`，`job.cancel()` `[jadx] l.java:920-935`
-- `NfcConnectAccessoryContract` 失败 → `NfcPairException("connect bt senseless BT accessory failed")`，或 `acceptAccessory` 侧的 `"accept bt senseless BT accessory failed"` `[jadx] d.java`
-- 传输层 → `TransferConfirmResult` 里区分 `SENDER_TRANSFER_FAILURE` / `RECEIVER_TRANSFER_FAILURE` / `RECEIVER_TRANSFER_PERMISSION_GRANT_FAIL` / `RECEIVER_TRANSFER_CANCEL`
+- `NfcConnectAccessoryContract` 失败 → `NfcPairException("connect bt senseless BT accessory failed")` `[jadx] d.java`
+- 传输层 → `TransferConfirmResult` 区分 `SENDER_TRANSFER_FAILURE` / `RECEIVER_TRANSFER_FAILURE` / `RECEIVER_TRANSFER_PERMISSION_GRANT_FAIL` / `RECEIVER_TRANSFER_CANCEL`
 - 空结果降级：`transfer/d.smali:130` —— **status 1000 但记录为空 → 降级成 1001**
 
-**重试**：`[未确定]` —— 本次**没有在 APK 里找到显式的"自动重试 N 次"逻辑**。观察到的是"**失败即整体失败 + 用户重新碰一次**"的模型。这是一个**值得注意的设计选择**：把重试交给用户（再碰一下），而不是在协议层做退避重试。
-→ `[推断]` 这么做的理由是：碰一碰的"重试"成本极低（手机再碰一下），而协议层重试会带来状态机复杂度。
+**重试（⭐ 初稿结论"全链无重试"已修正为两半）**：
 
-**`disconnectAccessoryForTapShare` / `isP2PConnectorType`**：`[未确定]` —— 这两个串在 dex 字符串表里能搜到，但本次**未能定位到具体的分支代码**（见 §12）。已知的是 `ConnectionType` 里存在 `SPP_INSECURE(32)` 与 `P2P` 两个值，且 `UidType` 有 `P2P(4)` 档 —— `[推断]` 存在"SPP 不通则走 Wi-Fi P2P"的备选路径，但**未证实**。
+| 层 | 有无重试 |
+|---|---|
+| **NFC 碰一碰主链路**（pair / share / tapshare / beacon） | ❌ **完全不重试**。唯一用户可见反馈是 `NfcDialogService` 的 toast（文案 `operation_failed_hint`「操作失败，请稍后重试」）→ **需用户手动重新碰 NFC** |
+| **连接层 / IPC 层** | ✅ **有明确重试**（下表） |
 
----
+| 位置 | 次数 | 退避 |
+|---|---|---|
+| SDK↔CoreService IPC 绑定 | **2 次**重 bind | 每次 `wait(2000)`（累计 ≤6 s） |
+| `SimpleGattConnection.connectGattWithRetry` | **3 次** | **线性 `n × 2000 ms`** |
+| `discoverServicesWithRetry` | 3 次 | 同上（单次等 60000 ms） |
+| `BadgeConnectServiceImpl.handleAuthFailureRetry` | 1 次 | 无 |
+| `handleSppKeyMissingRetry` | 1 次 | 无 |
+| `BadgeP2pConnectionHandler.createSoftApBearer` | **10 次轮询** | 500 ms |
+| `SenselessNetworkingImpl` 失败黑名单 | 每次失败 `errorNum++` | **指数 `2^n × 5000`，1 h 封顶** |
+| 延迟连接等待表 `upsertDevice` | 每次失败 | **指数 ×2，15 s 起，10 min 封顶** |
+| `ConnectChannel.executeConnect`（LAN） | 3 次 | 1000 ms |
+| `BluetoothRssiMonitor` | 周期采样 >10 次 | 6000 ms |
 
----
+→ **所以 OPPO 并非"不做重试"**：**主链路不做**（碰一碰失败就弹 toast 让用户再碰），但**连接层做得很足**（GATT 线性 3 次、无感连接指数退避封顶 1 h）。**分层对待**是这里真正的经验。
+
 
 ## 7. 逐机型素材机制（`modelId_*` / `major_type` / `config_os12.xml`）
 
@@ -2078,11 +2217,15 @@ NfcFrameworkDataParcelize(nfcMode, needPayload, payload[])
 
 | 维度 | OPPO | 我们 | 该不该跟 + 理由 |
 |---|---|---|---|
-| **承载** | **BT-SPP**（`ConnectionType.SPP_INSECURE`）+ SCP 协议；另有 Wi-Fi P2P 兜底（未证实） | **Wi-Fi P2P / 热点 + TCP 8988**（`Xfer.java:53`），`InetSocketAddress(gw, PORT)` | ✅ **各自合理，取决于场景**。OPPO 用 BT-SPP 是因为**碰一碰的场景是"手机贴手机"**（近场），BT 配对快、功耗低；我们用 Wi-Fi P2P 是因为**要传大图**（BT-SPP 带宽 ~100–200 KB/s，一张 5 MB 照片要 30 s+）。**结论：传图片用 Wi-Fi 是对的；但可以学 OPPO 的"BT 作为连接建立的引导"** |
-| **连接参数传递** | 跨 NFC 边界传 `(对端蓝牙地址, 对端协议设备ID, KSC, 本机设备ID)` → **BT 无感直连**（`connect bt senseless BT accessory`） | 经 APDU 传 `k=v\|k=v` 字符串（含 `lanIpv4` / `p2pName` / `p2pAddr` / 热点 SSID/密码） | ⚠️ **思路一致（都把连接参数塞进 NFC）**，但**我们的安全性弱**：OPPO 传 KSC 用于后续认证；我们传明文 WiFi 密码。**见下条** |
-| **进度回调** | `TransferCallback.onPercentChange(int, long)` → UI 进度条 | 有（`Xfer` 内有进度相关逻辑） | ✅ **都有**，无需改 |
-| **失败/重试** | 失败即整体失败，**重试交给用户（再碰一下）**；无显式自动重试（`[未确定]`，未找到重试循环） | `long delay = 3000L + mRetry * 2000L`（**有自动重试 + 退避**） | ✅ **我们有而 OPPO 没有，这是优点**。近场场景"再碰一下"成本低，但**自动退避重试体验更好**（用户不用动）。**保留我们的重试**，只是**要把重试次数/上限显式化**（当前 `mRetry` 无上限？需确认） |
+| **承载** | **两级**：缺省 **BT-SPP insecure**（`SPP_INSECURE`）；满足判据时升级 **Wi-Fi P2P**（被碰方 GO / 碰方 GC）。**Wi-Fi Aware 完全未用** | **Wi-Fi P2P / 热点 + TCP 8988**（`Xfer.java:53`），`InetSocketAddress(gw, PORT)` | ⚠️ **我们的选择对传图更好，但缺 OPPO 的"判据驱动"**。BT-SPP 带宽 ~100–200 KB/s（一张 5 MB 照片 30 s+），**OPPO 用它是因为碰一碰的默认场景是"贴一下、传少量"**；Wi-Fi P2P 是它的**升级档**。**建议**：保留 Wi-Fi 为主，但**加一个"何时走哪条"的显式判据**（OPPO 的 `pair/u.a()` 六条件是个好模板），而不是无脑只走一条 |
+| **降级语义** | **事前判据**（`u.a()` 6 条短路）→ 一次性选路；**P2P 连不上就是失败，不回落 SPP** | 单一路径，失败则重试同一条 | ⚠️ **各有利弊**：OPPO 的"事前判据"避免了"连一半再换"的状态机复杂度，但代价是**没有兜底**。我们的退避重试在近场场景其实更稳。**建议：保留重试，但引入"判据决定首选"** |
+| **连接参数传递** | 跨 NFC 传 **18 字段载荷**（`p7/a`）；**且凭据不经广播** —— 广播时 `networkName=""`/`networkPwd=""`/`networkFreq=-1`，**凭证在"被碰的瞬间"现场注入并 AES-GCM 加密**（12B 随机 IV；可被 `nfc_tag_de_state` 关闭） | 经 APDU 传 `k=v\|k=v` 字符串（含 `lanIpv4` / `p2pName` / `p2pAddr` / 热点 SSID+密码），**明文且常驻** | ❌❌ **必须跟，且是安全上的最重要一条**。OPPO 明确设计了"**防路过偷口令**"；我们**明文常驻广播热点密码**。**最低成本改法**：把凭据从"常驻 payload"改成"**仅在 NFC 会话中被读到的那一刻才拼进去**"（我们已经有 `PAYLOAD_TTL_MS = 1200L` 的短缓存，但那是为性能，不是为了不泄漏——**方向对了，目的要改**）；再加 AES-GCM |
+| **APDU 帧长** | **单帧 ≤255 字节硬上限、无分块无 chaining**（`00 CA 01 01 <Lc(1B)>`） | `Bus.java:41` `MAX_PAYLOAD = 200`，**超长静默截断** | ✅ **上限思路一致（都被物理约束）**，但 ❌ **我们的处理方式错**：见 §11.2 的"载荷"行 —— **必须报错而非截断** |
+| **进度回调** | `TransferCallback.onPercentChange(int, long)` **只打日志 + 取消 25 s 看门狗**；**UI 进度环由 `ui/animation/u` 单独驱动** | 有（`Xfer` 内有进度相关逻辑） | ⚠️ **OPPO 的做法值得注意**：**传输回调与 UI 渲染解耦**（回调不直接驱动 UI，UI 有自己的驱动源）。这样 UI 不会被回调频率绑架。**可借鉴** |
+| **失败/重试** | **主链路零重试**（失败弹 `operation_failed_hint` toast，让用户再碰）；**但连接层重试很足**：IPC bind 2 次、GATT 3 次（线性 `n×2000`）、badge SoftAP 轮询 10 次、无感连接**指数退避封顶 1 h**、延迟表指数 15 s→10 min | `long delay = 3000L + mRetry * 2000L`（自动重试 + 线性退避） | ✅ **保留我们的重试**（比 OPPO 主链路更友好），但 ⚠️ **两点要改**：① **按层区分** —— OPPO 的经验是"**协议主链路不重试（让用户重来）、连接层重度重试**"，我们目前是混在一起；② **必须给重试加上限**（`mRetry` 当前无上限，见 `Xfer.java:608`），并考虑**指数退避**（OPPO 连接层全是指数） |
+| **保活** | **SCP 心跳 10 s / 90 s（端口 10155）** —— 真正的 keep-alive | `[未确定]` 我们有 TCP keep-alive？ | ⚠️ **要确认**：长传输（大图）中间若网络抖动，没有应用层心跳则"假死"不可检测。OPPO 有心跳，且接收端**进度心跳 10 s 步长、两轮无变化 → `BT_DISCONNECTED`** —— 这个"**进度停滞检测**"比单纯 keep-alive 更实用，**建议照抄** |
 | **失败可诊断性** | 6 类配对异常 + 7 个 `TransferConfirmResult` 枚举值，**能区分"接收端授权失败"**（`RECEIVER_TRANSFER_PERMISSION_GRANT_FAIL`） | 通用失败 + banner 文案 | ⚠️ **跟**：`RECEIVER_TRANSFER_PERMISSION_GRANT_FAIL` 这类**细粒度失败原因**能让用户知道"是权限问题"而不是"网络问题"。**我们的 overlay_fail_banner 应该区分原因** |
+| **iOS 的凭据处理** | ⚠️ **对 iOS 完全没有凭据交换** —— NDEF 里是公网 URL（`connect.oppo.com`）+ 8 字节随机 `code`，靠**云端兑换** | 不适用（我们不做 iOS） | ❌ **暂不跟**：需要公网服务 + iPhone 上有 App。**但如果未来做，注意这是唯一能绕开 iOS 无法 HCE 的办法** |
 
 ### 11.4 安全层（**我们完全缺失，差距最大**）
 
@@ -2107,15 +2250,19 @@ NfcFrameworkDataParcelize(nfcMode, needPayload, payload[])
 
 ### 11.6 一句话总结
 
-**最该改的三件事**（按收益排序）：
-1. **加安全层**（ECDH + 会话密钥 + 可选的 KSC 持久化）—— 我们目前**明文传 WiFi 密码**，这是最严重的问题
-2. **拆超时 + 具名失败原因** —— 单项收益最大的工程改进，让"哪一步失败"可诊断
-3. **修 200 字节静默截断** —— 这是真实的 bug，且修复成本极低
+**最该改的四件事**（按收益排序）：
+
+1. **凭据不要常驻明文广播** —— 我们目前把**热点 SSID / 密码 / IP 明文常驻**在 NFC payload 里。OPPO 的对应机制是：**广播时凭据字段全空，只在"被读到的那一瞬间"现场注入，并 AES-GCM 加密**。**这条排第一，因为它是"路人可读"级别的暴露**，而且改法明确（我们已有 1200 ms 短缓存，把它从"性能优化"改成"延迟注入 + 加密"即可）。
+2. **加安全层**（ECDH 会话密钥 + 可选的 KSC 持久化）—— 与第 1 条配套；单独做第 1 条仍挡不住主动中间人。
+3. **拆超时 + 具名失败原因** —— 单项收益最大的工程改进，让"哪一步失败"可诊断。参考 OPPO 的分层：**协议主链路不重试（让用户重来）、连接层重度重试（指数退避）**；另外抄它的"**进度停滞检测**"（两轮心跳无变化 → 判定断连）。
+4. **修 200 字节静默截断** —— 这是真实的 bug（`Bus.java:98-102` 只打日志），且修复成本极低。
 
 **最不该改的**：
+
 - 不要为了"像 OPPO"去改系统 NFC 服务加 `DIRECT_DISCOVERED` 广播（我们用 `TECH_DISCOVERED` 更干净）
-- 不要做 iOS 支持（成本极高，除非产品明确要求）
+- 不要做 iOS 支持（成本极高：需 iPhone 上有 App + universal link 域名 + 云端兑换，除非产品明确要求）
 - 不要引入 protobuf（对 5 个报文类型是过度设计；**先把类型值改成可打印 ASCII 即可**）
+- 不要照抄"P2P 连不上就失败、不回落"（OPPO 的判据式选路没有兜底，我们的重试更稳；**学它的"判据决定首选"，保留我们的重试**）
 
 ---
 
@@ -2130,8 +2277,8 @@ NfcFrameworkDataParcelize(nfcMode, needPayload, payload[])
 | 1 | **`KSC` 缩写的展开** | 全树 grep `KeySharing`/`KeyShare`/`SharedCredential`/`key_sharing` → **0 命中**。代码内只以 `ksc` 出现。`[推断]` 最接近 "Key Sharing Credential" |
 | 2 | **`qcqs` 的含义** | 3 处字符串出现，**从未展开** |
 | 3 | ~~`IPHONE_AWAKE_OSHARE_BLE_ADV_SERVICE_UUID` 的 UUID 具体值~~ | **✅ 已在收尾阶段确定**：`00007871-0000-1000-8000-00805F9B34FB`（见 §8.4.1）。**仍存疑的是该 UUID 的归属**（命名里 OPhone / O+ 两套并存，Android 侧无构造点） |
-| 4 | **`disconnectAccessoryForTapShare` / `isP2PConnectorType` 的分支代码** | 字符串在 dex 里能搜到，但**未定位到具体分支**。`[推断]` 存在"SPP 不通 → Wi-Fi P2P"的备选路径，未证实 |
-| 5 | **传输层是否存在自动重试** | **未找到显式重试循环**。观察到的模型是"失败即整体失败 + 用户再碰一次"。但也可能是重试逻辑在 `libcpkit.so` 里（C/Rust 层看不到） |
+| 4 | ~~`disconnectAccessoryForTapShare` / `isP2PConnectorType` 的分支代码~~ | **✅ 已解决**：`isP2PConnectorType` 只是**日志里的局部布尔变量名**，**不是方法**（`connectionservice/active/d.smali:387`）；真正的选路判据是 `pair/u.a(s7.c)` 的 6 条短路（见 §6.2）。**初稿的"SPP 不通则走 Wi-Fi P2P"推断是错的**——实际是**事前判据**，P2P 失败不回落 |
+| 5 | ~~传输层是否存在自动重试~~ | **✅ 已解决（答案分两半）**：**主链路完全不重试**（失败弹 `operation_failed_hint` toast）；**但连接层 / IPC 层重试很足**（IPC bind 2 次、GATT 3 次线性、无感连接指数退避封顶 1 h、延迟表 15 s→10 min 等 10 处）。全表见 §6.5 |
 | 6 | **`keyBasedType` 位掩码 `32` 的语义** | 两张 wire 映射表里都出现，但**没有任何生成器分支对应它** → 出现必然抛 `KeyBasedTypeNotFoundException(103)` |
 | 7 | **`activeTriggerMode` 的完整枚举** | 只找到 `=1` 有具名常量 `USER_ACTIVE_TRIGGER_NOFEELING_PAIR`。`[推断]` `0=非主动触发`，`1=主动触发` |
 | 8 | **`account.a.j()` 是否走网络** | `[推断]` 是本地账号服务（`AccountIdService`），但 sessionKey 来源未完全展开 |
@@ -2179,6 +2326,11 @@ NfcFrameworkDataParcelize(nfcMode, needPayload, payload[])
 | iOS 的 AID "没有 filter 所以是空壳" | **AID 是运行时动态注册的**（`registerAidsForService`，NFC Forum Type 4 Tag 标准 AID `D2760000850101/100`），且**注册前先反射 `enableNfcShareMode(true)`** |
 | `UKey2` 的枚举只有 3 个值（17/18/19） | **实为 4 个**：`MESSAGE_CLIENT_INIT`=**16**（★ jadx 把常量 16 错误折叠成了别的名字，本文表已按 smali `<clinit>` 逐条核对修正，见 §3.6） |
 | `ios_tap_share_pkgs` 数组会被消费 | **该数组在本 APK 内只有 R 常量、无运行时消费者**（与 `compat_tap_share_*` 不同） |
+| **本文 §6 初稿**：承载"硬编码 SPP_INSECURE" | **是两级承载 + 事前判据**：缺省 BT-SPP，满足 `pair/u.a()` 六条件时升级 Wi-Fi P2P；**P2P 失败不回落** |
+| **本文 §6 初稿**：跨 NFC 只有 4 样东西 | **是 18 字段载荷 `p7/a`**，且**凭据（SSID/口令）不在广播包里 —— 只在被碰的瞬间现场注入并 AES-GCM 加密** |
+| **本文 §6 初稿**：全链无重试 | **分两半**：主链路零重试，**连接层/IPC 层重试充分**（10 处，含指数退避） |
+| `s7/c.t` 语义未确定 | **= `p7/a.o` = `wlanMode`**，与 `getWlanMode()` 同一套 0/1/2/3 编码 |
+| 传输回调 `onPercentChange` 驱动进度条 | **它只打日志 + 取消 25 s 看门狗**；UI 进度环由 `ui/animation/u` 单独驱动 |
 
 ---
 
