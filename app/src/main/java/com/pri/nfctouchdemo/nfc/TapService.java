@@ -105,6 +105,18 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         if (intent != null && "com.pri.nfcdemo.ASSIST_PROBE".equals(intent.getAction())) {
             AssistProbe.run(this);
         }
+        //pri added by zhuyang,Diagnostic: dump the gallery node tree and sweep the grid, to see whether the multi-select state and,20261016
+        //pri added by zhuyang,the tiles scrolled off screen are reachable at all. Does not touch the tap flow,20261016,start
+        if (intent != null && "com.pri.nfcdemo.A11Y_DUMP".equals(intent.getAction())) {
+            AccessibilityProbeService svc = AccessibilityProbeService.sInstance;
+            if (svc == null) {
+                Bus.log("诊断: 无障碍未连接,无法扫描");
+            } else {
+                svc.sweepAndDump(intent.getIntExtra("steps", 3));
+            }
+        }
+        //pri added by zhuyang,Diagnostic: dump the gallery node tree and sweep the grid, to see whether the multi-select state and,20261016
+        //pri added by zhuyang,the tiles scrolled off screen are reachable at all. Does not touch the tap flow,20261016,end
         if (intent != null && Intent.ACTION_SEND_MULTIPLE.equals(intent.getAction())) {
             ArrayList<Uri> uris = intent.getParcelableArrayListExtra(Intent.EXTRA_STREAM);
             if (uris != null) {
