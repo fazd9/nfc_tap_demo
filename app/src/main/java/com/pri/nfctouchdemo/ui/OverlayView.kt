@@ -989,7 +989,7 @@ class OverlayView @JvmOverloads constructor(
     private var receiverFrame: ReceiverRenderer.Frame? = null
 
     /** 底部那条提示（正在接收 / 已接收 / 已拒绝）；空串就不画。 */
-    private var receiverToast = ""
+    private var receiverToast: String = ""
 
     /** 上滑确认是否已经回调过（一次手势只回调一次，见 [startFlyAway]）。 */
     private var sendConfirmedNotified = false
@@ -2769,7 +2769,7 @@ class OverlayView @JvmOverloads constructor(
                 endRight = cardRect.right / k,
                 endBottom = cardRect.bottom / k,
                 endRadius = CARD_RADIUS_DP,
-                // 发送端那枚整卡呼吸：幅度 = 卡高 × PHOTO_BREATHE_FRAC，收到势走完才渐入
+                // 发送端的整卡浮动：幅度 = 卡高 × PHOTO_BREATHE_FRAC，相位和顶部凸起同源
                 bobY = breathePhase() * (cardH / k) * PHOTO_BREATHE_FRAC,
                 rowCenterY = (cardTop + cardH + tipGap + tailH / 2f) / k
             )
@@ -3332,6 +3332,7 @@ class OverlayView @JvmOverloads constructor(
                             }
                             invalidate()
                         }, 850L)
+                        // 事件层归我们：通知 NFC 层打开旧查看器 / 收起窗口
                         onReceiveAccepted?.invoke()
                     }
                 } else if (receiveSecondaryRect.contains(event.x, event.y)) {
