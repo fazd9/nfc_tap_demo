@@ -55,6 +55,42 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
     /** 相册推送过来的"当前选中照片"。 */
     private static final ArrayList<Uri> PENDING = new ArrayList<Uri>();
 
+    //pri added by zhuyang,Gallery -> tap-to-share interface (the contract our own gallery implements; the debug gallery,20261016,start
+    //pri added by zhuyang,in Temp/debuggallery is the reference implementation). Two intents, both sent with an explicit,20261016
+    //pri added by zhuyang,component so no <intent-filter> and no chooser is involved:,20261016
+    //pri added by zhuyang,,20261016
+    //pri added by zhuyang,  PUBLISH  the photos on screen right now (1..N; a single open photo is just N=1),20261016
+    //pri added by zhuyang,    Intent i = new Intent(Intent.ACTION_SEND_MULTIPLE);,20261016
+    //pri added by zhuyang,    i.setType("image/*");,20261016
+    //pri added by zhuyang,    i.putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris);   // ArrayList<Uri>,20261016
+    //pri added by zhuyang,    i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);,20261016
+    //pri added by zhuyang,    i.setComponent(new ComponentName("com.pri.nfctouchdemo",,20261016
+    //pri added by zhuyang,            "com.pri.nfctouchdemo.nfc.TapService"));,20261016
+    //pri added by zhuyang,    // the service keeps reading these Uris long after the gallery is gone, so grant them to it,20261016
+    //pri added by zhuyang,    // by uid as well (a one-shot intent flag only lives as long as the activity that sent it):,20261016
+    //pri added by zhuyang,    for (Uri u : uris) grantUriPermission("com.pri.nfctouchdemo", u,,20261016
+    //pri added by zhuyang,            Intent.FLAG_GRANT_READ_URI_PERMISSION);,20261016
+    //pri added by zhuyang,    context.startService(i);,20261016
+    //pri added by zhuyang,,20261016
+    //pri added by zhuyang,  CLEAR    the user is no longer looking at that selection (back to the grid, left the gallery,20261016
+    //pri added by zhuyang,    screen off) - nothing must be left behind for a later tap to send by mistake:,20261016
+    //pri added by zhuyang,    Intent c = new Intent("com.pri.nfcdemo.CLEAR_SELECTION");,20261016
+    //pri added by zhuyang,    c.setComponent(new ComponentName("com.pri.nfctouchdemo",,20261016
+    //pri added by zhuyang,            "com.pri.nfctouchdemo.nfc.TapService"));,20261016
+    //pri added by zhuyang,    context.startService(c);,20261016
+    //pri added by zhuyang,,20261016
+    //pri added by zhuyang,Rule: what the gallery last published is what a tap sends. A published selection therefore outranks,20261016
+    //pri added by zhuyang,the screen-reading fallback (GalleryPickup, Google Photos only) - see onPeer. Clearing is not optional:,20261016
+    //pri added by zhuyang,a selection left behind would be sent as if it were what the user is looking at,20261016,end
+    public static final String ACTION_CLEAR_SELECTION = "com.pri.nfcdemo.CLEAR_SELECTION";
+
+    //pri added by zhuyang,True while the selection in hand was published by a gallery (ACTION_SEND_MULTIPLE) and not cleared,20261016,start
+    //pri added by zhuyang,since - i.e. while "a gallery is reporting what the user is looking at". It gates the screen-reading fallback,20261016
+    //pri added by zhuyang,in onPeer, and deliberately does NOT survive a process restart: a list restored by loadPending is a leftover,20261016
+    //pri added by zhuyang,from a service that was killed with the gallery still open, and a fresh screen read beats it. That keeps the,20261016
+    //pri added by zhuyang,Google Photos path exactly as it was before this feature,20261016,end
+    private static volatile boolean sPublished;
+
     //pri modify by zhuyang,Hard cap on the silent capture: 1500ms is ~2.5x the device-measured 578ms of the old SystemUI path and stays below the framework's own 4s wait; past it the send page is raised with the photo backdrop instead,20261014
     private static final long CAPTURE_TIMEOUT_MS = 1500L;
 
@@ -122,9 +158,19 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
             if (uris != null) {
                 PENDING.clear();
                 PENDING.addAll(uris);
+                sPublished = !PENDING.isEmpty(); //pri added by zhuyang,A gallery published this selection: it now outranks the screen-reading fallback,20261016
                 savePending();
                 Bus.log("服务: 收到相册当前选中 " + PENDING.size() + " 张照片(等碰一碰)");
             }
+        }
+        //pri added by zhuyang,The gallery says "nothing selected on screen any more" - see the contract above ACTION_CLEAR_SELECTION,20261016,start
+        //pri added by zhuyang,Clearing is what keeps the next tap honest: without it a leftover selection would be sent while the user,20261016
+        //pri added by zhuyang,believes they are sending what they are looking at,20261016,end
+        if (intent != null && ACTION_CLEAR_SELECTION.equals(intent.getAction())) {
+            Bus.log("服务: 相册撤销了选择,清掉待发的 " + PENDING.size() + " 张照片");
+            PENDING.clear();
+            sPublished = false;
+            savePending();
         }
         // ---- 以下三个分支:动效层(OverlayService)的"用户操作回执",等价于旧 SendPage/ReceivePage 的 Listener ----
         if (intent != null && OverlayService.ACTION_UI_SEND_CONFIRMED.equals(intent.getAction())) {
@@ -217,6 +263,14 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         mPeerOffered = false;
         mLastBmp = null;        //pri added by zhuyang,Preview bitmap is sticky across rounds,20261014
         //pri added by zhuyang,New round: role flags reset,20261014,end
+        //pri added by zhuyang,A gallery that publishes its own selection wins over reading the screen: while one is held, the,20261016
+        //pri added by zhuyang,fallback below is not run at all (contract: see ACTION_CLEAR_SELECTION). The gallery clears when the user,20261016
+        //pri added by zhuyang,leaves, so a published selection can only be live while it is genuinely what the user is looking at,20261016
+        if (sPublished) {
+            Bus.log("碰一碰: 相册已直接上报当前选择 " + PENDING.size() + " 张,不再读屏幕");
+            beginPeerRound(payload);
+            return;
+        }
         //pri added by zhuyang,Gallery pickup (the product flow): if the user is in Google Photos looking at a photo, or with several,20261016,start
         //pri added by zhuyang,tiles ticked, the tap must send exactly those - no share step. The lookup needs a screen capture, so it,20261016
         //pri added by zhuyang,runs off the main thread and the rest of the round starts when it is done. When the gallery is not what,20261016
@@ -229,6 +283,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
                     if (!picked.isEmpty()) {
                         PENDING.clear();
                         PENDING.addAll(picked);
+                        sPublished = false; //pri added by zhuyang,Read off the screen, not published: the flag must not stay set,20261016
                         savePending();
                         Bus.log("相册拾取: 拿到当前正在看/选中的 " + picked.size() + " 张照片,碰一碰直接发送");
                     } else if (GalleryPickup.canReadGallery()) {
@@ -236,6 +291,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
                         //pri added by zhuyang,anything - so there is nothing to send from here. A selection left over from an earlier,20261016
                         //pri added by zhuyang,round must NOT be sent as if it were what the user is looking at,20261016
                         PENDING.clear();
+                        sPublished = false; //pri added by zhuyang,Cleared from the screen side: nothing is published any more,20261016
                         savePending();
                         Bus.log("相册拾取: 相册在前台且可读,但用户没有打开或勾选照片,清掉上一轮留下的选择");
                     } else {
@@ -403,6 +459,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         Bus.log("服务: 发送完成(" + (bytes / 1024) + "KB),悬浮窗关闭,用户仍在相册");
         Bus.unlockRole();
         PENDING.clear();
+        sPublished = false; //pri added by zhuyang,Sent: the gallery's published selection is consumed, not held,20261016
         savePending();
         mSendShown = false; // 本轮结束,下一轮碰触重新拉起
         // 发送完成后摘掉动效窗口(动效层自己也会播"飞走"动画,这里再兜一次底;
