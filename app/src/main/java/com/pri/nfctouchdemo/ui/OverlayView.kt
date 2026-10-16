@@ -4,6 +4,11 @@ import android.animation.ValueAnimator
 import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.Canvas
+// 主线 v8 的发送端高亮（drawSendHalo/drawSendWash/highlightOf + 照片的色矩阵）用到 Color / ColorMatrix /
+// ColorMatrixColorFilter，但主线那一版漏了这三条 import —— 补在这里才能编译，主线文件也需要同样补三行。
+import android.graphics.Color
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
 import android.graphics.LinearGradient
 import android.graphics.Matrix
 import android.graphics.Paint
@@ -643,11 +648,8 @@ class OverlayView @JvmOverloads constructor(
          */
         const val TOP_BLOOM_HEIGHT_SWING = 0.35f
 
-        /**
-         * 发送收尾的时长。**650 ms** —— 参考片里这一下是"原地收成一个点、再上浮一点点"
-         * 然后淡掉，**不是飞出屏幕**（见 [layoutCard] 的 `flying` 分支）。
-         */
-        const val FLY_MS = 650L
+        // 发送收尾的时长**不在这里写死**：它和接收端的下落严格同步，
+        // 用 [ReceiverRenderer.fallRealMs]（= FALL_MS / TIME_RATE ≈ 324ms）当场取 —— 见 [startFlyAway]。
 
         /**
          * 卡片飞走之后，隔多久复位时间轴、重播入场。
@@ -724,8 +726,7 @@ class OverlayView @JvmOverloads constructor(
         const val RECV_END = 0.697f
         const val RECV_MID_ALPHA = 0.56f
 
-        /** 发送收尾时卡片再上浮多少（参考 px，250）—— 一边收成一个点一边往上走。 */
-        const val FLY_RISE_REF_PX = 250f
+        /** 发送收尾：卡片一路收小、升到屏幕最顶上那个 mini 卡片然后消失。 */
 
         // 同步自 D:\A17\NFCTouchDemo 动效主线：上滑行程倍率（本文件此前一直用参考片原值）。
         /**
@@ -742,6 +743,55 @@ class OverlayView @JvmOverloads constructor(
          * 想回到参考片的原始行程就改回 `1`；想更夸张就继续加。
          */
         const val LIFT_GAIN = 1.5f
+
+        /**
+         * 上滑时卡片两侧**贝塞尔外鼓**的保留比例：`1` = 参考片原样，`0` = 两侧完全笔直。
+         *
+         * 参考片那点鼓包换算到本机只有 1~2px，本来就不明显；调小它纯粹是"不用那么弯曲"。
+         * 取值只影响腰身弧度，不影响卡片任何一处的宽度、高度和位置。
+         */
+        const val SIDE_CURVE = 0.35f
+
+        /**
+         * 上滑时"**上窄下宽**"的保留比例：`1` = 参考片原样，`0` = 上下一样宽（正矩形）。
+         *
+         * 实现方式是把上一半的宽度比例 `twR` 往下一半的 `bwR` 拉 —— **下边不动**，
+         * 所以卡片不会被整体拉窄，只是顶部不再收得那么厉害（收拢感 ≈ 打四折）。
+         * 静止时 twR = bwR = 1，所以这条对不拖动时的版面**没有任何影响**。
+         */
+        const val TAPER_GAIN = 0.4f
+
+        // ---- 发送中的"高亮 + 粒子"：都挂在"确认发送"这一刻，方向与接收端相反 ----
+
+        /**
+         * **松手确认发送之后**，飞行进度到多少时"高亮 / 粒子"这件事就到位了。
+         *
+         * 曲线是 `smooth(0, SEND_BLUR_FULL, flyT)`：松手那一帧还是原始照片，飞到 85% 时
+         * 过曝到位、粒子也发满，之后一直保持到卡片消失。
+         *
+         * 两件事共用这**一条**曲线（见 [sendBlurP]）—— 它们本来就是同一个动作的两个面；
+         * 其中"模糊"已经整段删掉（卡片不再模糊，只留高亮）。
+         * 而且它们全都挂在"确认发送"上：滑到顶但没松手时 [flying] 还是 false，两者全是 0。
+         *
+         * 调小 → 更早到位（0.5 = 飞到一半就过曝到位）；调大 → 更晚。
+         */
+        const val SEND_BLUR_FULL = 0.85f
+
+        /**
+         * 发送端"高亮"的亮度/饱和度端点 —— **逐字抄接收端**（[ReceiverRenderer.drawCard] 里
+         * 那组 `bright = lerp(3.3, 1, focus)` / `sat = lerp(0.72, 1, focus)`）。
+         *
+         * 接收端那条曲线是"过曝、去饱和 → 清晰"，发送端是它的**反向**："清晰 → 过曝、去饱和"，
+         * 所以这里写成 `lerp(1, 端点, 过曝程度)`。想更亮就抬 [SEND_BRIGHT_MAX]，想不换色就把它压回 1。
+         */
+        const val SEND_BRIGHT_MAX = 3.3f
+        const val SEND_SAT_MIN = 0.72f
+
+        /** 卡外主色光晕的峰值亮度（接收端 `drawHalo` 里的 0.46）。设 0 = 关掉这一件。 */
+        const val SEND_HALO_ALPHA = 0.46f
+
+        /** 卡上主色光罩的峰值（接收端 `drawWash` 里的 0.42）。设 0 = 关掉这一件。 */
+        const val SEND_WASH_ALPHA = 0.42f
 
         const val SIDE_TOP = 0
         const val SIDE_BOTTOM = 1
@@ -939,7 +989,7 @@ class OverlayView @JvmOverloads constructor(
     private var receiverFrame: ReceiverRenderer.Frame? = null
 
     /** 底部那条提示（正在接收 / 已接收 / 已拒绝）；空串就不画。 */
-    private var receiverToast = ""
+    private var receiverToast: String = ""
 
     /** 上滑确认是否已经回调过（一次手势只回调一次，见 [startFlyAway]）。 */
     private var sendConfirmedNotified = false
@@ -1146,6 +1196,12 @@ class OverlayView @JvmOverloads constructor(
     /** 把"静止时的卡片矩形"映射到当前形状 —— 卡片里的东西照旧画，最后靠它变形。 */
     private val contentMatrix = Matrix()
 
+    /**
+     * 飞走时的终点矩形：接收端卡片的**起点**（屏幕最顶上那个 mini 卡片，本机 px）。
+     * 几何借 [ReceiverRenderer.startCardRect] 取，两端的起终点因此永远咬合。
+     */
+    private val flyRect = RectF()
+
     /** 接收方文字 / 上滑提示各自相对静止位置上移了多少（本机 px）。 */
     private var recvShiftY = 0f
     private var tipShiftY = 0f
@@ -1217,38 +1273,57 @@ class OverlayView @JvmOverloads constructor(
         val rs = refScale
 
         val h0 = cardKey(0f, KEY_BOTTOM) - cardKey(0f, KEY_TOP)
-        var hR = (cardKey(t, KEY_BOTTOM) - cardKey(t, KEY_TOP)) / h0
+        val hR = (cardKey(t, KEY_BOTTOM) - cardKey(t, KEY_TOP)) / h0
         var twR = cardKey(t, KEY_TW) / cardKey(0f, KEY_TW)
-        var bwR = cardKey(t, KEY_BW) / cardKey(0f, KEY_BW)
-        var centerY = cardRect.centerY() +
+        val bwR = cardKey(t, KEY_BW) / cardKey(0f, KEY_BW)
+        // 上窄下宽的收拢按 [TAPER_GAIN] 打折（把 twR 往 bwR 拉，下边不动 → 卡片不会变窄）。
+        // 静止时 twR = bwR = 1，这一步是恒等变换，不拖动时的版面完全不受影响。
+        twR = bwR + (twR - bwR) * TAPER_GAIN
+        val centerY = cardRect.centerY() +
                 ((cardKey(t, KEY_TOP) + cardKey(t, KEY_BOTTOM)) / 2f -
                         (cardKey(0f, KEY_TOP) + cardKey(0f, KEY_BOTTOM)) / 2f) * rs * LIFT_GAIN
 
-        if (flying) {
-            // 发送收尾：原地收成一个点，同时再上浮 [FLY_RISE_REF_PX]（参考片的「继续飞出」）
-            val u = smoothStep(flyT)
-            centerY -= FLY_RISE_REF_PX * rs * u
-            hR *= (1f - u)
-            twR *= (1f - u)
-            bwR *= (1f - u)
-        }
-
         val halfH = cardRect.height() * hR * 0.5f
-        val top = centerY - halfH
-        val bottom = centerY + halfH
         val halfW = cardRect.width() * 0.5f
-        val tw = halfW * twR
-        val bw = halfW * bwR
+        var cx = cardRect.centerX()
+        var top = centerY - halfH
+        var bottom = centerY + halfH
+        var tw = halfW * twR
+        var bw = halfW * bwR
         // 圆角：参考片的 rt = clamp(8,24, h·0.06)、rb = clamp(5,16, h·0.045)（单位是参考 px），
         // 但**下限守住我自己的 [CARD_RADIUS_DP]** —— 静止时仍是原来那张 23dp 圆角的卡片，
         // 只有被压扁时圆角才照参考片的比例收下去（压到底约 10dp）。
         val hRef = h0 * hR
-        val rTop = max((hRef * 0.06f).coerceIn(8f, 24f) * rs, CARD_RADIUS_DP * k * hR)
-        val rBot = max((hRef * 0.045f).coerceIn(5f, 16f) * rs, CARD_RADIUS_DP * k * 0.7f * hR)
+        var rTop = max((hRef * 0.06f).coerceIn(8f, 24f) * rs, CARD_RADIUS_DP * k * hR)
+        var rBot = max((hRef * 0.045f).coerceIn(5f, 16f) * rs, CARD_RADIUS_DP * k * 0.7f * hR)
 
-        buildSilhouette(shapePath, cardRect.centerX(), top, bottom, tw, bw, rTop, rBot)
-        shapeRect.set(cardRect.centerX() - bw, top, cardRect.centerX() + bw, bottom)
-        contentRect.set(cardRect.centerX() - bw, top, cardRect.centerX() + bw, bottom)
+        // 发送收尾 = 接收端下落的**严格反向**：卡片一路收小、升到屏幕最顶上那个 mini 卡片
+        // （就是接收端落下来的起点，几何取自 [ReceiverRenderer.startCardRect]，两端共用一份），
+        // 到顶时淡没。smoothstep 是点对称的（smoothstep(1−x) = 1 − smoothstep(x)），
+        // 所以"倒放"用的还是同一条曲线 —— 两边的手感和快慢完全对称。
+        if (flying) {
+            // flyRect 每帧都要有值：drawCard 里要拿它和当前下边沿一起估卡片的速度
+            receiverRenderer.startCardRect(flyRect, viewW / k, viewH / k)
+            val u = smoothStep(flyT)
+            if (u > 0f) {
+                val mLeft = flyRect.left * k
+                val mRight = flyRect.right * k
+                val miniHalfW = (mRight - mLeft) / 2f
+                // mini 卡片的圆角照接收端那套"等比缩小"给：半径 = mini 宽 × 终态圆角占比
+                val miniR = flyRect.width() * CARD_RADIUS_DP / (cardRect.width() / k) * k
+                cx = lerp(cx, (mLeft + mRight) / 2f, u)
+                top = lerp(top, flyRect.top * k, u)
+                bottom = lerp(bottom, flyRect.bottom * k, u)
+                tw = lerp(tw, miniHalfW, u)
+                bw = lerp(bw, miniHalfW, u)
+                rTop = lerp(rTop, miniR, u)
+                rBot = lerp(rBot, miniR, u)
+            }
+        }
+
+        buildSilhouette(shapePath, cx, top, bottom, tw, bw, rTop, rBot)
+        shapeRect.set(cx - bw, top, cx + bw, bottom)
+        contentRect.set(cx - bw, top, cx + bw, bottom)
         // 内容**不做梯形扭曲**，只是被轮廓裁掉 —— 参考片也是填一个矩形再裁
         contentMatrix.setRectToRect(cardRect, contentRect, Matrix.ScaleToFit.FILL)
 
@@ -1261,6 +1336,9 @@ class OverlayView @JvmOverloads constructor(
     /**
      * 参考片的卡片轮廓：**上窄下宽的梯形**，两侧各一段贝塞尔（先向外张、再收回），
      * 四角圆角随高度变。和那份 HTML 复刻的 `silhouette()` 逐行一致。
+     *
+     * 四个控制点都写成「**直线上的点 + 偏移量 × [SIDE_CURVE]**」：
+     * `SIDE_CURVE = 1` 时数值与参考片逐位相同，`= 0` 时两侧退化成直线。
      */
     private fun buildSilhouette(
         path: Path, cx: Float, top: Float, bottom: Float,
@@ -1276,16 +1354,16 @@ class OverlayView @JvmOverloads constructor(
         path.lineTo(rt - rTop, top)
         path.quadTo(rt, top, rt, top + rTop)
         path.cubicTo(
-            rt + (rb - rt) * 0.52f, top + h * 0.42f,
-            rb + (rt - rb) * 0.10f, bottom - h * 0.12f,
+            rt + (rb - rt) * (0.42f + 0.10f * SIDE_CURVE), top + h * 0.42f,
+            rb + (rt - rb) * (0.12f - 0.02f * SIDE_CURVE), bottom - h * 0.12f,
             rb, bottom - rBot
         )
         path.quadTo(rb, bottom, rb - rBot, bottom)
         path.lineTo(lb + rBot, bottom)
         path.quadTo(lb, bottom, lb, bottom - rBot)
         path.cubicTo(
-            lb + (lt - lb) * 0.10f, bottom - h * 0.12f,
-            lt + (lb - lt) * 0.52f, top + h * 0.42f,
+            lb + (lt - lb) * (0.12f - 0.02f * SIDE_CURVE), bottom - h * 0.12f,
+            lt + (lb - lt) * (0.42f + 0.10f * SIDE_CURVE), top + h * 0.42f,
             lt, top + rTop
         )
         path.quadTo(lt, top, lt + rTop, top)
@@ -1294,6 +1372,9 @@ class OverlayView @JvmOverloads constructor(
 
     /** 卡片插画的缓存位图。 */
     private var artCache: Bitmap? = null
+
+    /** 发送端的粒子云（铺在卡片**下方**）。画在卡片之前，所以被卡片压住。 */
+    private val senderParticles = SenderParticles()
 
     /**
      * 发送图片的**主色**（已经变浅，见 [PhotoTint]）：顶部那枚凸起的光斑在
@@ -1455,6 +1536,14 @@ class OverlayView @JvmOverloads constructor(
     private val cardPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val shadowPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val photoClip = Paint(Paint.ANTI_ALIAS_FLAG)
+
+    // 发送端"高亮"三件套的载体（和接收端一一对应，见 [drawSendHalo] / [drawSendWash]）：
+    // ① 过曝 + 去饱和的颜色矩阵（吃在照片上）② 卡外主色光晕 ③ 卡上主色光罩。
+    private val sendMatrix = ColorMatrix()
+    private val sendMatrixScale = ColorMatrix()
+    private val sendGlowPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val sendWashPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val sendHsv = FloatArray(3)
 
     // 往卡片插画缓存里画用户照片时用（缩放要过滤，否则缩略图边缘会发硬）
     private val artPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
@@ -2680,7 +2769,7 @@ class OverlayView @JvmOverloads constructor(
                 endRight = cardRect.right / k,
                 endBottom = cardRect.bottom / k,
                 endRadius = CARD_RADIUS_DP,
-                // 发送端那枚整卡呼吸：幅度 = 卡高 × PHOTO_BREATHE_FRAC，收到势走完才渐入
+                // 发送端的整卡浮动：幅度 = 卡高 × PHOTO_BREATHE_FRAC，相位和顶部凸起同源
                 bobY = breathePhase() * (cardH / k) * PHOTO_BREATHE_FRAC,
                 rowCenterY = (cardTop + cardH + tipGap + tailH / 2f) / k
             )
@@ -2786,14 +2875,8 @@ class OverlayView @JvmOverloads constructor(
         val offsetY = lerp(22f * k, 0f, enter)
         var alpha = fadeRaw
 
-        if (flying) {
-            // 发送收尾：跟着 [layoutCard] 的收拢一起淡掉（不再飞出屏幕）
-            alpha *= (1f - smoothStep(flyT)).coerceIn(0f, 1f)
-        }
-
-        if (alpha <= 0.003f) return
-
-        // 呼吸：**整张卡片一起上下浮**。
+        // 呼吸：**整张卡片一起上下浮**。（这一段放在 alpha 提前 return **之前**：
+        // 粒子要用它算出生点，而粒子必须活得比卡片久，不能被那一句提前收掉。）
         //
         // 参考片里动的是"卡片里的图片"（卡主体和上下两行文字逐位不动），但那张卡四周留了
         // 9dp 白边做缓冲 —— 图片在白边里滑动，露出来的是本来就该白的那一圈。我们把白边去掉、
@@ -2804,6 +2887,59 @@ class OverlayView @JvmOverloads constructor(
         // 幅度见 [PHOTO_BREATHE_FRAC]（已从"相对比例"改成对齐参考片的绝对位移）。
         // 版面上 [drawTransferPanel] 会按同一个幅度给卡上/卡下两行文字留间距 —— 改这里要一起改。
         val cardBob = breathePhase() * cardRect.height() * PHOTO_BREATHE_FRAC
+
+        // "发送进行程度" 0..1：**松手确认发送那一刻**才从 0 开始涨，飞行末尾到 1（见 [sendBlurP]）。
+        // 高亮、粒子两件全吃它 —— 它们的归属是"确认发送"这个**事件**，而不是拖动行程。
+        // 上滑到顶但没松手时它恒为 0：照片是清晰原图，一颗粒子都不冒。
+        val sendP = sendBlurP()
+        val sendLit = sendP
+
+        // 发送中的粒子：图片开始收缩之后，从残影下缘及其**后方**冒出来的一层，画在卡片之前
+        // （先画的在下面），所以卡片飞上去时压住的那几颗会被自然遮住。
+        //
+        // 传给粒子层的是**图片当前的状态**（中心 / 下缘 / 半宽 / 高，都含上绕中心的入场缩放
+        // 与拖动位移）和**运动进度** [flyT]：什么时候开始发、什么时候停发由粒子层按这个进度
+        // 决定，落点则是粒子层在自己出生的时刻回头查图片轨迹 —— 所以发射源是跟着图片一起走的，
+        // 不是固定在屏幕某个坐标上。还没松手（!flying）时进度给 0：一颗都不发。
+        //
+        // alpha 给的是 [fadeRaw]（入场那一记淡入）而**不是**卡片自己的 alpha：卡片收尾会淡到 0，
+        // 粒子却要活到它消失**之后**再自己慢慢散。
+        val cardBottomNow = cardRect.centerY() + offsetY + cardBob +
+                (shapeRect.bottom - cardRect.centerY()) * scale
+        senderParticles.draw(
+            c = c,
+            timeMs = elapsed.toFloat(),
+            progress = if (flying) flyT else 0f,
+            centerX = cardRect.centerX(),
+            bottom = cardBottomNow,
+            // shapeRect 本身是**没缩放**的轮廓，当前实际半宽/高要乘上那记绕中心的缩放
+            halfWidth = shapeRect.width() * 0.5f * scale,
+            height = shapeRect.height() * scale,
+            // 出生区间的尺子用**没有被动画改过**的静态卡片宽度（cardRect 不含 offsetY/缩放）
+            staticWidth = cardRect.width(),
+            alpha = fadeRaw,
+            viewW = viewW,
+            viewH = viewH,
+            k = k
+        )
+
+        if (flying) {
+            // 卡片的淡出 = 接收端 reveal 的反向：接收端那记"一闪到位"是 smooth(20ms, 100ms,
+            // 下落进度)，倒过来就是"最后 45ms 才淡掉" —— 前 82% 的飞行里卡片是**实心**的，
+            // 一路收小、升到顶，到顶才消失（用户："不断变小然后飞到顶部消失"）。
+            // 窗口取接收端那一记的**同一组比例**（20/570 → 100/570），所以飞行总时长怎么变，
+            // 两边永远严格镜像。
+            // **注意单位**：[flyT] 是 0..1 的归一化值，而窗口是按毫秒算的 —— 必须先把
+            // flyT 乘回毫秒再比。（这里曾经直接拿毫秒窗口去比 0..1，p 恒为负被 clamp 成 0，
+            // 于是 alpha 全程不衰减：卡片飞到顶上就停在那儿不消失。）
+            val flyMs = receiverRenderer.fallRealMs()
+            val flyMsNow = flyT * flyMs
+            alpha *= (1f - smooth(flyMs * 0.8246f, flyMs * 0.9649f, flyMsNow)).coerceIn(0f, 1f)
+        }
+
+        // 卡片淡没了就收工 —— 粒子已经在上面画完了，不受这一句影响。
+        if (alpha <= 0.003f) return
+
         val save = c.save()
         c.translate(0f, cardBob)
         c.translate(cardRect.centerX(), cardRect.centerY() + offsetY)
@@ -2838,6 +2974,11 @@ class OverlayView @JvmOverloads constructor(
         // 我这枚 1px、α0.66 的白描边是多出来的，去掉才和 OPPO 一致。
         // [edgeStroke] 这个 Paint 还留着，想加回来一行就够。
 
+        // 【高亮·第一件】卡片**外面**那圈主色光晕 —— 必须画在**裁轮廓之前**，否则会被裁掉。
+        // 接收端拿 `1 - focus` 驱动它（下落时最亮、落定后消失）；发送端是反向动作，
+        // 所以用 [sendLit] 驱动：松手之后越飞越亮。
+        if (sendLit > 0.01f) drawSendHalo(c, shapeRect, sendLit)
+
         // 卡片里的东西画在**静止时的卡片矩形**里，再用 [contentMatrix] 整体映射到当前形状、
         // 并裁在轮廓里 —— 参考片也是填一个矩形再裁，内容不做梯形扭曲，只是被轮廓切掉。
         val contentSave = c.save()
@@ -2849,12 +2990,110 @@ class OverlayView @JvmOverloads constructor(
         // 任何相对位移都会在边缘露出卡片底色，所以这里必须是静止的矩形。
         val photo = RectF(cardRect.left, cardRect.top, cardRect.right, cardRect.bottom)
         val art = artworkBitmap(photo.width().toInt(), photo.height().toInt())
-        photoClip.alpha = (alpha * 255f).toInt().coerceIn(0, 255)
         // 圆角不在这里裁：内容整体裁在 [shapePath] 上，照片四角自然跟着卡片的轮廓圆角走。
-        c.drawBitmap(art, artSrc, photo, photoClip)
+        if (sendP <= 0.004f) {
+            // 还没上滑到发送位置：就是原来那一张，一个字节都不多画。
+            photoClip.colorFilter = null
+            photoClip.alpha = (alpha * 255f).toInt().coerceIn(0, 255)
+            c.drawBitmap(art, artSrc, photo, photoClip)
+        } else {
+            // 发送中的**高亮**（卡片不再模糊 —— 那两级糊层整段删掉了）。
+            // 高亮参数**逐字抄接收端**，只是把 [sendP] 当作它的 `1 - focus` 来用，
+            // 所以两边是同一条曲线倒着放（见 [SEND_BRIGHT_MAX]）。
+            val bright = lerp(1f, SEND_BRIGHT_MAX, sendP)
+            val sat = lerp(1f, SEND_SAT_MIN, sendP)
+            sendMatrix.setSaturation(sat)
+            sendMatrixScale.setScale(bright, bright, bright, 1f)
+            sendMatrix.postConcat(sendMatrixScale)
+
+            // 过曝全压在这一张**清晰**的图上（以前矩阵是挂在糊层上的：越糊的那层越亮）
+            photoClip.colorFilter = ColorMatrixColorFilter(sendMatrix)
+            photoClip.alpha = (alpha * 255f).toInt().coerceIn(0, 255)
+            c.drawBitmap(art, artSrc, photo, photoClip)
+
+            // 【高亮·第三件】卡片**上面**那层主色光罩（接收端 [ReceiverRenderer.drawWash] 同款）：
+            // 仍然裁在卡片轮廓里，压在照片之上 —— 和接收端层序一致。
+            if (sendLit > 0.01f) drawSendWash(c, photo, sendLit)
+
+            // 别把矩阵漏给下一帧的清晰路径（下一帧可能走上面那条 `sendP <= 0` 的分支）
+            photoClip.colorFilter = null
+        }
 
         c.restoreToCount(contentSave)
         c.restoreToCount(save)
+    }
+
+    /**
+     * **确认发送之后的进度** 0..1 —— 高亮三件套和粒子，这两件事的**唯一**驱动量。
+     *
+     * 归属是"松手"这个**事件**，不是拖动行程：只要还没松手（[flying] = false）就恒为 0 ——
+     * 卡片可以被你挤到最顶上，照片依然是一张干净的原图，也不会有光晕、光罩和粒子。
+     * 松手那一帧从 0 起涨，到飞行的 [SEND_BLUR_FULL] 处到位，之后保持到卡片消失。
+     *
+     * 名字里的 Blur 是历史遗留：它以前同时驱动模糊，而模糊已经整段删掉了（卡片不再模糊）。
+     *
+     * （曾经它挂在形变进度上：滑到 0.70 就开糊、0.60 就冒粒子 —— 于是"还没发就已经在放了"。）
+     */
+    private fun sendBlurP(): Float {
+        if (!flying) return 0f
+        return smooth(0f, SEND_BLUR_FULL, flyT)
+    }
+
+    /**
+     * 【高亮·第一件】卡片**外面**那圈主色光晕 —— 逐行对应接收端 [ReceiverRenderer.drawHalo]
+     * （圆半径、渐变的 0.30 断点、颜色推导、alpha 上限全都一样），只有驱动量不同：
+     * 接收端用 `1 - focus`，发送端用"发送进行程度" [sendBlurP]，也就是两端互为反向动作。
+     *
+     * 颜色取 [bloomTint] —— 那是同一张照片的主色（[PhotoTint.dominant] 算的，只在换图时重算），
+     * 所以这圈光和顶部那个凸起用的是同一枚颜色，卡片"带着自己的颜色"发光。
+     */
+    private fun drawSendHalo(c: Canvas, rect: RectF, lit: Float) {
+        val base = bloomTint ?: return
+        val cx = rect.centerX()
+        val cy = rect.centerY()
+        val r = maxOf(rect.width(), rect.height()) * 0.95f
+        if (r <= 0f) return
+        sendGlowPaint.reset()
+        sendGlowPaint.isAntiAlias = true
+        sendGlowPaint.shader = RadialGradient(
+            cx, cy, r,
+            intArrayOf(withAlpha(highlightOf(base), SEND_HALO_ALPHA * lit), withAlpha(base, 0f)),
+            floatArrayOf(0.30f, 1f),
+            Shader.TileMode.CLAMP
+        )
+        c.drawCircle(cx, cy, r, sendGlowPaint)
+        sendGlowPaint.shader = null
+    }
+
+    /**
+     * 【高亮·第三件】卡片**上面**那层主色光罩 —— 逐行对应接收端 [ReceiverRenderer.drawWash]
+     * （同样的竖直渐变、同样的 0.62/0.30 两端、同样的 0.42 上限）。
+     * 调用处已经裁在卡片轮廓里，所以光罩不会溢到卡片外面。
+     */
+    private fun drawSendWash(c: Canvas, rect: RectF, lit: Float) {
+        val base = bloomTint ?: return
+        sendWashPaint.reset()
+        sendWashPaint.isAntiAlias = true
+        sendWashPaint.shader = LinearGradient(
+            rect.left, rect.top, rect.left, rect.bottom,
+            intArrayOf(withAlpha(highlightOf(base), 0.62f), withAlpha(base, 0.30f)),
+            floatArrayOf(0f, 1f),
+            Shader.TileMode.CLAMP
+        )
+        sendWashPaint.alpha = (lit * SEND_WASH_ALPHA * 255f).toInt().coerceIn(0, 255)
+        c.drawRect(rect, sendWashPaint)
+        sendWashPaint.shader = null
+    }
+
+    /**
+     * 主色 → 高亮色，和接收端同名函数逐行一致：
+     * 明度提到接近满（`v*0.35 + 0.72`）、饱和再提一点（`s*1.05 + 0.18`）。
+     */
+    private fun highlightOf(base: Int): Int {
+        Color.colorToHSV(base, sendHsv)
+        sendHsv[1] = (sendHsv[1] * 1.05f + 0.18f).coerceIn(0f, 1f)
+        sendHsv[2] = (sendHsv[2] * 0.35f + 0.72f).coerceIn(0f, 1f)
+        return Color.HSVToColor(sendHsv)
     }
 
     private fun drawSwipeTip(c: Canvas, centerY: Float, alpha: Float) {
@@ -3093,6 +3332,7 @@ class OverlayView @JvmOverloads constructor(
                             }
                             invalidate()
                         }, 850L)
+                        // 事件层归我们：通知 NFC 层打开旧查看器 / 收起窗口
                         onReceiveAccepted?.invoke()
                     }
                 } else if (receiveSecondaryRect.contains(event.x, event.y)) {
@@ -3224,7 +3464,8 @@ class OverlayView @JvmOverloads constructor(
         flying = true
         flyAnimator?.cancel()
         flyAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
-            duration = FLY_MS
+            // 时长跟着接收端走：fallRealMs() = 接收端下落的真实时长，于是这张卡片收成 mini 卡片的那一趟与接收端落下来的一趟**咬合**
+            duration = receiverRenderer.fallRealMs().toLong()
             interpolator = LinearInterpolator()
             addUpdateListener {
                 flyT = it.animatedValue as Float
@@ -3274,6 +3515,17 @@ class OverlayView @JvmOverloads constructor(
     private fun smoothStep(t: Float): Float {
         val x = t.coerceIn(0f, 1f)
         return x * x * (3f - 2f * x)
+    }
+
+    /**
+     * 接收端同名辅助函数的翻版（见 [ReceiverRenderer.smooth]）：把 v 在 [a, b] 区间上
+     * 平滑映射到 0..1。发送端这套"高亮"的时间曲线要和接收端逐行对得上，
+     * 所以连这个函数也照抄，方便两边并排比对。
+     */
+    private fun smooth(a: Float, b: Float, v: Float): Float {
+        if (b <= a) return if (v <= a) 0f else 1f
+        val p = ((v - a) / (b - a)).coerceIn(0f, 1f)
+        return p * p * (3f - 2f * p)
     }
 
     private fun withAlpha(color: Int, alpha: Float): Int =
