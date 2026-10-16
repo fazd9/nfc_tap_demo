@@ -727,6 +727,22 @@ class OverlayView @JvmOverloads constructor(
         /** 发送收尾时卡片再上浮多少（参考 px，250）—— 一边收成一个点一边往上走。 */
         const val FLY_RISE_REF_PX = 250f
 
+        // 同步自 D:\A17\NFCTouchDemo 动效主线：上滑行程倍率（本文件此前一直用参考片原值）。
+        /**
+         * 上滑时**整块（卡片 + 两行文字）向上走的距离倍率**：`1` = 参考片原值。
+         *
+         * 参考片的行程（[CARD_KEYS] 的 KEY_TOP/KEY_BOTTOM 中点）：卡片中心 703 → 477.5 ref px，
+         * 也就是 119 设计px；走到"松手必发"（[SEND_PROGRESS] = 0.70）那个刻度时是 94 设计px。
+         *
+         * 这里是**只放大位移、不动关键帧表** —— 形变的形状、压缩比例仍照参考片，
+         * 而且卡片中心和两行文字乘的是同一个倍率（刚性平移），所以
+         * 「发送给 xxx」到卡顶、卡片底到上滑提示的间距**全程不变**。
+         * 静止（没拖动）时位移为 0，所以不拖动时的版面完全不受影响。
+         *
+         * 想回到参考片的原始行程就改回 `1`；想更夸张就继续加。
+         */
+        const val LIFT_GAIN = 1.5f
+
         const val SIDE_TOP = 0
         const val SIDE_BOTTOM = 1
         const val SIDE_LEFT = 2
@@ -925,6 +941,19 @@ class OverlayView @JvmOverloads constructor(
     /** 接收态按下的是哪一枚按钮（[BUTTON_NONE] = 没按中 / 已经抬起）。 */
     private var pressedButton = BUTTON_NONE
 
+    /**
+     * 接收端的卡片 / 按钮 / 粒子：整页交给他画（规格见 [ReceiverRenderer]，来自
+     * oppo_receiver_animation_demo_v6.html）。落位仍然用发送端版面算出来的 [cardRect]，
+     * 所以"卡片与上面那行字的间距"两边完全一致；每帧由 [drawTransferPanel] 算一次。
+     */
+    private val receiverRenderer = ReceiverRenderer()
+
+    /** 本帧渲染器算出来的几何（**设计空间**，380 宽；取用时要乘 [k]）。 */
+    private var receiverFrame: ReceiverRenderer.Frame? = null
+
+    /** 底部那条提示（正在接收 / 已接收 / 已拒绝）；空串就不画。 */
+    private var receiverToast = ""
+
     //pri added by zhuyang,E4: receiving state - the two pills crossfade into one cancel pill,20261014,start
     private var acceptInProgress = false
     private var cancelMix = 0f //pri added by zhuyang,0 = two pills, 1 = cancel pill only,20261014
@@ -942,7 +971,7 @@ class OverlayView @JvmOverloads constructor(
 
     /**
      * 切换动效页的身份。[Mode.RECEIVE] 时不再画「上滑发送」提示、上滑手势一并禁用，
-     * 改成卡片下面两个按钮（见 [drawReceiveActions]）。
+     * 改成卡片下面两个按钮（由 [ReceiverRenderer.drawActions] 画，见 [layoutReceiveActions]）。
      */
     fun setMode(mode: Mode) {
         this.mode = mode
@@ -954,6 +983,8 @@ class OverlayView @JvmOverloads constructor(
     }
 
     //pri added by zhuyang,E4: enter/leave the receiving state (two pills crossfade into one cancel pill),20261014,start
+    // 同步自主线接收端：那枚「取消」胶囊已撤掉（接收后两枚按钮自己淡出、没有取消入口），
+    // 所以这里的 [cancelMix] 目前不影响画面；接口与服务层的调用都保留，方便要回 E4 时接上。
     fun setAcceptInProgress(v: Boolean) {
         if (acceptInProgress == v) return
         acceptInProgress = v
@@ -1233,7 +1264,7 @@ class OverlayView @JvmOverloads constructor(
         var bwR = cardKey(t, KEY_BW) / cardKey(0f, KEY_BW)
         var centerY = cardRect.centerY() +
                 ((cardKey(t, KEY_TOP) + cardKey(t, KEY_BOTTOM)) / 2f -
-                        (cardKey(0f, KEY_TOP) + cardKey(0f, KEY_BOTTOM)) / 2f) * rs
+                        (cardKey(0f, KEY_TOP) + cardKey(0f, KEY_BOTTOM)) / 2f) * rs * LIFT_GAIN
 
         if (flying) {
             // 发送收尾：原地收成一个点，同时再上浮 [FLY_RISE_REF_PX]（参考片的「继续飞出」）
@@ -1263,8 +1294,9 @@ class OverlayView @JvmOverloads constructor(
         // 内容**不做梯形扭曲**，只是被轮廓裁掉 —— 参考片也是填一个矩形再裁
         contentMatrix.setRectToRect(cardRect, contentRect, Matrix.ScaleToFit.FILL)
 
-        recvShiftY = (cardKey(t, KEY_RY) - cardKey(0f, KEY_RY)) * rs
-        tipShiftY = (cardKey(t, KEY_TIP) - cardKey(0f, KEY_TIP)) * rs
+        // 两行文字的位移跟卡片中心乘**同一个倍率**（[LIFT_GAIN]），三者的间距才全程不变。
+        recvShiftY = (cardKey(t, KEY_RY) - cardKey(0f, KEY_RY)) * rs * LIFT_GAIN
+        tipShiftY = (cardKey(t, KEY_TIP) - cardKey(0f, KEY_TIP)) * rs * LIFT_GAIN
         recvAlpha = receiverAlphaOf(p)
     }
 
@@ -1355,7 +1387,12 @@ class OverlayView @JvmOverloads constructor(
     private var receiveRejectText = context.getString(R.string.receive_reject)
 
     //pri added by zhuyang,E4: label of the single pill shown while the receiving state is in progress,20261014
+    // 同步自主线接收端：这枚「取消」胶囊已按主线做法撤掉（接收后两枚按钮自己淡出、没有取消入口），
+    // 字段与 [setAcceptInProgress] 都留着 —— 想要回去时不用重新找一遍。
     private var receiveCancelText = context.getString(R.string.receive_cancel)
+
+    /** 「已接收」提示条：有真实张数就用带张数那句，否则退回主线写死"1 张"的 [ReceiverRenderer.TOAST_ACCEPTED]。 */
+    private var receiveToastAcceptedText = ReceiverRenderer.TOAST_ACCEPTED
 
     /**
      * 发送页要不要用 NFC 层给过来的对端标识 / 张数改写文案。
@@ -1404,6 +1441,14 @@ class OverlayView @JvmOverloads constructor(
         }
         receiveRejectText = context.getString(R.string.receive_reject)
         receiveCancelText = context.getString(R.string.receive_cancel) //pri added by zhuyang,E4: cancel pill label,20261014
+        // 同步自主线接收端：主按钮那一行字现在由 [ReceiverRenderer] 画（它自带的是写死"1 张"的主线文案），
+        // 所以把按**真实张数**算出来的这一句交给它；「已接收」提示条同理，张数未知时退回主线那句。
+        receiverRenderer.acceptLabel = receiveAcceptText
+        receiveToastAcceptedText = if (peerCount > 0) {
+            context.getString(R.string.receive_toast_accepted_count, peerCount)
+        } else {
+            ReceiverRenderer.TOAST_ACCEPTED
+        }
     }
 
     /**
@@ -2667,11 +2712,37 @@ class OverlayView @JvmOverloads constructor(
         val cardTop = top + infoH
         cardRect.set(viewW / 2f - cardW / 2f, cardTop, viewW / 2f + cardW / 2f, cardTop + cardH)
 
+        // 接收端：卡片的位置与形状不吃 layoutCard 那一套，按 v6 的「小椭圆落下 → 长大 →
+        // 展开成圆角矩形」单独算一次（见 [ReceiverRenderer]）。**落点就是上面版面算出来的
+        // [cardRect]**，所以"卡片与上面那行字的间距"和发送端完全一致；落定后的呼吸也沿用
+        // 发送端那一枚相位。放在 layoutCard() 之前：那时候 cardRect 还是干净的版面矩形。
+        receiverFrame = if (mode == Mode.RECEIVE) {
+            // 面板时间轴回到入场段 = 上一轮结束了：把上一轮的选择与提示清干净
+            if (panelElapsed < Timeline.PANEL_MS) {
+                receiverRenderer.reset()
+                receiverToast = ""
+            }
+            receiverRenderer.compute(
+                elapsedMs = panelElapsed,
+                cardStartMs = (Timeline.PANEL_MS + CARD_DELAY_MS).toLong(),
+                viewW = viewW / k,
+                viewH = viewH / k,
+                endLeft = cardRect.left / k,
+                endTop = cardRect.top / k,
+                endRight = cardRect.right / k,
+                endBottom = cardRect.bottom / k,
+                endRadius = CARD_RADIUS_DP,
+                // 发送端那枚整卡呼吸：幅度 = 卡高 × PHOTO_BREATHE_FRAC，收到势走完才渐入
+                bobY = breathePhase() * (cardH / k) * PHOTO_BREATHE_FRAC,
+                rowCenterY = (cardTop + cardH + tipGap + tailH / 2f) / k
+            )
+        } else null
+
         // 卡片形变（拖动 / 飞走）先算一次：轮廓、内容映射、两行文字的位移都吃它
         layoutCard()
 
-        // 接收态：按钮的几何每帧在这里算一次（只跟 cardRect 有关），
-        // 触摸命中判定调的是同一个函数 —— 画在哪就点得到哪（见 [layoutReceiveActions]）。
+        // 接收态：按钮矩形取自渲染器算出来的那一份（E4 的取消胶囊也落在次按钮槽上，
+        // 所以绘制与命中判定仍然共用 [receivePrimaryRect] / [receiveSecondaryRect]）。
         if (mode == Mode.RECEIVE) {
             layoutReceiveActions()
         }
@@ -2679,23 +2750,43 @@ class OverlayView @JvmOverloads constructor(
         // 面板整体上浮 8px，与卡片自身的入场位移叠加
         val save = c.save()
         c.translate(0f, slide)
-        // 接收方信息：位置照参考片的 ry 走 —— 卡片被挤扁时它**向上让开**；
-        // alpha 照参考片的分段曲线（前 30% 一动不动、52% 到 0.56、70% 归零），
-        // 而 70% 正好又是"松手必发"的刻度 —— 那行字没了 = 一定发得出去。
-        if (textAlpha * recvAlpha > 0.003f) {
-            drawReceiverInfo(
-                c, top + lineH / 2f + recvShiftY - (fm1.ascent + fm1.descent) / 2f,
-                fm1, lineH, textAlpha * recvAlpha
-            )
-        }
-        drawCard(c)
-        // 上滑提示：参考片里它**不淡出**，只是升到卡片底部行程的 47%（2.8s 之后停住）——
-        // 所以 alpha 只吃面板的 textAlpha，淡出那一份不再往上乘。
         if (mode == Mode.RECEIVE) {
-            // 接收态：原来「上滑发送」那一行换成两个按钮，淡入跟面板进度（appear）
-            if (textAlpha > 0.003f) drawReceiveActions(c, appear)
-        } else if (textAlpha > 0.003f) {
-            drawSwipeTip(c, cardTop + cardH + tipGap + tipH / 2f + tipShiftY, textAlpha)
+            // 接收端：卡片 + 落光柱 + 落地闪光 + 粒子尾迹 + 两个按钮，一把交给渲染器
+            // （层序照 v6：光晕 → 卡片 → 粒子，闪光/白洗都在 drawCard 里面）。
+            val f = receiverFrame
+            if (f != null) {
+                receiverRenderer.drawCard(c, f, cardPhoto, k, viewW / k, viewH / k)
+                receiverRenderer.drawActions(c, f, k, viewW / k)
+                // 接收后的反馈照主线来：两枚按钮自己淡出 + 卡片轻放大（不再交叉淡入成「取消」胶囊）
+            }
+            // 信息行画在卡片**之上**：照片是从屏幕顶上落下来的，途中必然经过这一行，
+            // 压在下面就会被"吃掉"半个字。落定之后的间距仍然就是卡片的 infoGap。
+            if (textAlpha * recvAlpha > 0.003f) {
+                drawReceiverInfo(
+                    c, top + lineH / 2f + recvShiftY - (fm1.ascent + fm1.descent) / 2f,
+                    fm1, lineH, textAlpha * recvAlpha
+                )
+            }
+            // v6 的提示条画在 84.5% 高度，我们的底部状态行在 46dp 处，两者不重叠
+            if (receiverToast.isNotEmpty()) {
+                receiverRenderer.drawToast(c, k, viewW / k, viewH / k, receiverToast)
+            }
+        } else {
+            // 接收方信息：位置照参考片的 ry 走 —— 卡片被挤扁时它**向上让开**；
+            // alpha 照参考片的分段曲线（前 30% 一动不动、52% 到 0.56、70% 归零），
+            // 而 70% 正好又是"松手必发"的刻度 —— 那行字没了 = 一定发得出去。
+            if (textAlpha * recvAlpha > 0.003f) {
+                drawReceiverInfo(
+                    c, top + lineH / 2f + recvShiftY - (fm1.ascent + fm1.descent) / 2f,
+                    fm1, lineH, textAlpha * recvAlpha
+                )
+            }
+            drawCard(c)
+            // 上滑提示：参考片里它**不淡出**，只是升到卡片底部行程的 47%（2.8s 之后停住）——
+            // 所以 alpha 只吃面板的 textAlpha，淡出那一份不再往上乘。
+            if (textAlpha > 0.003f) {
+                drawSwipeTip(c, cardTop + cardH + tipGap + tipH / 2f + tipShiftY, textAlpha)
+            }
         }
         c.restoreToCount(save)
 
@@ -2883,93 +2974,47 @@ class OverlayView @JvmOverloads constructor(
     // ---------------------------------------------------------- 3b. 接收确认页（变体）
 
     /**
-     * 算接收态两个按钮的位置（设计 px × k）—— **绘制和触摸命中判定共用的唯一一份几何**。
+     * 把 [ReceiverRenderer] 算好的两枚按钮矩形，从**设计空间**（380 宽）换算成屏幕 px ——
+     * **绘制和触摸命中判定共用的唯一一份几何**。
      *
-     * 输入只有两样：面板算好的 [cardRect]（宽高、左右边界）和卡片下沿那口气
-     * [RECEIVE_TAIL_GAP_PX]（= 面板里 tipGap 的 18f）。[drawTransferPanel] 每帧调一次，
+     * [drawTransferPanel] 每帧调一次（在渲染器算完 [receiverFrame] 之后），
      * [onReceiveTouch] 判命中之前也调一次 —— 同一个输入、同一个函数，画在哪就能点到哪。
      *
-     * 摆法：**主按钮在上、占满卡片宽；次按钮在它下面、同样占满卡片宽**（竖着摞）。
-     * 卡片是 292 × 360 设计 px、圆角 23，而这一行原来的「上滑发送」提示只有 25.6 高 ——
-     * 两个按钮竖着摞（48 + 10 + 40）正好把这一行撑成一个和卡片同宽的按钮组：
-     * 左右和卡片对齐，一眼就是"这张卡片的两个动作"，也比并排两个窄按钮好按。
+     * 摆法（v6）：**主按钮在上、次按钮在它下面**，两枚都是居中的胶囊
+     * （主 245 × 45、次 236 × 46、间距 16，合起来就是 [receiveActionsHeight] 那一行的 107 高）。
+     * E4 的「取消」胶囊复用次按钮那一枚矩形，所以它换上去的位置就是原来的位置。
      */
     private fun layoutReceiveActions() {
-        val w = cardRect.width()
-        if (w <= 0f) {
+        // 几何现在由 [ReceiverRenderer] 算（v6 的主 245×45 / 次 236×46、间距 16），
+        // 这里只是把它给的那份**设计空间**矩形换算成屏幕 px —— 绘制与命中判定仍然共用同一份。
+        val f = receiverFrame
+        if (f == null || f.primary.width() <= 0f) {
             receivePrimaryRect.setEmpty()
             receiveSecondaryRect.setEmpty()
             return
         }
-        val left = cardRect.left
-        val right = left + w
-        val top = cardRect.bottom + RECEIVE_TAIL_GAP_PX * k
-        val primaryH = RECEIVE_PRIMARY_H_PX * k
-        val gap = RECEIVE_BTN_GAP_PX * k
-        val secondaryH = RECEIVE_SECONDARY_H_PX * k
-        receivePrimaryRect.set(left, top, right, top + primaryH)
-        receiveSecondaryRect.set(left, top + primaryH + gap, right, top + primaryH + gap + secondaryH)
+        receivePrimaryRect.set(
+            f.primary.left * k, f.primary.top * k,
+            f.primary.right * k, f.primary.bottom * k
+        )
+        receiveSecondaryRect.set(
+            f.secondary.left * k, f.secondary.top * k,
+            f.secondary.right * k, f.secondary.bottom * k
+        )
     }
-
-    /** 接收态按钮区的总高度（面板排版用）：和 [layoutReceiveActions] 是同一组常量。 */
-    private fun receiveActionsHeight(): Float =
-        (RECEIVE_PRIMARY_H_PX + RECEIVE_BTN_GAP_PX + RECEIVE_SECONDARY_H_PX) * k
 
     /**
-     * 接收态的两个按钮：主按钮（浅色底 + 深色字）在上、次按钮（深灰半透明底 + 浅灰字）在下。
-     *
-     * 圆角矩形复用卡片那枚 [cardPaint]，文字复用 [textPaint]（字重取标题那档 [bold]、
-     * 字号 15 设计 px，和 16 的接收方信息、12 的卡片标题同一档量级）。
-     * 淡入跟的是**面板进度** [appear]（= [panelAppearAt]，和卡片 / 白线同一条时间轴）；
-     * 调用点在 `translate(0f, slide)` 里面，所以面板整体上浮时按钮跟着一起上浮。
-     *
-     * 按下的那一枚压深一档底色，给一个"按到了"的反馈（[pressedButton] 由 [onReceiveTouch] 维护）。
+     * 接收态按钮区的总高度（面板排版用）：现在就是 [ReceiverRenderer] 那一行的行高
+     * （主 45 + 间距 16 + 次 46 = 107 设计 px），落位与两枚按钮的矩形都由渲染器算，
+     * 这里只报"这一行占多高"，让版面把卡片落在两个按钮上方。
      */
-    //pri modify by zhuyang,E4: the lower pill (reject / cancel) is a dark scrim now, not the old light fill,20261014
-    private fun drawReceiveActions(c: Canvas, appear: Float) {
-        if (appear <= 0.003f) return
-        if (receivePrimaryRect.width() <= 0f) return
-        val r = RECEIVE_BTN_R_PX * k
-        //pri added by zhuyang,E4: while accepting, the two pills fade out by (1 - cancelMix),20261014
-        val pills = appear * (1f - cancelMix)
-        //pri added by zhuyang,E4: the scrim alpha rides on the fade factor (withAlpha() drops the colour's own alpha),20261014
-        val pillScrim =
-            if (pressedButton == BUTTON_SECONDARY) RECEIVE_PILL_SCRIM_PRESSED else RECEIVE_PILL_SCRIM
+    private fun receiveActionsHeight(): Float = ReceiverRenderer.ACTION_ROW_H * k
 
-        // 主按钮：浅色底（#EDF7FF），按下时压深一档
-        cardPaint.shader = null
-        cardPaint.color = withAlpha(
-            if (pressedButton == BUTTON_PRIMARY) 0xFFD7EAFB.toInt() else 0xFFEDF7FF.toInt(),
-            pills
-        )
-        c.drawRoundRect(receivePrimaryRect, r, r, cardPaint)
-
-        // 次按钮：深灰半透明底（#111923），按下时同样压深一档
-        //pri modify by zhuyang,E4: 0x14FFFFFF lost its alpha byte in withAlpha(), so the pill was drawn opaque white,20261014
-        cardPaint.color = withAlpha(0xFF111923.toInt(), pillScrim * pills)
-        c.drawRoundRect(receiveSecondaryRect, r, r, cardPaint)
-
-        // 文字：主按钮深色（#111923）、次按钮浅灰（#DDDDDD），都居中
-        textPaint.typeface = bold
-        textPaint.letterSpacing = 0f
-        textPaint.clearShadowLayer()
-        textPaint.textSize = 15f * k
-        textPaint.color = withAlpha(0xFF111923.toInt(), pills)
-        drawCenteredLabel(c, receivePrimaryRect, receiveAcceptText)
-        textPaint.color = withAlpha(0xFFDDDDDD.toInt(), pills)
-        drawCenteredLabel(c, receiveSecondaryRect, receiveRejectText)
-
-        //pri added by zhuyang,E4: single cancel pill drawn in the reject slot (same rect as its hit test),20261014,start
-        if (acceptInProgress && cancelMix > 0.003f) {
-            val one = appear * cancelMix
-            //pri modify by zhuyang,E4: same dark scrim as the reject pill (0x33FFFFFF was drawn opaque white),20261014
-            cardPaint.color = withAlpha(0xFF111923.toInt(), pillScrim * one)
-            c.drawRoundRect(receiveSecondaryRect, r, r, cardPaint)
-            textPaint.color = withAlpha(0xFFFFFFFF.toInt(), one)
-            drawCenteredLabel(c, receiveSecondaryRect, receiveCancelText)
-        }
-        //pri added by zhuyang,E4: single cancel pill drawn in the reject slot (same rect as its hit test),20261014,end
-    }
+    // 同步自主线接收端：这里原来是 E4 那枚「取消」胶囊（接收中把次按钮交叉淡入成"取消"，并把它
+    // 变成唯一可点目标）。按主线做法撤掉了 —— 接收后不再有取消入口，两枚按钮由
+    // [ReceiverRenderer.drawActions] 绘制、选过之后跟着 `f.actionAlpha` 自己淡出。
+    // [setAcceptInProgress] / [onReceiveCancel] 及其服务层接线都留着，只是暂时没有 UI 入口；
+    // 因此 RECEIVE_PILL_SCRIM(_PRESSED) / RECEIVE_BTN_R_PX 与 [drawCenteredLabel] 暂时没人读。
 
     /** 在一枚按钮矩形里居中画一行字（水平按测量宽度、垂直按 fontMetrics 校正）。 */
     private fun drawCenteredLabel(c: Canvas, r: RectF, text: String) {
@@ -3052,8 +3097,8 @@ class OverlayView @JvmOverloads constructor(
     /**
      * 接收态的触摸：只判两个按钮。
      *
-     * 几何取自 [layoutReceiveActions]（和 [drawReceiveActions] 用的是同一份矩形），
-     * 所以画出来的位置就是能点的位置。
+     * 几何取自 [layoutReceiveActions]（两枚按钮由 [ReceiverRenderer] 画，用的是同一份矩形），
+     * 所以画出来的位置就是能点的位置。可点时刻见 [ReceiverRenderer.actionsEnabled]。
      * - `ACTION_DOWN` 记下按中的是哪一枚（两枚都没中 → 返回 false，不吃无关的触摸）；
      * - `ACTION_UP` 时**还在同一枚矩形里**才回调（按下主按钮、抬到次按钮上不算）；
      * - `ACTION_MOVE` / `ACTION_CANCEL` 只维护按下状态，不触发任何回调。
@@ -3065,17 +3110,21 @@ class OverlayView @JvmOverloads constructor(
         if (elapsed < Timeline.PANEL_MS) return false
         // 触摸可能先于第一帧到来：按同一套几何补算一次，保证判定用的矩形就是将要画出来的那两个
         layoutReceiveActions()
+        // 可点时刻跟 v6 走：卡片进场 800ms 之后（见 [ReceiverRenderer.actionsEnabled]）；
+        // 选过一次（接收或拒绝）之后就再也点不动 —— 那时两枚按钮正在自己淡出。
+        if (!receiverRenderer.actionsEnabled(
+                panelElapsed, (Timeline.PANEL_MS + CARD_DELAY_MS).toLong()
+            )
+        ) return false
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
-                //pri modify by zhuyang,E4: while accepting, the cancel pill in the secondary slot is the only live target,20261014,start
+                // 同步自主线接收端：不再有"接收中 = 次槽变成取消胶囊"这一档，
+                // 两枚按钮就是它们自己的样子（E4 的 [acceptInProgress] 已不参与命中判定）。
                 pressedButton = when {
-                    acceptInProgress && receiveSecondaryRect.contains(event.x, event.y) -> BUTTON_SECONDARY
-                    acceptInProgress -> BUTTON_NONE
                     receivePrimaryRect.contains(event.x, event.y) -> BUTTON_PRIMARY
                     receiveSecondaryRect.contains(event.x, event.y) -> BUTTON_SECONDARY
                     else -> BUTTON_NONE
                 }
-                //pri modify by zhuyang,E4: while accepting, the cancel pill in the secondary slot is the only live target,20261014,end
                 if (pressedButton == BUTTON_NONE) return false
                 parent?.requestDisallowInterceptTouchEvent(true)
                 invalidate()
@@ -3090,12 +3139,24 @@ class OverlayView @JvmOverloads constructor(
                 pressedButton = BUTTON_NONE
                 parent?.requestDisallowInterceptTouchEvent(false)
                 if (pressed == BUTTON_PRIMARY) {
-                    if (receivePrimaryRect.contains(event.x, event.y)) onReceiveAccepted?.invoke()
-                } else {
-                    //pri modify by zhuyang,E4: the secondary slot reports cancel while accepting, reject otherwise,20261014
-                    if (receiveSecondaryRect.contains(event.x, event.y)) {
-                        if (acceptInProgress) onReceiveCancel?.invoke() else onReceiveRejected?.invoke()
+                    if (receivePrimaryRect.contains(event.x, event.y)) {
+                        // v6 的接收反馈：卡片轻放大 + 两枚按钮淡出，提示先「正在接收」再「已接收」
+                        receiverRenderer.accept(panelElapsed)
+                        receiverToast = ReceiverRenderer.TOAST_RECEIVING
+                        postDelayed({
+                            if (receiverToast == ReceiverRenderer.TOAST_RECEIVING) {
+                                receiverToast = receiveToastAcceptedText
+                            }
+                            invalidate()
+                        }, 850L)
+                        onReceiveAccepted?.invoke()
                     }
+                } else if (receiveSecondaryRect.contains(event.x, event.y)) {
+                    // 次按钮恒为「拒绝」（E4 那枚"接收中变取消"的胶囊已按主线做法撤掉；
+                    // [onReceiveCancel] 与其服务层接线保留着，只是当前没有 UI 入口）
+                    receiverRenderer.reject(panelElapsed)
+                    receiverToast = ReceiverRenderer.TOAST_REJECTED
+                    onReceiveRejected?.invoke()
                 }
                 invalidate()
                 return true
