@@ -30,6 +30,10 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.WindowInsets
 import android.view.WindowManager
+//pri modify by chenpengqi,Gesture-nav Back path: register a real OnBackInvokedCallback on the animation window, so the system hands the gesture to this window instead of resolving it as "return to home" behind it,20261016,start
+import android.window.OnBackInvokedCallback
+import android.window.OnBackInvokedDispatcher
+//pri modify by chenpengqi,Gesture-nav Back path: register a real OnBackInvokedCallback on the animation window, so the system hands the gesture to this window instead of resolving it as "return to home" behind it,20261016,end
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
@@ -107,6 +111,17 @@ class OverlayService : Service() {
 
     /** 窗口是否已经挂上（[ACTION_HIDE] 之后仍然留着视图树）。 */
     private var attached = false
+
+    //pri modify by chenpengqi,Gesture-nav Back path: the callback currently registered on the window's OnBackInvokedDispatcher, kept so touch-through and detach can take it back,20261016,start
+    private var backCallback: OnBackInvokedCallback? = null
+    //pri modify by chenpengqi,Gesture-nav Back path: the callback currently registered on the window's OnBackInvokedDispatcher, kept so touch-through and detach can take it back,20261016,end
+
+    //pri modify by chenpengqi,Gesture-nav Back path: the edge swipe has to be read off the page because the system never hands it to this window - EdgeBackGestureHandler logs mAllowGesture=false whenever this window holds focus, on the old build exactly as on this one, so the swipe arrives here as plain touches,20261016,start
+    private var backEdgeDownX = 0f
+    private var backEdgeDownY = 0f
+    private var backEdgeArmed = false
+    private var backEdgeSwiped = false
+    //pri modify by chenpengqi,Gesture-nav Back path: the edge swipe has to be read off the page because the system never hands it to this window,20261016,end
 
     //pri added by zhuyang,Fail banner (D1) is a third, independent window with its own lifecycle,20261014,start
     //pri added by zhuyang,View of the banner window: built per show, dropped on hide, never part of the main tree,20261014
@@ -599,6 +614,84 @@ class OverlayService : Service() {
         overlay.resetSendState()
     }
 
+    //pri modify by chenpengqi,Gesture-nav Back path: keep the registration in step with "window attached and not touch-through",20261016,start
+    //pri modify by chenpengqi,The callback exists from API 33 on; below that the two key paths above stay the only way in,20261016
+    //pri modify by chenpengqi,Idempotent on purpose: attach, detach and the touch-through toggle all just call it,20261016
+    private fun syncBackCallback() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
+        val content = rootView ?: return
+        val want = attached && !touchThrough
+        val registered = backCallback
+        if (want && registered == null) {
+            val callback = OnBackInvokedCallback { dismissPage() }
+            val dispatcher = content.findOnBackInvokedDispatcher()
+            if (dispatcher == null) {
+                Log.w(TAG, "拿不到 OnBackInvokedDispatcher，返回手势仍走旧键通路")
+                return
+            }
+            dispatcher.registerOnBackInvokedCallback(OnBackInvokedDispatcher.PRIORITY_DEFAULT, callback)
+            backCallback = callback
+        } else if (!want && registered != null) {
+            backCallback = null
+            runCatching { content.findOnBackInvokedDispatcher()?.unregisterOnBackInvokedCallback(registered) }
+                .onFailure { Log.w(TAG, "反注册返回回调失败", it) }
+        }
+    }
+    //pri modify by chenpengqi,Gesture-nav Back path: keep the registration in step with "window attached and not touch-through",20261016,end
+
+    //pri modify by chenpengqi,Gesture-nav Back path: the other half of the same fix - the system panel refuses the edge swipe for this window, so the page reads it from its own touches and Back works whichever way the system decides,20261016,start
+    //pri modify by chenpengqi,The geometry follows what the panel itself uses on this device: 90px edge band, switch to back after 96px, mostly horizontal travel; written as a share of the width so it holds on another panel,20261016
+    //pri modify by chenpengqi,On a ROM that keeps the gesture the system takes the swipe over halfway and sends ACTION_CANCEL, which disarms this path, so one swipe never fires both halves,20261016
+    //pri modify by chenpengqi,Only gesture navigation counts: under the three-button bar an edge swipe means nothing and must stay a plain touch,20261016
+    //pri modify by chenpengqi,An edge DOWN has to be consumed here: this listener sits on the page view and the page answers false for a DOWN outside its card and buttons, so without that the gesture has no touch target in this window and no MOVE / UP ever arrives,20261016
+    private fun handleBackEdgeTouch(event: MotionEvent): Boolean {
+        val navMode = Settings.Secure.getInt(contentResolver, "navigation_mode", -1)
+        val width = (rootView?.width ?: 0).toFloat()
+        if (navMode != 2) return false
+        if (width <= 0f) return false
+        val band = width * BACK_EDGE_BAND
+        val mine = backEdgeArmed || backEdgeSwiped
+        when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> {
+                backEdgeDownX = event.x
+                backEdgeDownY = event.y
+                backEdgeArmed = event.x <= band || event.x >= width - band
+                backEdgeSwiped = false
+            }
+
+            MotionEvent.ACTION_MOVE -> {
+                if (backEdgeArmed && !backEdgeSwiped) {
+                    val dx = event.x - backEdgeDownX
+                    val dy = event.y - backEdgeDownY
+                    val inward = if (backEdgeDownX <= band) dx else -dx
+                    if (inward >= width * BACK_EDGE_MIN_TRAVEL && abs(dx) > abs(dy) * BACK_EDGE_FLATNESS) {
+                        backEdgeSwiped = true
+                    }
+                }
+            }
+
+            MotionEvent.ACTION_UP -> {
+                val back = backEdgeArmed && backEdgeSwiped
+                backEdgeArmed = false
+                backEdgeSwiped = false
+                if (back) {
+                    Log.i(TAG, "边缘内滑识别为返回：收起动效页")
+                    dismissPage()
+                    return true
+                }
+            }
+
+            MotionEvent.ACTION_CANCEL -> {
+                backEdgeArmed = false
+                backEdgeSwiped = false
+            }
+        }
+        // 边缘带里那一下必须由我们认领：页面自己对这个 DOWN 答 false，
+        // 没人在这个窗口里认领它，后面的 MOVE / UP 就一概不会再派发过来。
+        return mine || backEdgeArmed || backEdgeSwiped
+    }
+    //pri modify by chenpengqi,Gesture-nav Back path: the other half of the same fix,20261016,end
+
     //pri added by zhuyang,Change 2: the page gives way when the top task changes (Home / Recents), as FunnyWindowService does,20261014,start
     //pri added by zhuyang,Fired by TaskStackWatcher on a binder thread: read the setting and touch the view tree on the main thread,20261014
     private fun onTopTaskChanged() {
@@ -675,6 +768,9 @@ class OverlayService : Service() {
         // 接收页的两个按钮
         overlay.onReceiveAccepted = { notifyNfc(ACTION_UI_RECEIVE_ACCEPT) }
         overlay.onReceiveRejected = { notifyNfc(ACTION_UI_RECEIVE_REJECT) }
+        //pri modify by chenpengqi,Gesture-nav Back path: read the edge swipe straight off the page, ahead of the send / receive touch handling below,20261016,start
+        overlay.setOnTouchListener { _, event -> handleBackEdgeTouch(event) }
+        //pri modify by chenpengqi,Gesture-nav Back path: read the edge swipe straight off the page,20261016,end
     }
 
     /** 把视图树挂上窗口并铺满屏幕。 */
@@ -694,6 +790,10 @@ class OverlayService : Service() {
 
         //pri added by zhuyang,Take view focus for key path 1 of the exit path (the window itself is focusable, see buildWindowParams),20261014
         content.requestFocus()
+
+        //pri modify by chenpengqi,Gesture-nav Back path: register on the freshly attached window - the dispatcher only exists while the view is in a window,20261016,start
+        syncBackCallback()
+        //pri modify by chenpengqi,Gesture-nav Back path: register on the freshly attached window - the dispatcher only exists while the view is in a window,20261016,end
 
         // GL 的 onResume 要等视图真的挂上窗口，否则 surface 拿不到
         rippleView.onResume()
@@ -716,6 +816,9 @@ class OverlayService : Service() {
         if (!attached) return
         attached = false
         animating = false
+        //pri modify by chenpengqi,Gesture-nav Back path: unregister while the view is still in the window - after removeView the dispatcher is gone,20261016,start
+        syncBackCallback()
+        //pri modify by chenpengqi,Gesture-nav Back path: unregister while the view is still in the window - after removeView the dispatcher is gone,20261016,end
         timeline.stop()
         runCatching { rippleView.onPause() }
         runCatching { windowManager.removeView(content) }
@@ -851,6 +954,9 @@ class OverlayService : Service() {
             // 但不去动 WindowManager —— 否则同样是主线程 Fatal
             updateWindowLayout(view, params)
         }
+        //pri modify by chenpengqi,Gesture-nav Back path: touch-through takes the window out of key handling, so it must not keep the back gesture either,20261016,start
+        syncBackCallback()
+        //pri modify by chenpengqi,Gesture-nav Back path: touch-through takes the window out of key handling, so it must not keep the back gesture either,20261016,end
         // 动作文案要跟着换，所以重发一次通知
         ensureForeground()
     }
@@ -1193,6 +1299,12 @@ class OverlayService : Service() {
         //pri added by zhuyang,D1 fail banner: show the top banner window / take it down again,20261014,end
 
         const val ACTION_TOGGLE_TOUCH = "com.pri.nfctouchdemo.action.TOGGLE_TOUCH"
+
+        //pri modify by chenpengqi,Gesture-nav Back path: band, travel and shape of a back swipe, taken from the numbers the system panel itself uses on this device,20261016,start
+        private const val BACK_EDGE_BAND = 0.08f
+        private const val BACK_EDGE_MIN_TRAVEL = 0.09f
+        private const val BACK_EDGE_FLATNESS = 1.5f
+        //pri modify by chenpengqi,Gesture-nav Back path: band, travel and shape of a back swipe,20261016,end
 
         /** 退出常驻：真正停掉服务。 */
         const val ACTION_STOP = "com.pri.nfctouchdemo.action.STOP"

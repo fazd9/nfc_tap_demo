@@ -52,15 +52,18 @@
         android:name="android.hardware.wifi.direct"
         android:required="false" />
 
+    <!-- pri modify by chenpengqi,Gesture-nav Back never reached the animation window: no OnBackInvokedCallback was registered by this app, CoreBackPreview resolved the gesture against the activity underneath (BackNavigationInfo TYPE_RETURN_TO_HOME), and SystemUI's edge handler refuses the swipe for this focused overlay window (mAllowGesture=false - measured on the old build as well); opting in lets the window own Back,20261016,start -->
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"
+        android:enableOnBackInvokedCallback="true"
         android:fullBackupContent="@xml/backup_rules"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:supportsRtl="true"
         android:theme="@style/Theme.NFCTouchDemo">
+    <!-- pri modify by chenpengqi,Gesture-nav Back never reached the animation window: no OnBackInvokedCallback was registered by this app, CoreBackPreview resolved the gesture against the activity underneath (BackNavigationInfo TYPE_RETURN_TO_HOME), and SystemUI's edge handler refuses the swipe for this focused overlay window (mAllowGesture=false - measured on the old build as well); opting in lets the window own Back,20261016,end -->
 
         <!-- 启动页：动效演示 + 一碰互联入口 -->
         <activity
