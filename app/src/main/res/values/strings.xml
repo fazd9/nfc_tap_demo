@@ -81,6 +81,11 @@
     <string name="status_peer_transferring">对方已接收,传输中…</string>
     <!--pri added by zhuyang,Link liveness status lines (batch 2),20261017,end-->
 
+    <!--pri added by zhuyang,Byte-level progress status lines (batch 3): sender i/n + percent + speed; receiver MB,20261017,start-->
+    <string name="status_send_progress">正在发送 %1$d/%2$d · %3$d%% · %4$s</string>
+    <string name="status_recv_progress">正在接收 %1$s/%2$s MB</string>
+    <!--pri added by zhuyang,Byte-level progress status lines (batch 3): sender i/n + percent + speed; receiver MB,20261017,end-->
+
     <!--pri added by zhuyang,D5: in-app image viewer (replaces the Google Photos pager),20261014,start-->
     <string name="viewer_load_failed">图片加载失败</string>
     <string name="viewer_position">%1$d / %2$d</string>

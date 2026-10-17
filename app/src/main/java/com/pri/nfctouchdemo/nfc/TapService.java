@@ -484,6 +484,34 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         startService(OverlayService.hideIntent(this, OverlayService.DISSOLVE_MS)); //pri modify by zhuyang,E5: dissolve before detaching,20261014
     }
 
+    //pri added by zhuyang,Byte-level progress -> the existing status line (sender/receiver wording),20261017,start
+    @Override
+    public void onProgress(TransferProgress p) {
+        if (p == null || p.state != TransferProgress.STATE_TRANSFERRING || p.totalBytes <= 0) return;
+        if (mUserWantsSend && !mRoleYielded) {
+            int percent = (int) (p.transferredBytes * 100L / p.totalBytes);
+            String line = getString(R.string.status_send_progress,
+                    p.index, Math.max(p.total, p.index), Math.min(percent, 100), speedText(p.speedBps));
+            Bus.log("服务: " + line);
+            startService(OverlayService.statusIntent(this, line));
+        } else if (mReceiveShown && !mRejected) {
+            String line = getString(R.string.status_recv_progress,
+                    mbText(p.transferredBytes), mbText(p.totalBytes));
+            Bus.log("服务: " + line);
+            startService(OverlayService.statusIntent(this, line));
+        }
+    }
+
+    private static String mbText(long bytes) {
+        return String.format(java.util.Locale.US, "%.1f", bytes / 1048576.0);
+    }
+
+    private static String speedText(double bps) {
+        if (bps >= 1048576.0) return String.format(java.util.Locale.US, "%.1f MB/s", bps / 1048576.0);
+        return String.format(java.util.Locale.US, "%.0f KB/s", bps / 1024.0);
+    }
+    //pri added by zhuyang,Byte-level progress -> the existing status line (sender/receiver wording),20261017,end
+
     @Override
     public void onXferFailed(String why) {
         //pri modify by zhuyang,Receiver failures close the receive card and report instead of hanging,20261017,start
