@@ -86,6 +86,13 @@
     <string name="status_recv_progress">正在接收 %1$s/%2$s MB</string>
     <!--pri added by zhuyang,Byte-level progress status lines (batch 3): sender i/n + percent + speed; receiver MB,20261017,end-->
 
+    <!--pri added by zhuyang,Batch 4: partial failure summary + storage precheck rejection,20261017,start-->
+    <string name="transfer_summary">成功 %1$d 张，失败 %2$d 张</string>
+    <string name="fail_no_space">存储空间不足，需要 %1$s MB</string>
+    <string name="result_title_send">发送完成</string>
+    <string name="result_title_receive">接收完成</string>
+    <!--pri added by zhuyang,Batch 4: partial failure summary + storage precheck rejection,20261017,end-->
+
     <!--pri added by zhuyang,D5: in-app image viewer (replaces the Google Photos pager),20261014,start-->
     <string name="viewer_load_failed">图片加载失败</string>
     <string name="viewer_position">%1$d / %2$d</string>

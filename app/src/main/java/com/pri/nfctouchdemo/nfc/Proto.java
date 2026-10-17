@@ -29,6 +29,7 @@ public final class Proto {
     public static final int TYPE_DONE = 13;
     public static final int TYPE_DONE_ACK = 14;
     public static final int TYPE_CANCEL = 15;
+    public static final int TYPE_META_INFO = 16; //pri added by zhuyang,Batch 4: total byte count sent right after META for the storage precheck,20261017
     //pri added by zhuyang,Chunked delivery: per-file metadata, sequenced data chunks and an explicit completion handshake,20261017,end
 
     public static final int MAX_FRAME_LEN = 64 * 1024 * 1024;
@@ -41,6 +42,7 @@ public final class Proto {
     public static final int MAX_FILE_BEGIN_LEN = 4 * 1024;
     public static final int MAX_DONE_LEN = 64;
     public static final int MAX_CANCEL_LEN = 1024;
+    public static final int MAX_META_INFO_LEN = 128; //pri added by zhuyang,Batch 4: "n=<total>|b=<totalBytes>" fits easily,20261017
     //pri added by zhuyang,Per-type frame caps: an oversized LEN is rejected before any array is allocated,20261017,end
 
     public static final class Frame {
@@ -60,12 +62,15 @@ public final class Proto {
         public final String sid;
         public final String role;
         public final boolean hasPhotos;
+        //pri added by zhuyang,Batch 4: 16-hex bitmap of the image indices already verified by the receiver,20261017
+        public final String have;
 
-        Hello(int version, String sid, String role, boolean hasPhotos) {
+        Hello(int version, String sid, String role, boolean hasPhotos, String have) {
             this.version = version;
             this.sid = sid;
             this.role = role;
             this.hasPhotos = hasPhotos;
+            this.have = have;
         }
     }
 
@@ -87,12 +92,14 @@ public final class Proto {
         public final int total;
         public final long size;
         public final String mime;
+        public final String sha256; //pri added by zhuyang,Batch 4: lowercase SHA-256 of the image bytes (null = old peer, skip the check),20261017
 
-        FileBegin(int index, int total, long size, String mime) {
+        FileBegin(int index, int total, long size, String mime, String sha256) {
             this.index = index;
             this.total = total;
             this.size = size;
             this.mime = mime;
+            this.sha256 = sha256;
         }
     }
 
@@ -102,6 +109,17 @@ public final class Proto {
 
         Done(int count, long totalBytes) {
             this.count = count;
+            this.totalBytes = totalBytes;
+        }
+    }
+
+    //pri added by zhuyang,Batch 4: META_INFO payload used for the ACCEPT-time storage precheck,20261017
+    public static final class MetaInfo {
+        public final int total;
+        public final long totalBytes;
+
+        MetaInfo(int total, long totalBytes) {
+            this.total = total;
             this.totalBytes = totalBytes;
         }
     }
@@ -122,6 +140,7 @@ public final class Proto {
             case TYPE_DONE:
             case TYPE_DONE_ACK: return MAX_DONE_LEN;
             case TYPE_CANCEL: return MAX_CANCEL_LEN;
+            case TYPE_META_INFO: return MAX_META_INFO_LEN; //pri added by zhuyang,Batch 4: small text payload,20261017
             case TYPE_ROLE: return MAX_ROLE_LEN;
             case TYPE_HELLO:
             case TYPE_HELLO_ACK: return MAX_HELLO_LEN;
@@ -169,13 +188,25 @@ public final class Proto {
     }
 
     public static byte[] buildHello(String sid, String role, boolean hasPhotos) {
+        return buildHello(sid, role, hasPhotos, null);
+    }
+
+    //pri added by zhuyang,Batch 4: optional have= bitmap, omitted when empty so old peers parse the same frame,20261017
+    public static byte[] buildHello(String sid, String role, boolean hasPhotos, String have) {
         String s = "v=" + HELLO_VERSION + "|sid=" + sid + "|r=" + role
                 + "|hp=" + (hasPhotos ? "1" : "0");
+        if (have != null && !have.isEmpty()) s += "|have=" + have;
         return s.getBytes(StandardCharsets.UTF_8);
     }
 
     public static byte[] buildHelloAck(String sid, String role) {
+        return buildHelloAck(sid, role, null);
+    }
+
+    //pri added by zhuyang,Batch 4: the accepting side advertises its completed bitmap too,20261017
+    public static byte[] buildHelloAck(String sid, String role, String have) {
         String s = "v=" + HELLO_VERSION + "|sid=" + sid + "|r=" + role;
+        if (have != null && !have.isEmpty()) s += "|have=" + have;
         return s.getBytes(StandardCharsets.UTF_8);
     }
 
@@ -212,6 +243,7 @@ public final class Proto {
         String sid = null;
         String role = null;
         boolean hp = false;
+        String have = null;
         String text = new String(data, StandardCharsets.UTF_8);
         for (String kv : text.split("\\|")) {
             int eq = kv.indexOf('=');
@@ -230,15 +262,57 @@ public final class Proto {
                 role = v;
             } else if ("hp".equals(k)) {
                 hp = "1".equals(v);
+            } else if ("have".equals(k)) {
+                //pri added by zhuyang,Batch 4: a malformed bitmap is treated as absent, never as an auth failure,20261017
+                have = normalizeBitmap(v);
+                if (have == null) Bus.log("传输: HELLO have= 位图解析失败,按空处理");
             }
         }
         if (version <= 0 || !isHex32(sid) || !isRole(role)) return null;
-        return new Hello(version, sid, role, hp);
+        return new Hello(version, sid, role, hp, have);
     }
+
+    //pri added by zhuyang,Batch 4: image-index bitmap helpers (bit 0 = index 0, 16 hex chars max),20261017,start
+    public static String normalizeBitmap(String raw) {
+        if (raw == null) return null;
+        String s = raw.trim();
+        if (s.isEmpty() || s.length() > 16) return null;
+        StringBuilder sb = new StringBuilder();
+        for (int i = s.length(); i < 16; i++) sb.append('0');
+        for (int i = 0; i < s.length(); i++) {
+            if (Character.digit(s.charAt(i), 16) < 0) return null;
+        }
+        sb.append(s.toLowerCase(java.util.Locale.US));
+        return sb.toString();
+    }
+
+    public static boolean bitmapHas(String have, int index) {
+        if (have == null || index < 0 || index >= 64) return false;
+        int pos = 15 - (index / 4);
+        if (pos < 0 || pos >= have.length()) return false;
+        int nibble = Character.digit(have.charAt(pos), 16);
+        if (nibble < 0) return false;
+        return ((nibble >> ((index % 4) * 4)) & 1) != 0;
+    }
+
+    public static int bitmapCount(String have, int limit) {
+        if (have == null) return 0;
+        int max = Math.min(limit, 64);
+        int n = 0;
+        for (int i = 0; i < max; i++) if (bitmapHas(have, i)) n++;
+        return n;
+    }
+    //pri added by zhuyang,Batch 4: image-index bitmap helpers (bit 0 = index 0, 16 hex chars max),20261017,end
 
     //pri added by zhuyang,FILE_BEGIN / DONE / DONE_ACK / CANCEL codecs for the chunked delivery,20261017,start
     public static byte[] buildFileBegin(int index, int total, long size, String mime) {
+        return buildFileBegin(index, total, size, mime, null);
+    }
+
+    //pri added by zhuyang,Batch 4: append h=<sha256hex>; omitted for an unknown hash,20261017
+    public static byte[] buildFileBegin(int index, int total, long size, String mime, String sha256) {
         String s = "i=" + index + "|n=" + total + "|s=" + size + "|m=" + (mime == null ? "" : mime);
+        if (isHex64(sha256)) s += "|h=" + sha256.toLowerCase(java.util.Locale.US);
         return s.getBytes(StandardCharsets.UTF_8);
     }
 
@@ -248,6 +322,7 @@ public final class Proto {
         int total = -1;
         long size = -1;
         String mime = null;
+        String sha = null;
         String text = new String(data, StandardCharsets.UTF_8);
         for (String kv : text.split("\\|")) {
             int eq = kv.indexOf('=');
@@ -263,14 +338,47 @@ public final class Proto {
                     size = Long.parseLong(v);
                 } else if ("m".equals(k)) {
                     mime = v;
+                } else if ("h".equals(k)) {
+                    sha = isHex64(v) ? v.toLowerCase(java.util.Locale.US) : null; //pri added by zhuyang,Batch 4: malformed hash is skipped,20261017
                 }
             } catch (NumberFormatException e) {
                 return null;
             }
         }
         if (index < 0 || total <= 0 || index >= total || size < -1) return null;
-        return new FileBegin(index, total, size, mime);
+        return new FileBegin(index, total, size, mime, sha);
     }
+
+    //pri added by zhuyang,Batch 4: META_INFO "n=<total>|b=<totalBytes>", sent right after META,20261017,start
+    public static byte[] buildMetaInfo(int total, long totalBytes) {
+        String s = "n=" + total + "|b=" + totalBytes;
+        return s.getBytes(StandardCharsets.UTF_8);
+    }
+
+    public static MetaInfo parseMetaInfo(byte[] data) {
+        if (data == null) return null;
+        int total = -1;
+        long bytes = -1;
+        String text = new String(data, StandardCharsets.UTF_8);
+        for (String kv : text.split("\\|")) {
+            int eq = kv.indexOf('=');
+            if (eq <= 0) continue;
+            String k = kv.substring(0, eq);
+            String v = kv.substring(eq + 1);
+            try {
+                if ("n".equals(k)) {
+                    total = Integer.parseInt(v);
+                } else if ("b".equals(k)) {
+                    bytes = Long.parseLong(v);
+                }
+            } catch (NumberFormatException e) {
+                return null;
+            }
+        }
+        if (total < 0 || bytes < 0) return null;
+        return new MetaInfo(total, bytes);
+    }
+    //pri added by zhuyang,Batch 4: META_INFO "n=<total>|b=<totalBytes>", sent right after META,20261017,end
 
     public static int readSeq(byte[] data) {
         return ((data[0] & 0xFF) << 24) | ((data[1] & 0xFF) << 16)
@@ -332,6 +440,15 @@ public final class Proto {
 
     private static boolean isHex32(String s) {
         if (s == null || s.length() != 32) return false;
+        for (int i = 0; i < s.length(); i++) {
+            if (Character.digit(s.charAt(i), 16) < 0) return false;
+        }
+        return true;
+    }
+
+    //pri added by zhuyang,Batch 4: SHA-256 hex must be exactly 64 hex chars,20261017
+    private static boolean isHex64(String s) {
+        if (s == null || s.length() != 64) return false;
         for (int i = 0; i < s.length(); i++) {
             if (Character.digit(s.charAt(i), 16) < 0) return false;
         }

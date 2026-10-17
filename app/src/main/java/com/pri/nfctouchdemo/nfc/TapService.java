@@ -512,6 +512,46 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
     }
     //pri added by zhuyang,Byte-level progress -> the existing status line (sender/receiver wording),20261017,end
 
+    //pri added by zhuyang,Batch 4: partial failure summary "成功 N 张，失败 M 张",20261017,start
+    @Override
+    public void onTransferSummary(int ok, int failed) {
+        final String line = getString(R.string.transfer_summary, ok, failed);
+        final boolean sender = mUserWantsSend && !mRoleYielded;
+        Bus.log("服务: 传输结果 — " + line + (sender ? "(发送侧)" : "(接收侧)"));
+        startService(OverlayService.statusIntent(this, line));
+        //pri added by zhuyang,Batch 4: show the banner after the receive card/viewer transition so it stays visible,20261017,start
+        mMain.postDelayed(new Runnable() {
+            @Override public void run() {
+                startService(OverlayService.failBannerIntent(TapService.this,
+                        getString(sender ? R.string.result_title_send : R.string.result_title_receive), line));
+            }
+        }, 1200);
+        //pri added by zhuyang,Batch 4: show the banner after the receive card/viewer transition so it stays visible,20261017,end
+    }
+    //pri added by zhuyang,Batch 4: partial failure summary "成功 N 张，失败 M 张",20261017,end
+
+    //pri added by zhuyang,Batch 4: storage precheck refused the offer before the user accepted,20261017,start
+    @Override
+    public void onStorageInsufficient(long totalBytes) {
+        String mb = String.format(java.util.Locale.US, "%.0f", totalBytes / 1048576.0);
+        final String line = getString(R.string.fail_no_space, mb);
+        Bus.log("服务: 存储空间不足,拒绝接收 — " + line);
+        mRejected = true;
+        mReceiveShown = false;
+        startService(OverlayService.statusIntent(this, line));
+        //pri added by zhuyang,Batch 4: hide after a short delay, then raise the banner last so a late receive-card command cannot cover it,20261017,start
+        mMain.postDelayed(new Runnable() {
+            @Override public void run() {
+                startService(OverlayService.hideIntent(TapService.this, OverlayService.DISSOLVE_MS));
+                startService(OverlayService.failBannerIntent(TapService.this,
+                        getString(R.string.fail_title_receive), line));
+            }
+        }, 600);
+        //pri added by zhuyang,Batch 4: hide after a short delay, then raise the banner last so a late receive-card command cannot cover it,20261017,end
+        Bus.unlockRole();
+    }
+    //pri added by zhuyang,Batch 4: storage precheck refused the offer before the user accepted,20261017,end
+
     @Override
     public void onXferFailed(String why) {
         //pri modify by zhuyang,Receiver failures close the receive card and report instead of hanging,20261017,start
