@@ -734,14 +734,23 @@ setInterpolator(new com.oplus.interconnect.nfc.ui.cardmodleview.b());  // 半段
 
 ## 10. 视觉预览与复现命令
 
+### 10.1 已入仓的总览图（随文档一起看）
+
+| 图 | 内容 |
+|---|---|
+| ![阶段总览](images/oppo_anim_stage_timeline.png) | **阶段总览**：触碰 → 水波 1.0s → Admission 1.037s(+350ms) → respire 2s 循环 → 卡片入场（发送 0.744s / 接收 1.13s）→ 代码驱动呼吸 → 上滑 Card send 0.92s / 收尾 Card vanish 0.624s + All light disappears 0.6s |
+| ![关键帧曲线](images/oppo_anim_keyframe_timelines.png) | **8 个 animator 的完整关键帧曲线**（Admission / Card appear / vanish / send / receive / respire / Top light disappears），每条线是一个材质 key，横轴为秒 |
+| ![纹理](images/oppo_anim_textures.png) | **三张原始纹理**：EasyLight 顶部光、EasyWave 水波环、Shadow 卡片投影（均解自 `CardRotate0424.coz`） |
+
+### 10.2 未入仓的预览（在 `_Temp/`，不入仓库）
+
 预览文件在 `_Temp/oppo_anim/preview/`，索引见 `_Temp/oppo_anim/README.md`。重点：
 
-- `stage_timeline.png`：阶段总览；
-- `keyframe_timelines.png` + `timelines/*.png`：逐 animator 曲线；
+- `timelines/*.png`：逐 animator 大图；
 - `water_ripple_approx.gif`：1.0s 水波近似；
 - `water_edge_light_approx.gif`：4.4s 全流程近似；
-- `textures_contact_sheet.png`：三张纹理；
-- `keyframes.csv`：全量关键帧。
+- `keyframes.csv`：全量关键帧（可直接导入 Excel）；
+- `animators_summary.txt`、`shader_*.glsl`、`gen_preview.py`：生成脚本与 shader 原文。
 
 **免责声明**：GIF 由 Python/PIL 绘制，仅用于理解节奏与形状；不是 OPPO shader 输出，不能据此判断逐帧像素。
 
