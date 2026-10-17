@@ -19,6 +19,10 @@ public final class Proto {
     public static final int TYPE_HELLO = 6;
     public static final int TYPE_HELLO_ACK = 7;
     public static final int TYPE_ROLE = 8; //pri added by zhuyang,Role convergence frame: r=<U|S|R>|sid=<sender sid>,20261017
+    //pri added by zhuyang,Application heartbeat frames: empty payload,20261017,start
+    public static final int TYPE_PING = 9;
+    public static final int TYPE_PONG = 10;
+    //pri added by zhuyang,Application heartbeat frames: empty payload,20261017,end
 
     public static final int MAX_FRAME_LEN = 64 * 1024 * 1024;
     public static final int HELLO_VERSION = 1;
@@ -67,7 +71,8 @@ public final class Proto {
     private Proto() {}
 
     public static boolean isLengthOnly(int type) {
-        return type == TYPE_META || type == TYPE_ACCEPT || type == TYPE_REJECT;
+        return type == TYPE_META || type == TYPE_ACCEPT || type == TYPE_REJECT
+                || type == TYPE_PING || type == TYPE_PONG; //pri added by zhuyang,Heartbeat frames carry no payload,20261017
     }
 
     public static Frame readFrame(DataInputStream in, int timeoutMs, int maxLen) throws IOException {

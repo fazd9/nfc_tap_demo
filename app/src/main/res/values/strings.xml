@@ -69,9 +69,17 @@
 
     <!--pri added by zhuyang,Fail banner (D1): TapService picks the two lines, OverlayService only renders,20261014,start-->
     <string name="fail_title">发送失败</string>
+    <string name="fail_title_receive">接收失败</string>
     <string name="fail_rejected">对方拒收</string>
     <string name="fail_timeout">对方未响应</string>
+    <string name="fail_no_offer">对方未开始发送</string>
     <!--pri added by zhuyang,Fail banner (D1): TapService picks the two lines, OverlayService only renders,20261014,end-->
+
+    <!--pri added by zhuyang,Link liveness status lines (batch 2),20261017,start-->
+    <string name="status_waiting_accept">等待对方接收…</string>
+    <string name="status_transferring">传输中…</string>
+    <string name="status_peer_transferring">对方已接收,传输中…</string>
+    <!--pri added by zhuyang,Link liveness status lines (batch 2),20261017,end-->
 
     <!--pri added by zhuyang,D5: in-app image viewer (replaces the Google Photos pager),20261014,start-->
     <string name="viewer_load_failed">图片加载失败</string>

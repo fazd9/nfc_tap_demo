@@ -195,6 +195,8 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
                     mSendStarted = true;
                     sXfer.sendImages(new ArrayList<Uri>(PENDING));
                 }
+                //pri added by zhuyang,Batch 2: show the offer/verdict wait in the status line,20261017
+                startService(OverlayService.statusIntent(this, getString(R.string.status_waiting_accept)));
                 return START_STICKY;
             }
             startService(OverlayService.statusIntent(this, "正在连接对方,请稍候…"));
@@ -213,7 +215,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
                 Bus.unlockRole();
             } else {
                 startService(OverlayService.statusIntent(this,
-                        mFullCount > 0 ? "正在接收,收完自动打开…" : "等待对方发送…"));
+                        mFullCount > 0 ? "正在接收,收完自动打开…" : getString(R.string.status_transferring)));
             }
         }
         if (intent != null && OverlayService.ACTION_UI_RECEIVE_REJECT.equals(intent.getAction())) {
@@ -386,7 +388,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         mMain.post(new Runnable() { @Override public void run() { // 回到主线程再改 UI
             //pri modify by zhuyang,Role-aware guard: never paint the send page over the receive card,20261014,start
             if (mUserWantsSend && !mRoleYielded) {
-                startService(OverlayService.statusIntent(TapService.this, "正在发送…"));
+                startService(OverlayService.statusIntent(TapService.this, getString(R.string.status_waiting_accept)));
                 if (!mSendStarted) {
                     mSendStarted = true;
                     sXfer.sendImages(new ArrayList<Uri>(PENDING));
@@ -484,6 +486,22 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
 
     @Override
     public void onXferFailed(String why) {
+        //pri modify by zhuyang,Receiver failures close the receive card and report instead of hanging,20261017,start
+        if (mReceiveShown && !mUserWantsSend) {
+            Bus.log("服务: 接收失败,收窗 — " + why);
+            if (!mRejected) {
+                mRejected = true;
+                mReceiveShown = false;
+                String detail = why == null ? "" : why;
+                if (detail.length() > 12) detail = detail.substring(0, 12);
+                startService(OverlayService.hideIntent(this, OverlayService.DISSOLVE_MS));
+                startService(OverlayService.failBannerIntent(this,
+                        getString(R.string.fail_title_receive), detail));
+            }
+            Bus.unlockRole();
+            return;
+        }
+        //pri modify by zhuyang,Receiver failures close the receive card and report instead of hanging,20261017,end
         if (!mSendShown && !PENDING.isEmpty()) showSendPage(); // 失败也要让用户看到原因(发送页此时可能还没弹)
         startService(OverlayService.statusIntent(this, why)); // 失败原因同样走动效页底部状态行
         //pri added by zhuyang,D1: banner only for a failure after this phone declared itself sender,20261014,start
@@ -500,11 +518,18 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
     //pri added by zhuyang,Two-phase protocol callbacks,20261014,start
     @Override public void onOfferExpired() {
         Bus.log("服务: 对方超时未发货,本轮结束");
-        if (!mReceiveShown) return;
+        //pri modify by zhuyang,Batch 2: close the receive card and tell the user the peer never started,20261017,start
+        if (!mReceiveShown) {
+            Bus.unlockRole();
+            return;
+        }
         mReceiveShown = false;
         mRejected = true; //pri added by zhuyang,This round must not re-open the card,20261014
         startService(OverlayService.hideIntent(this, OverlayService.DISSOLVE_MS)); //pri modify by zhuyang,E5: dissolve before detaching,20261014
+        startService(OverlayService.failBannerIntent(this,
+                getString(R.string.fail_title_receive), getString(R.string.fail_no_offer)));
         Bus.unlockRole();
+        //pri modify by zhuyang,Batch 2: close the receive card and tell the user the peer never started,20261017,end
     }
 
     @Override public void onPeerRejected() {
@@ -517,6 +542,8 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
 
     @Override public void onPeerAccepted() {
         Bus.log("服务: 对方已接收");
+        //pri added by zhuyang,Batch 2: status line shows transfer is now running,20261017
+        startService(OverlayService.statusIntent(this, getString(R.string.status_peer_transferring)));
     }
 
     @Override public void onVerdictTimeout() {

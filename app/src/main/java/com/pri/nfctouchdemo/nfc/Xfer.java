@@ -54,10 +54,23 @@ public class Xfer {
     }
 
     private static final int PORT = 8988;
-    private final Object mWriteLock = new Object();
+    //pri modify by zhuyang,Heartbeat and business frames share this lock so the wire never interleaves,20261017,start
+    private final java.util.concurrent.locks.ReentrantLock mWriteLock =
+            new java.util.concurrent.locks.ReentrantLock();
+    //pri modify by zhuyang,Heartbeat and business frames share this lock so the wire never interleaves,20261017,end
     public static final String HS_SSID = "TapShare-Transfer";
     public static final String HS_PASS = "tapshare2026";
-    private static final int VERDICT_WAIT_MS = 60000;  //pri added by zhuyang,Sender waits this long for the verdict,20261014
+    private static final int VERDICT_WAIT_MS = 20000;  //pri modify by zhuyang,Shorten the verdict wait from 60s to 20s,20261017
+    //pri added by zhuyang,Liveness limits: read cap, PING idle, dead peer, write stall and round total,20261017,start
+    private static final int RX_TIMEOUT_MS = 30000;      // read cap before chunking lands (batch 3 tightens to 10s)
+    private static final int HEARTBEAT_IDLE_MS = 2000;   // no frame written for this long -> PING
+    private static final int HEARTBEAT_DEAD_MS = 10000;  // no byte received for this long -> link is dead
+    private static final int HEARTBEAT_TICK_MS = 500;    // heartbeat check period
+    private static final int WRITE_STALL_MS = 10000;     // transfer phase: no write progress -> close
+    private static final long TRANSFER_TOTAL_MS = 5 * 60 * 1000L; // one photo round is capped at 5 minutes
+    private static final int OFFER_WAIT_MS = 20000;      // connected receiver waiting for the peer's offer
+    private static final int WRITE_CHUNK = 64 * 1024;    // refresh write progress inside one large frame
+    //pri added by zhuyang,Liveness limits: read cap, PING idle, dead peer, write stall and round total,20261017,end
     private static final int PROBE_MS = 3000;          //pri added by zhuyang,An accepted connection that stays silent this long carries no incoming data,20261014
     private static final int MAX_UNAUTH_CONNECTIONS = 4; //pri added by zhuyang,Cap concurrent connections that still owe a HELLO,20261017
     private static final int ROLE_CONFLICT_WINDOW_MS = 300; //pri added by zhuyang,Wait window after our own swipe for a peer ROLE(S) before offering,20261017
@@ -125,16 +138,70 @@ public class Xfer {
         final Socket s;
         final DataInputStream in;
         final DataOutputStream out;
+        //pri added by zhuyang,Per-link liveness state shared by the reader, writer and heartbeat,20261017,start
+        final java.util.concurrent.atomic.AtomicLong lastRx;   // last byte received (input progress)
+        final java.util.concurrent.atomic.AtomicLong lastTx;   // last frame written (idle PING scheduling)
+        volatile long lastWriteProgressAt;                     // last business frame/chunk written
+        volatile long hbStartedAt;                             // round total deadline base
+        volatile boolean hbRunning;
+        volatile boolean hbWritePhase;                         // true after ACCEPT: watchdog instead of rx-dead
+        volatile boolean hbExpectRx;                           // false while the sender is still writing the offer
+        final java.util.concurrent.atomic.AtomicBoolean linkDead =
+                new java.util.concurrent.atomic.AtomicBoolean();
+        final java.util.concurrent.atomic.AtomicBoolean failCb =
+                new java.util.concurrent.atomic.AtomicBoolean();
+        final java.util.concurrent.atomic.AtomicBoolean offerExpiredCb =
+                new java.util.concurrent.atomic.AtomicBoolean();
+        volatile String failReason;
+        volatile Thread hbThread;
+        //pri added by zhuyang,Per-link liveness state shared by the reader, writer and heartbeat,20261017,end
         String peerRole;        // ROLE read right after HELLO_ACK (null = old peer/timeout)
         String peerSid;         // sid carried by that ROLE
         Proto.Frame first;      // non-ROLE first frame already read (1a compatibility)
 
-        Link(Socket s, DataInputStream in, DataOutputStream out) {
+        Link(Socket s, DataInputStream in, DataOutputStream out,
+             java.util.concurrent.atomic.AtomicLong lastRx,
+             java.util.concurrent.atomic.AtomicLong lastTx) {
             this.s = s;
             this.in = in;
             this.out = out;
+            this.lastRx = lastRx;
+            this.lastTx = lastTx;
+            this.lastWriteProgressAt = lastRx.get();
         }
     }
+
+    //pri added by zhuyang,Count received bytes so a large in-flight frame keeps the link alive,20261017,start
+    private static final class RxProgress extends java.io.InputStream {
+        private final java.io.InputStream in;
+        private final java.util.concurrent.atomic.AtomicLong stamp;
+
+        RxProgress(java.io.InputStream in, java.util.concurrent.atomic.AtomicLong stamp) {
+            this.in = in;
+            this.stamp = stamp;
+        }
+
+        @Override public int read() throws java.io.IOException {
+            int b = in.read();
+            if (b >= 0) stamp.set(SystemClock.elapsedRealtime());
+            return b;
+        }
+
+        @Override public int read(byte[] b, int off, int len) throws java.io.IOException {
+            int n = in.read(b, off, len);
+            if (n > 0) stamp.set(SystemClock.elapsedRealtime());
+            return n;
+        }
+
+        @Override public int available() throws java.io.IOException {
+            return in.available();
+        }
+
+        @Override public void close() throws java.io.IOException {
+            in.close();
+        }
+    }
+    //pri added by zhuyang,Count received bytes so a large in-flight frame keeps the link alive,20261017,end
     //pri added by zhuyang,Keep the handshake streams with the socket: later frames must reuse them,20261017,end
 
     private final WifiP2pManager mP2p;
@@ -298,6 +365,9 @@ public class Xfer {
         //pri added by zhuyang,Bump the round token and drop the verdict session state of the previous round,20261014,start
         mRound++;
         //pri added by zhuyang,Drop every link of the previous round, including the role listener's,20261017,start
+        stopHeartbeat(mPeerSocket);
+        stopHeartbeat(mStashedSocket);
+        stopHeartbeat(mSendSocket);
         closeQuietly(mPeerSocket);
         mPeerSocket = null;
         closeQuietly(mStashedSocket);
@@ -547,13 +617,44 @@ public class Xfer {
     //pri modify by zhuyang,Role convergence: swipe records the local clock and announces ROLE(S); false = peer already swiped,20261017,end
 
     //pri added by zhuyang,Role convergence helpers: ROLE write, listener lifecycle and UI notifications,20261017,start
+    //pri added by zhuyang,Liveness helpers: mark a written frame and write a possibly large frame with progress,20261017,start
+    private static void markTx(Link link) {
+        long now = SystemClock.elapsedRealtime();
+        link.lastTx.set(now);
+        link.lastWriteProgressAt = now;
+    }
+
+    private void writeBusinessFrame(Link link, int type, int len, byte[] data) throws java.io.IOException {
+        Proto.writeFrame(link.out, type, len, data);
+        markTx(link);
+    }
+
+    //pri added by zhuyang,Write a FULL frame in 64KB chunks so the stall watchdog sees real progress,20261017
+    private void writeFullFrame(Link link, byte[] data) throws java.io.IOException {
+        link.out.writeInt(Proto.MAGIC);
+        link.out.writeInt(Proto.TYPE_FULL);
+        link.out.writeInt(data.length);
+        int off = 0;
+        while (off < data.length) {
+            int n = Math.min(WRITE_CHUNK, data.length - off);
+            link.out.write(data, off, n);
+            off += n;
+            markTx(link);
+        }
+    }
+    //pri added by zhuyang,Liveness helpers: mark a written frame and write a possibly large frame with progress,20261017,end
+
     private void sendRoleOnLink(Link link, String role) {
         if (link == null || link.s.isClosed()) return;
         try {
             byte[] b = Proto.buildRole(role, Bus.sid());
-            synchronized (mWriteLock) {
+            mWriteLock.lock();
+            try {
                 Proto.writeFrame(link.out, Proto.TYPE_ROLE, b.length, b);
                 link.out.flush();
+                markTx(link); //pri added by zhuyang,A control write counts as link activity,20261017
+            } finally {
+                mWriteLock.unlock();
             }
             Bus.log("传输: 已发送 ROLE(" + role + ")");
         } catch (Exception e) {
@@ -579,6 +680,128 @@ public class Xfer {
             @Override public void run() { mListener.onRoleYielded(); }
         });
     }
+
+    //pri added by zhuyang,Connection liveness: one heartbeat thread per active link, shared write lock,20261017,start
+    private void startHeartbeat(final Link link, final boolean expectRx) {
+        if (link == null) return;
+        synchronized (link) {
+            if (link.hbRunning || !isAlive(link)) return;
+            long now = SystemClock.elapsedRealtime();
+            link.lastRx.set(now);
+            link.lastTx.set(now);
+            link.lastWriteProgressAt = now;
+            link.hbStartedAt = now;
+            link.hbExpectRx = expectRx;
+            link.hbRunning = true;
+            Thread t = new Thread(new Runnable() {
+                @Override public void run() { heartbeatLoop(link); }
+            }, "link-heartbeat");
+            link.hbThread = t;
+            t.start();
+        }
+        Bus.log("传输: 心跳已启动(空闲 " + (HEARTBEAT_IDLE_MS / 1000) + "s 发 PING,无数据 "
+                + (HEARTBEAT_DEAD_MS / 1000) + "s 判失效)");
+    }
+
+    private static void stopHeartbeat(Link link) {
+        if (link != null) link.hbRunning = false;
+    }
+
+    //pri added by zhuyang,One lightweight loop per link: PING when idle, fail on silence or write stall,20261017
+    private void heartbeatLoop(Link link) {
+        try {
+            while (mRunning && link.hbRunning && !link.s.isClosed()) {
+                long now = SystemClock.elapsedRealtime();
+                if (now - link.hbStartedAt >= TRANSFER_TOTAL_MS) {
+                    signalLinkDead(link, "传输超时(超过 " + (TRANSFER_TOTAL_MS / 60000) + " 分钟)");
+                    return;
+                }
+                if (link.hbWritePhase) {
+                    //pri added by zhuyang,Transfer phase: a blocked write is caught by the stall watchdog,20261017
+                    if (now - link.lastWriteProgressAt >= WRITE_STALL_MS) {
+                        signalLinkDead(link, "写停滞超过 " + (WRITE_STALL_MS / 1000) + "s,连接失效");
+                        return;
+                    }
+                } else if (link.hbExpectRx && now - link.lastRx.get() >= HEARTBEAT_DEAD_MS) {
+                    signalLinkDead(link, "连接超时(" + (HEARTBEAT_DEAD_MS / 1000) + "s 未收到对端任何数据)");
+                    return;
+                }
+                if (now - link.lastTx.get() >= HEARTBEAT_IDLE_MS) {
+                    boolean locked = false;
+                    try {
+                        locked = mWriteLock.tryLock(100, java.util.concurrent.TimeUnit.MILLISECONDS);
+                        if (locked) {
+                            Proto.writeFrame(link.out, Proto.TYPE_PING, 0, null);
+                            link.out.flush();
+                            link.lastTx.set(SystemClock.elapsedRealtime());
+                            Bus.log("传输: 心跳 PING(" + (link.hbWritePhase ? "传输中" : "等待中") + ")");
+                        }
+                    } catch (Exception e) {
+                        signalLinkDead(link, "心跳发送失败(连接已断开)");
+                        return;
+                    } finally {
+                        if (locked) mWriteLock.unlock();
+                    }
+                }
+                try {
+                    Thread.sleep(HEARTBEAT_TICK_MS);
+                } catch (InterruptedException ie) {
+                    return;
+                }
+            }
+        } finally {
+            link.hbRunning = false;
+        }
+    }
+    //pri added by zhuyang,One lightweight loop per link: PING when idle, fail on silence or write stall,20261017,end
+
+    //pri added by zhuyang,Declare a link dead and close it; the owning reader/writer reports the failure once,20261017
+    private void signalLinkDead(final Link link, final String why) {
+        if (!link.linkDead.compareAndSet(false, true)) return;
+        link.failReason = why;
+        Bus.log("传输: 连接失效 — " + why + ",关闭连接");
+        closeQuietly(link);
+    }
+
+    private void notifyLinkFailedOnce(Link link, String why) {
+        if (link == null) {
+            fail(why);
+            return;
+        }
+        if (!link.failCb.compareAndSet(false, true)) return;
+        Bus.log("传输: " + why);
+        final String w = why;
+        mMain.post(new Runnable() {
+            @Override public void run() { mListener.onXferFailed(w); }
+        });
+    }
+
+    private void notifyOfferExpiredOnce(Link link, String why) {
+        if (!link.offerExpiredCb.compareAndSet(false, true)) return;
+        Bus.log("传输: " + why);
+        mMain.post(new Runnable() {
+            @Override public void run() { mListener.onOfferExpired(); }
+        });
+    }
+
+    //pri added by zhuyang,Reply PONG without ever interleaving it with a business frame,20261017
+    private void replyPong(Link link) {
+        boolean locked = false;
+        try {
+            locked = mWriteLock.tryLock(200, java.util.concurrent.TimeUnit.MILLISECONDS);
+            if (locked) {
+                Proto.writeFrame(link.out, Proto.TYPE_PONG, 0, null);
+                link.out.flush();
+                link.lastTx.set(SystemClock.elapsedRealtime());
+                Bus.log("传输: 收到 PING,已回 PONG");
+            }
+        } catch (Exception e) {
+            Bus.log("传输: 回 PONG 失败 " + e);
+        } finally {
+            if (locked) mWriteLock.unlock();
+        }
+    }
+    //pri added by zhuyang,Connection liveness: one heartbeat thread per active link, shared write lock,20261017,end
 
     //pri added by zhuyang,Take over a stashed link for receiving without blocking the caller (setSenderRole runs on main),20261017
     private void startIncomingOnStash(final Link link) {
@@ -636,9 +859,15 @@ public class Xfer {
     private Link clientHello(Socket s) {
         try {
             s.setSoTimeout(Proto.HELLO_TIMEOUT_MS);
-            DataInputStream in = new DataInputStream(
-                    new java.io.BufferedInputStream(s.getInputStream(), 256 * 1024));
+            //pri added by zhuyang,Wrap the socket streams so liveness sees byte-level progress,20261017,start
+            java.util.concurrent.atomic.AtomicLong rxAt =
+                    new java.util.concurrent.atomic.AtomicLong(SystemClock.elapsedRealtime());
+            java.util.concurrent.atomic.AtomicLong txAt =
+                    new java.util.concurrent.atomic.AtomicLong(SystemClock.elapsedRealtime());
+            DataInputStream in = new DataInputStream(new java.io.BufferedInputStream(
+                    new RxProgress(s.getInputStream(), rxAt), 256 * 1024));
             DataOutputStream out = new DataOutputStream(s.getOutputStream());
+            //pri added by zhuyang,Wrap the socket streams so liveness sees byte-level progress,20261017,end
             if (mPeerSid == null) {
                 Bus.log("传输: [未认证] 本轮无对方 sid,跳过 HELLO/ROLE 握手(调试路径)");
             } else {
@@ -664,7 +893,7 @@ public class Xfer {
                 out.flush();
                 Bus.log("传输: [认证] HELLO_ACK 校验通过,对方角色=" + ack.role
                         + ",本机角色=" + localRole());
-                Link link = new Link(s, in, out);
+                Link link = new Link(s, in, out, rxAt, txAt);
                 //pri added by zhuyang,Read the peer's ROLE now so a simultaneous swipe can be arbitrated before we offer,20261017,start
                 try {
                     Proto.Frame pf = Proto.readFrame(in, ROLE_READ_TIMEOUT_MS, Proto.MAX_ROLE_LEN);
@@ -694,7 +923,7 @@ public class Xfer {
                 //pri added by zhuyang,Read the peer's ROLE now so a simultaneous swipe can be arbitrated before we offer,20261017,end
             }
             s.setSoTimeout(0);
-            return new Link(s, in, out);
+            return new Link(s, in, out, rxAt, txAt);
         } catch (java.net.SocketTimeoutException e) {
             Bus.log("传输: [认证] 等待 HELLO_ACK 超时(" + Proto.HELLO_TIMEOUT_MS + "ms),关闭连接");
         } catch (Exception e) {
@@ -1032,22 +1261,25 @@ public class Xfer {
                 return;
             }
             final String expected = mPeerSid;
+            //pri added by zhuyang,Wrap the socket streams so liveness sees byte-level progress,20261017,start
+            java.util.concurrent.atomic.AtomicLong rxAt =
+                    new java.util.concurrent.atomic.AtomicLong(SystemClock.elapsedRealtime());
+            java.util.concurrent.atomic.AtomicLong txAt =
+                    new java.util.concurrent.atomic.AtomicLong(SystemClock.elapsedRealtime());
+            DataInputStream in = new DataInputStream(new java.io.BufferedInputStream(
+                    new RxProgress(s.getInputStream(), rxAt), 256 * 1024));
+            DataOutputStream out = new DataOutputStream(s.getOutputStream());
+            //pri added by zhuyang,Wrap the socket streams so liveness sees byte-level progress,20261017,end
             if (expected == null) {
                 Bus.log("传输: [未认证] 本轮无对方 sid,跳过 HELLO/ROLE 校验 " + s.getInetAddress());
                 s.setSoTimeout(0);
-                DataInputStream in = new DataInputStream(
-                        new java.io.BufferedInputStream(s.getInputStream(), 256 * 1024));
-                DataOutputStream out = new DataOutputStream(s.getOutputStream());
-                Link link = new Link(s, in, out);
+                Link link = new Link(s, in, out, rxAt, txAt);
                 mUnauthCount.decrementAndGet();
                 released = true;
                 classifyDebug(link);
                 return;
             }
             s.setSoTimeout(Proto.HELLO_TIMEOUT_MS);
-            DataInputStream in = new DataInputStream(
-                    new java.io.BufferedInputStream(s.getInputStream(), 256 * 1024));
-            DataOutputStream out = new DataOutputStream(s.getOutputStream());
             Proto.Frame f = Proto.readFrame(in, Proto.HELLO_TIMEOUT_MS, Proto.MAX_HELLO_LEN);
             if (f == null || f.type != Proto.TYPE_HELLO) {
                 Bus.log("传输: [认证] 未收到 HELLO,关闭连接 " + s.getInetAddress());
@@ -1068,7 +1300,7 @@ public class Xfer {
             out.flush();
             Bus.log("传输: [认证] HELLO 校验通过 " + s.getInetAddress()
                     + ",对方角色=" + hello.role + ",本机角色=" + localRole());
-            Link link = new Link(s, in, out);
+            Link link = new Link(s, in, out, rxAt, txAt);
             mUnauthCount.decrementAndGet();
             released = true;
             s.setSoTimeout(ROLE_READ_TIMEOUT_MS);
@@ -1309,7 +1541,7 @@ public class Xfer {
             closeQuietly(link);
             return;
         }
-        try { link.s.setSoTimeout(0); } catch (Exception ignored) {}
+        try { link.s.setSoTimeout(RX_TIMEOUT_MS); } catch (Exception ignored) {} //pri modify by zhuyang,Bound every link read,20261017
         Thread t = new Thread(new Runnable() {
             @Override public void run() { roleListenerLoop(link); }
         }, "role-listen");
@@ -1339,9 +1571,19 @@ public class Xfer {
 
     private void roleListenerLoop(Link link) {
         Bus.log("传输: 开始监听对端角色(50ms 轮询)");
+        //pri added by zhuyang,Connected receiver must see an offer within 20s,20261017,start
+        long listenStart = SystemClock.elapsedRealtime();
+        //pri added by zhuyang,Connected receiver must see an offer within 20s,20261017,end
         try {
             while (mRunning) {
                 if (mStashedSocket != link || mRoleListenerAbort == link) break;
+                //pri added by zhuyang,No offer within 20s: close and let the receive page report it,20261017,start
+                if (SystemClock.elapsedRealtime() - listenStart >= OFFER_WAIT_MS) {
+                    notifyOfferExpiredOnce(link, "已连接 " + (OFFER_WAIT_MS / 1000)
+                            + "s 仍未收到报价(对方未开始发送)");
+                    break;
+                }
+                //pri added by zhuyang,No offer within 20s: close and let the receive page report it,20261017,end
                 Proto.Frame f;
                 try {
                     if (link.in.available() <= 0) {
@@ -1349,7 +1591,7 @@ public class Xfer {
                         Thread.sleep(50); //pri added by zhuyang,Poll instead of a timed frame read so a partial frame is never lost,20261017
                         continue;
                     }
-                    f = Proto.readFrame(link.in, 0, Proto.MAX_FRAME_LEN);
+                    f = Proto.readFrame(link.in, RX_TIMEOUT_MS, Proto.MAX_FRAME_LEN);
                 } catch (InterruptedException ie) {
                     continue;
                 } catch (Exception e) {
@@ -1360,6 +1602,16 @@ public class Xfer {
                     Bus.log("传输: 角色监听连接已关闭");
                     break;
                 }
+                //pri added by zhuyang,Keep the stashed link alive while the peer waits,20261017,start
+                if (f.type == Proto.TYPE_PING) {
+                    replyPong(link);
+                    continue;
+                }
+                if (f.type == Proto.TYPE_PONG) {
+                    Bus.log("传输: 收到 PONG");
+                    continue;
+                }
+                //pri added by zhuyang,Keep the stashed link alive while the peer waits,20261017,end
                 if (f.type == Proto.TYPE_ROLE) {
                     Proto.Role role = Proto.parseRole(f.data);
                     if (role == null) continue;
@@ -1445,16 +1697,18 @@ public class Xfer {
     //pri modify by zhuyang,Receive on a Link, skip control frames, and accept a first frame already read,20261017,start
     private void handleIncoming(Link link, Proto.Frame preRead) {
         final java.util.ArrayList<Bitmap> all = new java.util.ArrayList<Bitmap>();
+        int count = 0;
+        int total = 0;
+        int expect = 0;
+        String readError = null;
         try {
-            link.s.setSoTimeout(0);
+            link.s.setSoTimeout(RX_TIMEOUT_MS); //pri modify by zhuyang,No receive read may block forever,20261017
             mPeerSocket = link;     //pri added by zhuyang,Keep the link so the verdict can be written back on it,20261014
             mStashedSocket = link;
             mVerdictSent = false;   //pri added by zhuyang,Reset the per-connection verdict/done flags,20261014,start
             mDoneNotified = false;
             //pri added by zhuyang,Reset the per-connection verdict/done flags,20261014,end
-            int count = 0;
-            int total = 0;
-            int expect = 0;
+            startHeartbeat(link, true);   //pri added by zhuyang,Heartbeat covers the offer/verdict wait and the receive loop,20261017
             //pri added by zhuyang,Replay frames buffered on the send link before the role loss,20261017,start
             final java.util.ArrayDeque<Proto.Frame> replay = new java.util.ArrayDeque<Proto.Frame>();
             if (preRead != null) replay.add(preRead);
@@ -1464,23 +1718,45 @@ public class Xfer {
             }
             Proto.Frame f = replay.pollFirst();
             //pri added by zhuyang,Replay frames buffered on the send link before the role loss,20261017,end
-            while (mRunning) {
+            while (mRunning && !link.linkDead.get()) {
                 if (f == null) f = replay.pollFirst(); //pri added by zhuyang,Drain every buffered frame before touching the stream,20261017
                 if (f == null) {
+                    //pri added by zhuyang,Waiting for the offer is capped at 20s; receiving data at 30s,20261017,start
+                    int readTimeout = expect > 0 ? RX_TIMEOUT_MS : OFFER_WAIT_MS;
                     try {
-                        f = Proto.readFrame(link.in, 0, Proto.MAX_FRAME_LEN);
+                        link.s.setSoTimeout(readTimeout);
+                        f = Proto.readFrame(link.in, readTimeout, Proto.MAX_FRAME_LEN);
+                    } catch (java.net.SocketTimeoutException te) {
+                        Bus.log("传输: 接收超时(" + readTimeout + "ms 未读到完整帧)");
+                        readError = expect > 0
+                                ? "接收超时(" + (RX_TIMEOUT_MS / 1000) + "s 未收到数据)"
+                                : "对方未开始发送(报价超时)";
+                        break;
                     } catch (Exception e) {
                         Bus.log("传输: 帧读取失败 " + e);
+                        readError = "传输中断: " + e;
                         break;
                     }
+                    //pri added by zhuyang,Waiting for the offer is capped at 20s; receiving data at 30s,20261017,end
                     if (f == null) {
-                        break; // 对方关闭连接 = 发送完毕
+                        Bus.log("传输: 对端已关闭连接");
+                        break;
                     }
                 }
                 final Proto.Frame frame = f;
                 f = null;
                 int type = frame.type;
                 int len = frame.length;
+                //pri added by zhuyang,Heartbeat frames keep the link alive and are never counted as images,20261017,start
+                if (type == Proto.TYPE_PING) {
+                    replyPong(link);
+                    continue;
+                }
+                if (type == Proto.TYPE_PONG) {
+                    Bus.log("传输: 收到 PONG");
+                    continue;
+                }
+                //pri added by zhuyang,Heartbeat frames keep the link alive and are never counted as images,20261017,end
                 if (type == Proto.TYPE_ROLE) {
                     //pri added by zhuyang,Role updates may arrive before META; never count them as images,20261017,start
                     Proto.Role role = Proto.parseRole(frame.data);
@@ -1546,31 +1822,57 @@ public class Xfer {
                 }
                 //pri added by zhuyang,Two-phase protocol completion: count==expect means delivered,20261014,end
             }
-            Bus.log("传输: 接收完成,共 " + count + " 张 " + total + " 字节");
-            //pri added by zhuyang,EOF fallback for the done notification + expired-offer detection,20261014,start
-            if (count > 0 && !mDoneNotified) {
-                mDoneNotified = true;
-                enqueueTransferDone(all);
+            //pri modify by zhuyang,EOF is no longer success: only count==expect completes the round,20261017,start
+            if (mRunning) {
+                Bus.log("传输: 接收结束,共 " + count + " 张 " + total + " 字节,预告 " + expect + " 张");
+                if (expect > 0 && count >= expect) {
+                    if (!mDoneNotified) {
+                        mDoneNotified = true;
+                        enqueueTransferDone(all);
+                    }
+                } else if (expect > 0 || count > 0 || mVerdictSent) {
+                    String why;
+                    if (link.linkDead.get() && link.failReason != null) {
+                        why = link.failReason;
+                    } else if (readError != null) {
+                        why = readError;
+                    } else if (expect > 0) {
+                        why = "传输中断: 只收到 " + count + "/" + expect + " 张";
+                    } else {
+                        why = "传输中断";
+                    }
+                    notifyLinkFailedOnce(link, why);
+                } else {
+                    notifyOfferExpiredOnce(link, "对方未开始发送(报价超时或连接断开)");
+                }
             }
-            if (count == 0 && !mVerdictSent) {
-                Bus.log("传输: 对方未等表态就断开,本轮报价作废");
-                mMain.post(new Runnable() {
-                    @Override public void run() { mListener.onOfferExpired(); }
-                });
-            }
-            //pri added by zhuyang,EOF fallback for the done notification + expired-offer detection,20261014,end
-            if (mReceiverRole && mHotspotActive) {
-                closeHotspot();
-                Bus.log("传输: 热点已关闭,Wi-Fi 恢复可用");
-            }
+            //pri modify by zhuyang,EOF is no longer success: only count==expect completes the round,20261017,end
         } catch (Exception e) {
             Bus.log("传输: 接收异常 " + e);
+            //pri added by zhuyang,Every receive failure path must call back exactly once,20261017,start
+            if (mRunning) {
+                if (expect > 0 || count > 0 || mVerdictSent) {
+                    if (count < expect || expect == 0) {
+                        notifyLinkFailedOnce(link, "传输中断: " + e);
+                    }
+                } else {
+                    notifyOfferExpiredOnce(link, "对方未开始发送(接收异常)");
+                }
+            }
+            //pri added by zhuyang,Every receive failure path must call back exactly once,20261017,end
         } finally {
+            stopHeartbeat(link);
             //pri modify by zhuyang,Clear both role handles for the dead Link before closing it,20261017,start
             if (mPeerSocket == link) mPeerSocket = null;
             if (mStashedSocket == link) mStashedSocket = null;
             closeQuietly(link);
             //pri modify by zhuyang,Clear both role handles for the dead Link before closing it,20261017,end
+            //pri added by zhuyang,Release the hotspot on failure too so Wi-Fi comes back,20261017,start
+            if (mReceiverRole && mHotspotActive) {
+                closeHotspot();
+                Bus.log("传输: 热点已关闭,Wi-Fi 恢复可用");
+            }
+            //pri added by zhuyang,Release the hotspot on failure too so Wi-Fi comes back,20261017,end
         }
     }
 
@@ -1608,8 +1910,9 @@ public class Xfer {
     public void sendImages(final java.util.List<Uri> uris) {
         new Thread(new Runnable() {
             @Override public void run() {
+                Link send = null;
                 try {
-                    Link send = mSendSocket;
+                    send = mSendSocket;
                     if (send == null && !mImGo && mGoAddress != null) {
                         // P2P 组已建立且本机是组员:主动连组主(组主的 8988 服务已在跑)。
                         // 原来这条路径没接上 —— 组先建好时上面的策略会因 mGoAddress != null 早退,发送方一直干等
@@ -1660,32 +1963,49 @@ public class Xfer {
                         return;
                     }
                     //pri added by zhuyang,Give a simultaneous peer the 300ms window to announce ROLE(S) before our offer,20261017,end
+                    //pri added by zhuyang,Heartbeat starts before the offer (keep the receiver alive) but rx-dead is armed only for the verdict wait,20261017,start
+                    startHeartbeat(send, false);
+                    //pri added by zhuyang,Heartbeat starts before the offer (keep the receiver alive) but rx-dead is armed only for the verdict wait,20261017,end
                     final int round = mRound; //pri added by zhuyang,Round token: a stale verdict is discarded by readVerdict,20261014
                     int total = 0;
                     //pri added by zhuyang,Offer stage: META(total) + one preview, then wait for the verdict,20261014,start
-                    synchronized (mWriteLock) {
+                    mWriteLock.lock();
+                    try {
                         //pri added by zhuyang,Guarantee ROLE(S) precedes META on this link even if the async write lost the race,20261017
                         sendRoleOnLink(send, "S");
-                        Proto.writeFrame(send.out, Proto.TYPE_META, uris.size(), null);
+                        writeBusinessFrame(send, Proto.TYPE_META, uris.size(), null);
                         if (!uris.isEmpty()) {
                             byte[] thumb = thumbnail(uris.get(0)); //pri added by zhuyang,Only the first preview, the receive card consumes the last one,20261014
                             if (thumb != null) {
-                                Proto.writeFrame(send.out, Proto.TYPE_PREVIEW, thumb.length, thumb);
+                                writeBusinessFrame(send, Proto.TYPE_PREVIEW, thumb.length, thumb);
                             }
                         }
                         send.out.flush();
+                    } finally {
+                        mWriteLock.unlock();
                     }
-                    Bus.log("传输: 已报价(" + uris.size() + " 张 + 预览),等对方「接收/拒绝」…");
+                    Bus.log("传输: 已报价(" + uris.size() + " 张 + 预览),等对方「接收/拒绝」…("
+                            + (VERDICT_WAIT_MS / 1000) + "s 上限)");
+                    //pri added by zhuyang,Arm the dead-peer check now that we are reading for the verdict,20261017
+                    send.lastRx.set(SystemClock.elapsedRealtime());
+                    send.hbExpectRx = true;
                     int verdict = readVerdict(send, round);
                     if (verdict == VERDICT_YIELDED) {
+                        stopHeartbeat(send);
                         Bus.log("传输: 已让出并转入接收,本机报价作废");
                         return;
                     }
                     if (verdict != Proto.TYPE_ACCEPT) {
+                        stopHeartbeat(send);
                         closeQuietly(send);
                         if (mSendSocket == send) mSendSocket = null;
                         if (mStashedSocket == send) mStashedSocket = null;
-                        Bus.log("传输: 对方未同意接收,整图未发出");
+                        //pri added by zhuyang,Do not report a dead link as a normal rejection,20261017
+                        if (send.linkDead.get()) {
+                            Bus.log("传输: 报价阶段连接已失效,整图未发出");
+                        } else {
+                            Bus.log("传输: 对方未同意接收,整图未发出");
+                        }
                         releaseHotspotLater();
                         return;
                     }
@@ -1707,18 +2027,28 @@ public class Xfer {
                         }
                     }).start();
                     //pri added by zhuyang,Delivery stage: full images only after ACCEPT,20261014,start
-                    synchronized (mWriteLock) {
+                    //pri added by zhuyang,From here on a blocked write is caught by the stall watchdog,20261017,start
+                    send.hbWritePhase = true;
+                    send.hbExpectRx = false;
+                    send.lastWriteProgressAt = SystemClock.elapsedRealtime();
+                    Bus.log("传输: 进入发送阶段,写停滞 " + (WRITE_STALL_MS / 1000) + "s 看门狗已启用");
+                    //pri added by zhuyang,From here on a blocked write is caught by the stall watchdog,20261017,end
                     for (int i = 0; i < uris.size(); i++) {
                         Object o = q.take();
                         if (o == eod) break;
                         if (mYielded) break;
                         byte[] data = (byte[]) o;
                         Bus.log("传输: 正在发送第 " + (i + 1) + "/" + uris.size() + " 张 " + data.length + " 字节…");
-                        Proto.writeFrame(send.out, Proto.TYPE_FULL, data.length, data);
+                        mWriteLock.lock();
+                        try {
+                            writeFullFrame(send, data);
+                            send.out.flush();
+                        } finally {
+                            mWriteLock.unlock();
+                        }
                         total += data.length;
                     }
-                    send.out.flush();
-                    }
+                    stopHeartbeat(send);
                     closeQuietly(send);
                     if (mSendSocket == send) mSendSocket = null;
                     if (mStashedSocket == send) mStashedSocket = null;
@@ -1730,8 +2060,11 @@ public class Xfer {
                     });
                     //pri added by zhuyang,Delivery stage: full images only after ACCEPT,20261014,end
                 } catch (Exception e) {
+                    if (send != null) stopHeartbeat(send);
                     if (mYielded) {
                         Bus.log("传输: 本机已让出,放弃发送: " + e);
+                    } else if (send != null && send.linkDead.get() && send.failReason != null) {
+                        notifyLinkFailedOnce(send, send.failReason);
                     } else {
                         fail("发送失败: " + e);
                     }
@@ -1745,6 +2078,7 @@ public class Xfer {
     private boolean settleRoleWindow(Link send) {
         long deadline = mLocalSwipedAt + ROLE_CONFLICT_WINDOW_MS;
         try {
+            send.s.setSoTimeout(RX_TIMEOUT_MS); //pri added by zhuyang,Every read path gets an upper bound,20261017
             while (mRunning && !mYielded) {
                 long remaining = deadline - SystemClock.elapsedRealtime();
                 if (remaining <= 0) return true;
@@ -1752,7 +2086,7 @@ public class Xfer {
                     try { Thread.sleep(Math.min(remaining, 20)); } catch (InterruptedException ignored) {}
                     continue;
                 }
-                Proto.Frame f = Proto.readFrame(send.in, 0, Proto.MAX_FRAME_LEN);
+                Proto.Frame f = Proto.readFrame(send.in, RX_TIMEOUT_MS, Proto.MAX_FRAME_LEN);
                 if (f == null) {
                     Bus.log("传输: 角色窗口内连接已关闭");
                     return false;
@@ -1800,6 +2134,16 @@ public class Xfer {
                     Bus.log("传输: 回执连接已关闭");
                     break;
                 }
+                //pri added by zhuyang,Answer the peer heartbeat while the user is deciding,20261017,start
+                if (f.type == Proto.TYPE_PING) {
+                    replyPong(link);
+                    continue;
+                }
+                if (f.type == Proto.TYPE_PONG) {
+                    Bus.log("传输: 收到 PONG");
+                    continue;
+                }
+                //pri added by zhuyang,Answer the peer heartbeat while the user is deciding,20261017,end
                 if (round != mRound) {
                     Bus.log("传输: 收到上一轮的回执,已忽略");
                     return 0;
@@ -1846,6 +2190,9 @@ public class Xfer {
             mMain.post(new Runnable() {
                 @Override public void run() { mListener.onPeerRejected(); }
             });
+        } else if (link.linkDead.get() && link.failReason != null) {
+            //pri added by zhuyang,Heartbeat already judged the peer dead: report that, not a plain timeout,20261017
+            notifyLinkFailedOnce(link, link.failReason);
         } else {
             mMain.post(new Runnable() {
                 @Override public void run() { mListener.onVerdictTimeout(); }
@@ -1880,9 +2227,13 @@ public class Xfer {
         mIo.execute(new Runnable() {
             @Override public void run() {
                 try {
-                    synchronized (mWriteLock) {
+                    mWriteLock.lock();
+                    try {
                         Proto.writeFrame(link.out, type, 0, null);
                         link.out.flush();
+                        markTx(link);
+                    } finally {
+                        mWriteLock.unlock();
                     }
                     Bus.log("传输: 已" + (type == Proto.TYPE_ACCEPT ? "同意接收" : "拒绝接收") + ",回执已写回");
                 } catch (Exception e) {
@@ -1937,6 +2288,9 @@ public class Xfer {
     public void destroy() {
         mRunning = false;
         try { if (mServer != null) mServer.close(); } catch (Exception ignored) {}
+        stopHeartbeat(mPeerSocket);
+        stopHeartbeat(mStashedSocket);
+        stopHeartbeat(mSendSocket);
         closeQuietly(mPeerSocket);
         closeQuietly(mStashedSocket);
         closeQuietly(mSendSocket);
