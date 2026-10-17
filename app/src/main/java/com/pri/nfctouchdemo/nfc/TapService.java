@@ -114,6 +114,22 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         return null;
     }
 
+    //pri added by zhuyang,Batch 6: never leave the round's AP behind when the service/task goes away,20261017,start
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        Bus.log("服务: 任务被移除,释放本轮热点");
+        if (sXfer != null) sXfer.stopHotspot();
+        super.onTaskRemoved(rootIntent);
+    }
+
+    @Override
+    public void onDestroy() {
+        Bus.log("服务: 被销毁,释放本轮热点");
+        if (sXfer != null) sXfer.stopHotspot();
+        super.onDestroy();
+    }
+    //pri added by zhuyang,Batch 6: never leave the round's AP behind when the service/task goes away,20261017,end
+
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         Bus.setServiceListener(this);
@@ -236,6 +252,8 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
             mTransferDone = false;
             mBmps.clear();
             mLastBmp = null;
+            //pri added by zhuyang,Batch 6: rejecting cancels the round, so the AP owner releases its hotspot,20261017
+            if (sXfer != null) sXfer.stopHotspot();
         }
         return START_STICKY;
     }
@@ -266,6 +284,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
 
     @Override
     public void onPeer(String payload, String role) {
+        //pri added by zhuyang,Batch 6: NFC role decides the single AP owner,20261017
         //pri added by zhuyang,D1: drop the previous round's fail banner the moment a new round starts,20261014
         startService(OverlayService.hideFailBannerIntent(this));
         mLinkReady = false; // 新一轮:连接就绪状态重置
@@ -283,7 +302,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         //pri added by zhuyang,leaves, so a published selection can only be live while it is genuinely what the user is looking at,20261016
         if (sPublished) {
             Bus.log("碰一碰: 相册已直接上报当前选择 " + PENDING.size() + " 张,不再读屏幕");
-            beginPeerRound(payload);
+            beginPeerRound(payload, role);
             return;
         }
         //pri added by zhuyang,Gallery pickup (the product flow): if the user is in Google Photos looking at a photo, or with several,20261016,start
@@ -313,19 +332,19 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
                         Bus.log("相册拾取: 读不到相册内容(无障碍未开启),沿用上一轮的选择");
                     }
                     //pri added by zhuyang,The gallery is on screen and readable, and the user has neither opened nor ticked,20261016,end
-                    beginPeerRound(payload);
+                    beginPeerRound(payload, role);
                 }});
             }}, "gallery-pickup").start();
             return;
         }
         //pri added by zhuyang,Gallery pickup (the product flow): if the user is in Google Photos looking at a photo, or with several,20261016,end
-        beginPeerRound(payload);
+        beginPeerRound(payload, role);
     }
 
     //pri added by zhuyang,The body that used to be onPeer's tail, unchanged: it decides this round's role from PENDING,20261016,start
     //pri added by zhuyang,Split out only so the gallery pickup above can run first without the NFC path waiting on it when the,20261016
     //pri added by zhuyang,gallery is not involved,20261016,end
-    private void beginPeerRound(String payload) {
+    private void beginPeerRound(String payload, String nfcRole) {
         final String label = peerName(payload);
         Xfer x = xfer(this);
         x.setExpectedPeer(field(payload,"n"), field(payload,"b"), field(payload,"p"),
@@ -336,7 +355,27 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         mPeerLabel = label;
         //pri modify by zhuyang,Both phones only prepare to receive; the role is decided at swipe time,20261014,start
         x.setCanSend(hasPending()); //pri added by zhuyang,Photos in hand = still undecided: the accept loop must not consume an incoming connection as data,20261014
-        x.startHotspot(); //pri added by zhuyang,Unconditional: both sides prepare for a possible receive,20261014
+        //pri added by zhuyang,Batch 6: NFC card side is the single AP owner; reader never opens an AP,20261017,start
+        final boolean apOwner;
+        if ("card".equals(nfcRole)) {
+            apOwner = true;
+        } else if ("reader".equals(nfcRole)) {
+            apOwner = false;
+        } else {
+            // Debug am startservice path has no NFC role: the phone without photos owns the AP so
+            // two phones that both have photos never open two APs.
+            apOwner = !hasPending();
+        }
+        Bus.log("承载: NFC 角色=" + (nfcRole == null ? "缺失" : nfcRole)
+                + " → 本机" + (apOwner ? "是" : "不是") + " AP owner");
+        x.setApOwner(apOwner);
+        if (apOwner) {
+            x.startHotspot();
+        } else if (!hasPending()) {
+            // Receiver side: join the owner's AP now so the owner can reach us when it swipes.
+            x.startHotspotClient();
+        }
+        //pri added by zhuyang,Batch 6: NFC card side is the single AP owner; reader never opens an AP,20261017,end
         if (hasPending()) {
             showSendPage();
         } else {

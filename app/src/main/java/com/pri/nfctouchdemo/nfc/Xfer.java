@@ -74,6 +74,12 @@ public class Xfer {
     //pri modify by zhuyang,Heartbeat and business frames share this lock so the wire never interleaves,20261017,end
     public static final String HS_SSID = "TapShare-Transfer";
     public static final String HS_PASS = "tapshare2026";
+    //pri added by zhuyang,Batch 6: derived hotspot credentials and a bounded join budget,20261017,start
+    private static final int HS_JOIN_MAX_ATTEMPTS = 5;
+    private static final long HS_JOIN_ATTEMPT_MS = 1200L;
+    private static final long HS_JOIN_GAP_MS = 1000L;
+    private static final long HS_JOIN_BUDGET_MS = 10000L;
+    //pri added by zhuyang,Batch 6: derived hotspot credentials and a bounded join budget,20261017,end
     private static final int VERDICT_WAIT_MS = 20000;  //pri modify by zhuyang,Shorten the verdict wait from 60s to 20s,20261017
     //pri added by zhuyang,Liveness limits: read cap, PING idle, dead peer, write stall and round total,20261017,start
     private static final int RX_TIMEOUT_MS = 30000;      // control/role paths still allow a slow first frame
@@ -312,6 +318,12 @@ public class Xfer {
     private volatile WifiManager.LocalOnlyHotspotReservation mHotspotReservation;
     private volatile boolean mHotspotActive;
     private volatile boolean mHotspotStarting;
+    //pri added by zhuyang,Batch 6: one AP owner per round and credentials derived from both sids,20261017,start
+    private volatile boolean mApOwner = true;
+    private volatile String mDerivedSsid;
+    private volatile String mDerivedPass;
+    private volatile int mHotspotGen;
+    //pri added by zhuyang,Batch 6: one AP owner per round and credentials derived from both sids,20261017,end
     private volatile boolean mPauseWarm;   // P2P 搜索与热点互斥(部分芯片不支持同时进行)
     private volatile android.net.ConnectivityManager.NetworkCallback mWifiNetCb;
     private int mIdRetry;
@@ -367,6 +379,8 @@ public class Xfer {
         mPeerHsSsid = hsSsid;
         mPeerHsPass = hsPass;
         mPeerSid = (peerSid == null || peerSid.isEmpty()) ? null : peerSid;
+        //pri added by zhuyang,Batch 6: both ends derive the same SSID/pass from both sids,20261017
+        deriveHotspotCredentials();
         //pri added by zhuyang,The debug path has no sid: both ends must skip HELLO and say so in the log,20261017,start
         if (mPeerSid == null) {
             Bus.log("传输: [未认证] 本轮对方 payload 没有 sid,跳过 HELLO 握手(调试路径)");
@@ -424,6 +438,14 @@ public class Xfer {
         mCanSend = false;   //pri added by zhuyang,New round: undecided until TapService reports the photos,20261014
         mHasPhotos = false; //pri added by zhuyang,New round: no photos reported yet,20261017
         mPeerSid = null;    //pri added by zhuyang,New round: the peer sid is set again from the new payload,20261017
+        //pri added by zhuyang,Batch 6: a new round derives new credentials, so any AP left from the previous round is stale,20261017
+        if (mHotspotReservation != null || mHotspotStarting) {
+            Bus.log("热点: 新一轮开始,关闭上一轮残留热点");
+            closeHotspot();
+        }
+        releaseNetworkRequest(); //pri added by zhuyang,Batch 6: drop the previous round's AP binding before deriving a new one,20261017
+        mDerivedSsid = null;
+        mDerivedPass = null;
         mDriveP2p = false;  //pri added by zhuyang,New round: the P2P fallback needs a fresh decision,20261014
         //pri added by zhuyang,Bump the round token and drop the verdict session state of the previous round,20261014,start
         mRound++;
@@ -456,8 +478,95 @@ public class Xfer {
         mServer = null;
     }
 
+    //pri added by zhuyang,Batch 6: TapService fixes the single AP owner from the NFC role,20261017,start
+    public void setApOwner(boolean owner) {
+        mApOwner = owner;
+        Bus.log("热点: 本轮" + (owner ? "由本机开热点(唯一 AP owner)" : "本机不开热点(由对端当 AP owner)"));
+        if (!owner && (mHotspotReservation != null || mHotspotActive || mHotspotStarting)) {
+            Bus.log("热点: 非 owner,先关闭本机残留热点");
+            closeHotspot();
+        }
+    }
+    //pri added by zhuyang,Batch 6: TapService fixes the single AP owner from the NFC role,20261017,end
+
+    //pri added by zhuyang,Batch 6: derive the same SSID/pass on both ends from the two sids,20261017,start
+    //pri added by zhuyang,Batch 6: sessionSid = SHA-256(min(localSid,peerSid) + max(localSid,peerSid)),20261017
+    //pri added by zhuyang,Batch 6: ssid = "TShare-" + hex(sessionSid)[0..5]; pass = "ts" + hex(sessionSid)[6..21],20261017
+    //pri added by zhuyang,Batch 6: both phones compute the same pair, so no password travels in the payload,20261017
+    private void deriveHotspotCredentials() {
+        mDerivedSsid = null;
+        mDerivedPass = null;
+        if (mPeerSid == null) {
+            Bus.log("热点: [未认证] 使用固定热点凭据");
+            return;
+        }
+        if (Build.VERSION.SDK_INT < 33) {
+            Bus.log("热点: API<33 不支持自定义 LOHS 配置,本轮不派生凭据(第二次碰触用 hs/hp 兜底)");
+            return;
+        }
+        try {
+            String local = Bus.sid().toLowerCase(Locale.US);
+            String peer = mPeerSid.toLowerCase(Locale.US);
+            String min = local.compareTo(peer) <= 0 ? local : peer;
+            String max = local.compareTo(peer) <= 0 ? peer : local;
+            MessageDigest md = MessageDigest.getInstance("SHA-256");
+            byte[] d = md.digest((min + max).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder sb = new StringBuilder(d.length * 2);
+            for (byte b : d) sb.append(String.format(Locale.US, "%02x", b & 0xFF));
+            String hex = sb.toString();
+            mDerivedSsid = "TShare-" + hex.substring(0, 6);
+            mDerivedPass = "ts" + hex.substring(6, 22);
+            Bus.log("热点: 会话派生凭据 SSID=" + mDerivedSsid + ",pass=" + mDerivedPass);
+        } catch (Throwable t) {
+            Bus.log("热点: 派生凭据失败,退回固定凭据: " + t);
+        }
+    }
+    //pri added by zhuyang,Batch 6: derive the same SSID/pass on both ends from the two sids,20261017,end
+
+    //pri added by zhuyang,Batch 6: a non-owner receiver joins the owner AP so it can accept the owner's send,20261017,start
+    public void startHotspotClient() {
+        if (mApOwner) return;
+        final String ssid;
+        final String pass;
+        final boolean derived;
+        if (Build.VERSION.SDK_INT >= 33 && mDerivedSsid != null) {
+            ssid = mDerivedSsid;
+            pass = mDerivedPass;
+            derived = true;
+        } else if (mPeerHsSsid != null) {
+            ssid = mPeerHsSsid;
+            pass = mPeerHsPass;
+            derived = false;
+        } else if (Build.VERSION.SDK_INT >= 33 && mPeerSid == null) {
+            ssid = HS_SSID;
+            pass = HS_PASS;
+            derived = false;
+        } else {
+            Bus.log("传输: 非 AP owner 且本轮没有热点凭据,等待局域网/P2P");
+            return;
+        }
+        if (mHotspotReservation != null || mHotspotActive || mHotspotStarting) {
+            Bus.log("热点: 非 owner,加入前关闭本机残留热点");
+            closeHotspot();
+        }
+        new Thread(new Runnable() {
+            @Override public void run() {
+                if (!mRunning) return;
+                Bus.log("传输: 非 AP owner 主动接入对方热点(接收方向)");
+                if (joinHotspot(ssid, pass, derived)) {
+                    Bus.log("传输: 非 AP owner 接入流程结束(热点已接入或已有活动连接)");
+                }
+            }
+        }, "ap-client").start();
+    }
+    //pri added by zhuyang,Batch 6: a non-owner receiver joins the owner AP so it can accept the owner's send,20261017,end
+
     /** 接收方按下按钮时即开启本地热点,把 SSID/密码写进 payload,让对方免搜索直连。 */
     public void startHotspot() {
+        if (!mApOwner) {
+            Bus.log("热点: 本机不是本轮 AP owner,跳过开启");
+            return;
+        }
         if (mHotspotReservation != null || mHotspotStarting) return;
         try {
             final WifiManager wm = (WifiManager) mCtx.getSystemService(Context.WIFI_SERVICE);
@@ -467,6 +576,7 @@ public class Xfer {
                 Bus.log("热点: Wi-Fi 正开着,本机型热点与 Wi-Fi 互斥 — 跳过热点(走同网直连/P2P)");
                 return;
             }
+            final int gen = ++mHotspotGen;
             mHotspotStarting = true;
             mReceiverRole = true;
             startServer(); // 提前监听 8988:消除"对方连过来时服务端还没起"的竞态
@@ -475,8 +585,15 @@ public class Xfer {
             Bus.log("热点: 正在开启本地热点(给对方免搜索直连用)…");
             WifiManager.LocalOnlyHotspotCallback cb = new WifiManager.LocalOnlyHotspotCallback() {
                 @Override public void onStarted(WifiManager.LocalOnlyHotspotReservation reservation) {
+                    if (gen != mHotspotGen || !mApOwner) {
+                        //pri added by zhuyang,Batch 6: a closed/superseded attempt must not leave an AP behind,20261017
+                        try { reservation.close(); } catch (Throwable ignored) {}
+                        Bus.log("热点: 忽略已过期的开启回调,AP 立即关闭");
+                        return;
+                    }
                     mHotspotReservation = reservation;
                     mHotspotActive = true;
+                    mHotspotStarting = false;
                     android.net.wifi.SoftApConfiguration cfg = reservation.getSoftApConfiguration();
                     if (cfg != null && cfg.getSsid() != null) {
                         Bus.setHotspotInfo(cfg.getSsid(), cfg.getPassphrase());
@@ -486,6 +603,7 @@ public class Xfer {
                     }
                 }
                 @Override public void onFailed(int reason) {
+                    if (gen != mHotspotGen) return;
                     String r;
                     switch (reason) {
                         case WifiManager.LocalOnlyHotspotCallback.ERROR_INCOMPATIBLE_MODE:
@@ -503,24 +621,32 @@ public class Xfer {
                     mPauseWarm = false;
                 }
                 @Override public void onStopped() {
+                    if (gen != mHotspotGen) return;
                     mHotspotActive = false;
                     mPauseWarm = false;
                     mHotspotStarting = false;
+                    mHotspotReservation = null;
                     Bus.log("热点: 已停止");
                 }
             };
             try {
                 if (android.os.Build.VERSION.SDK_INT >= 33) {
+                    final boolean derived = mDerivedSsid != null;
+                    final String ssid = derived ? mDerivedSsid : HS_SSID;
+                    final String pass = derived ? mDerivedPass : HS_PASS;
                     android.net.wifi.SoftApConfiguration cfg =
                             new android.net.wifi.SoftApConfiguration.Builder()
-                                    .setWifiSsid(android.net.wifi.WifiSsid.fromBytes(HS_SSID.getBytes(java.nio.charset.StandardCharsets.UTF_8)))
-                                    .setPassphrase(HS_PASS,
+                                    .setWifiSsid(android.net.wifi.WifiSsid.fromBytes(ssid.getBytes(java.nio.charset.StandardCharsets.UTF_8)))
+                                    .setPassphrase(pass,
                                             android.net.wifi.SoftApConfiguration.SECURITY_TYPE_WPA2_PSK)
                                     .build();
                     wm.startLocalOnlyHotspotWithConfiguration(cfg, mCtx.getMainExecutor(), cb);
-                    Bus.log("热点: 固定配置已发起(SSID=" + HS_SSID + ")");
+                    Bus.log("热点: " + (derived ? "会话派生配置" : "[未认证] 固定配置")
+                            + "已发起(SSID=" + ssid + ")");
                 } else {
+                    //pri added by zhuyang,Batch 6: API<33 has no custom LOHS config, keep the two-tap hs/hp fallback,20261017
                     wm.startLocalOnlyHotspot(cb, mMain);
+                    Bus.log("热点: API<33 不支持自定义配置,使用系统随机热点凭据(第二次碰触 hs/hp 兜底)");
                 }
             } catch (Throwable t) {
                 Bus.log("热点: 固定配置不可用,退回默认: " + t);
@@ -533,6 +659,8 @@ public class Xfer {
     }
 
     private void closeHotspot() {
+        mHotspotGen++; //pri added by zhuyang,Batch 6: invalidate callbacks of the attempt being closed,20261017
+        mHotspotStarting = false;
         try { if (mHotspotReservation != null) mHotspotReservation.close(); } catch (Throwable ignored) {}
         mHotspotReservation = null;
         mHotspotActive = false;
@@ -1050,7 +1178,30 @@ public class Xfer {
     private void startConnectStrategy() {
         new Thread(new Runnable() {
             @Override public void run() {
-                if (mPeerHsSsid != null && joinHotspot(mPeerHsSsid, mPeerHsPass)) return;
+                //pri added by zhuyang,Batch 6: an established send channel needs no new join or direct connect,20261017
+                if (isAlive(mSendSocket)) {
+                    Bus.log("传输: 发送通道已就绪,跳过重新加入/直连");
+                    return;
+                }
+                //pri added by zhuyang,Batch 6: only the non-owner joins; owner reuses its own AP,20261017,start
+                String hsSsid = null;
+                String hsPass = null;
+                boolean derived = false;
+                if (mApOwner) {
+                    Bus.log("传输: 本机是本轮 AP owner,跳过加入热点");
+                } else if (Build.VERSION.SDK_INT >= 33 && mDerivedSsid != null) {
+                    hsSsid = mDerivedSsid;
+                    hsPass = mDerivedPass;
+                    derived = true;
+                } else if (mPeerHsSsid != null) {
+                    hsSsid = mPeerHsSsid;
+                    hsPass = mPeerHsPass;
+                } else if (Build.VERSION.SDK_INT >= 33 && mPeerSid == null) {
+                    hsSsid = HS_SSID;
+                    hsPass = HS_PASS;
+                }
+                if (hsSsid != null && joinHotspot(hsSsid, hsPass, derived)) return;
+                //pri added by zhuyang,Batch 6: only the non-owner joins; owner reuses its own AP,20261017,end
                 if (!mSenderWaiting) {
                     Bus.log("传输: 连接阶段已判定失败,不再走 LAN/P2P 兜底");
                     return;
@@ -1186,19 +1337,50 @@ public class Xfer {
         return false;
     }
 
-    /** 用碰一碰传来的 SSID/密码接入对方热点,再连热点网关的传输端口。 */
-    private boolean joinHotspot(String mPeerHsSsid, String mPeerHsPass) {
+    //pri modify by zhuyang,Batch 6: join with this round's credentials (5x1s, <=10s), then connect to the gateway port,20261017,start
+    private boolean joinHotspot(String ssid, String pass, boolean derived) {
         if (Build.VERSION.SDK_INT < 29) return false;
+        Bus.log("传输: 用" + (derived ? "会话派生" : "对方热点") + "凭据接入 SSID=" + ssid
+                + "(最多 " + HS_JOIN_MAX_ATTEMPTS + " 次," + (HS_JOIN_BUDGET_MS / 1000) + "s 内)…");
+        // 关键:先停掉预热的 P2P 搜索 —— P2P 占着射频时,系统弹窗为找热点发起的扫描会
+        // 直接失败(WifiNetworkFactory: Scan failed - Device or resource busy)→ 永远"找不到设备"
+        mPauseWarm = true;
+        try { mP2p.stopPeerDiscovery(mChannel, null); } catch (Throwable ignored) {}
+        final long deadline = SystemClock.elapsedRealtime() + HS_JOIN_BUDGET_MS;
+        for (int attempt = 1; attempt <= HS_JOIN_MAX_ATTEMPTS && mRunning; attempt++) {
+            //pri added by zhuyang,Batch 6: a send/receive link that came up on LAN/P2P meanwhile ends the join retries,20261017
+            if (isAlive(mSendSocket) || (mReceiverRole && isAlive(mStashedSocket))) {
+                Bus.log("传输: 已有活动连接,停止热点接入重试");
+                return true;
+            }
+            if (attempt > 1) {
+                long left = deadline - SystemClock.elapsedRealtime();
+                if (left <= 0) break;
+                try { Thread.sleep(Math.min(HS_JOIN_GAP_MS, left)); } catch (InterruptedException ignored) {}
+                if (!mRunning) break;
+            }
+            //pri added by zhuyang,Batch 6: derived uses WPA2 (our own PSK AP); payload keeps WPA3 first and WPA2 next,20261017
+            boolean wpa3 = !derived && (attempt % 2 == 1);
+            Bus.log("传输: 热点接入尝试 " + attempt + "/" + HS_JOIN_MAX_ATTEMPTS
+                    + (wpa3 ? "(WPA3)" : "(WPA2)"));
+            long remain = deadline - SystemClock.elapsedRealtime();
+            if (remain <= 0) break;
+            if (joinHotspotOnce(ssid, pass, wpa3, Math.min(HS_JOIN_ATTEMPT_MS, remain))) return true;
+        }
+        mPauseWarm = false;
+        Bus.log("传输: 热点接入失败(≤" + (HS_JOIN_BUDGET_MS / 1000) + "s),走局域网/P2P 兜底");
+        return false;
+    }
+    //pri modify by zhuyang,Batch 6: bounded 5x1s join with derived or payload credentials,20261017,end
+
+    private boolean joinHotspotOnce(String ssid, String pass, boolean wpa3, long attemptMs) {
         try {
-            Bus.log("传输: 用对方热点信息直连 SSID=" + mPeerHsSsid + "…");
-            // 关键:先停掉预热的 P2P 搜索 —— P2P 占着射频时,系统弹窗为找热点发起的扫描会
-            // 直接失败(WifiNetworkFactory: Scan failed - Device or resource busy)→ 永远"找不到设备"
-            mPauseWarm = true;
-            try { mP2p.stopPeerDiscovery(mChannel, null); } catch (Throwable ignored) {}
-            try { Thread.sleep(1500); } catch (InterruptedException ignored) {}
             android.net.wifi.WifiNetworkSpecifier.Builder sb =
-                    new android.net.wifi.WifiNetworkSpecifier.Builder().setSsid(mPeerHsSsid);
-            if (mPeerHsPass != null) sb.setWpa3Passphrase(mPeerHsPass); // 测试:本 ROM 热点默认 WPA2/WPA3 混合(PSK+SAE),按 WPA2 请求匹配不上
+                    new android.net.wifi.WifiNetworkSpecifier.Builder().setSsid(ssid);
+            if (pass != null) {
+                if (wpa3) sb.setWpa3Passphrase(pass); //pri added by zhuyang,Batch 6: legacy path, this ROM's LOHS default is WPA2/WPA3 mixed,20261017
+                else sb.setWpa2Passphrase(pass);      //pri added by zhuyang,Batch 6: derived AP is explicitly WPA2 PSK,20261017
+            }
             android.net.NetworkRequest req = new android.net.NetworkRequest.Builder()
                     .addTransportType(android.net.NetworkCapabilities.TRANSPORT_WIFI)
                     .removeCapability(android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET)
@@ -1218,9 +1400,10 @@ public class Xfer {
                     latch.countDown();
                 }
             };
-            cm.requestNetwork(req, mWifiNetCb, 30000); // 30s:普通应用会弹系统"允许连接"确认框,留足点按时间
-            if (!latch.await(31, java.util.concurrent.TimeUnit.SECONDS) || holder[0] == null) {
-                Bus.log("传输: 对方热点接入失败(超时或被拒绝)");
+            cm.requestNetwork(req, mWifiNetCb, (int) attemptMs);
+            if (!latch.await(attemptMs + 300, java.util.concurrent.TimeUnit.MILLISECONDS)
+                    || holder[0] == null) {
+                Bus.log("传输: 热点接入未成功(本次超时或被拒绝)");
                 releaseNetworkRequest();
                 return false;
             }
@@ -1269,9 +1452,11 @@ public class Xfer {
                     try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
                 }
             }
+            releaseNetworkRequest();
             return false;
         } catch (Throwable t) {
             Bus.log("传输: 接入对方热点异常 " + t);
+            releaseNetworkRequest();
             return false;
         }
     }
@@ -2424,6 +2609,8 @@ public class Xfer {
                 closeHotspot();
                 Bus.log("传输: 热点已关闭,Wi-Fi 恢复可用");
             }
+            //pri added by zhuyang,Batch 6: a receiver that joined the owner AP unbinds it after the round,20261017
+            releaseHotspotLater();
             //pri added by zhuyang,Release the hotspot on failure too so Wi-Fi comes back,20261017,end
         }
     }
@@ -3149,10 +3336,16 @@ public class Xfer {
 
     //pri added by zhuyang,Release the hotspot network only after the whole transaction finished,20261014
     private void releaseHotspotLater() {
-        if (mWifiNetCb == null) return;
-        mMain.postDelayed(new Runnable() {
-            @Override public void run() { releaseNetworkRequest(); }
-        }, 5000);
+        if (mWifiNetCb != null) {
+            mMain.postDelayed(new Runnable() {
+                @Override public void run() { releaseNetworkRequest(); }
+            }, 5000);
+        }
+        //pri added by zhuyang,Batch 6: the AP owner releases its hotspot when the transaction ends,20261017
+        if (mHotspotActive || mHotspotReservation != null) {
+            Bus.log("热点: 本轮传输结束,释放 AP owner 热点");
+            closeHotspot();
+        }
     }
 
     private byte[] thumbnail(Uri uri) {
@@ -3204,6 +3397,11 @@ public class Xfer {
         mDriveP2p = false;
         Bus.log("传输: [失败] " + err.code + "(" + XferError.nameOf(err.code) + ") stage=" + err.stage
                 + " — " + (err.detail == null ? "" : err.detail));
+        //pri added by zhuyang,Batch 6: a terminal failure with no live link must not leave the round's AP open,20261017
+        if (!hasLiveLink() && (mHotspotActive || mHotspotReservation != null)) {
+            closeHotspot();
+            Bus.log("热点: 本轮失败,已释放热点");
+        }
         final String legacy = err.detail == null ? XferError.nameOf(err.code) : err.detail;
         mMain.post(new Runnable() {
             @Override public void run() {
