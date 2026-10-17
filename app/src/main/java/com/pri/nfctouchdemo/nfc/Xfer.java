@@ -16,6 +16,7 @@ import android.net.wifi.p2p.WifiP2pManager;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 
 import java.io.ByteArrayOutputStream;
 import java.io.DataInputStream;
@@ -48,6 +49,8 @@ public class Xfer {
         void onPeerRejected();                         //pri added by zhuyang,Sender: peer rejected the transfer,20261014
         void onPeerAccepted();                         //pri added by zhuyang,Sender: peer accepted the transfer,20261014
         void onVerdictTimeout();                       //pri added by zhuyang,Sender: no verdict within VERDICT_WAIT_MS,20261014
+        void onPeerSwipedFirst();                      //pri added by zhuyang,Peer sent ROLE(S) before this phone swiped: switch to the receive card,20261017
+        void onRoleYielded();                          //pri added by zhuyang,This phone lost the role race: stop sending and switch to the receive card,20261017
     }
 
     private static final int PORT = 8988;
@@ -57,6 +60,10 @@ public class Xfer {
     private static final int VERDICT_WAIT_MS = 60000;  //pri added by zhuyang,Sender waits this long for the verdict,20261014
     private static final int PROBE_MS = 3000;          //pri added by zhuyang,An accepted connection that stays silent this long carries no incoming data,20261014
     private static final int MAX_UNAUTH_CONNECTIONS = 4; //pri added by zhuyang,Cap concurrent connections that still owe a HELLO,20261017
+    private static final int ROLE_CONFLICT_WINDOW_MS = 300; //pri added by zhuyang,Wait window after our own swipe for a peer ROLE(S) before offering,20261017
+    private static final int ROLE_READ_TIMEOUT_MS = 1500;   //pri added by zhuyang,Wait this long for the peer ROLE frame after HELLO_ACK,20261017
+    private static final int ROLE_LISTEN_TIMEOUT_MS = 1000; //pri added by zhuyang,Upper bound for joining the role listener before reusing its stream,20261017
+    private static final int VERDICT_YIELDED = -1;          //pri added by zhuyang,readVerdict result: this phone yielded and now receives,20261017
 
     private final Context mCtx;
     private final java.util.List<Listener> mAll =
@@ -101,18 +108,53 @@ public class Xfer {
         @Override public void onVerdictTimeout() {
             for (Listener l : mAll) l.onVerdictTimeout();
         }
+        @Override public void onPeerSwipedFirst() {
+            for (Listener l : mAll) l.onPeerSwipedFirst();
+        }
+        @Override public void onRoleYielded() {
+            for (Listener l : mAll) l.onRoleYielded();
+        }
     };
 
     public void addListener(Listener l) {
         if (l != null && !mAll.contains(l)) mAll.add(l);
     }
 
+    //pri added by zhuyang,Keep the handshake streams with the socket: later frames must reuse them,20261017,start
+    private static final class Link {
+        final Socket s;
+        final DataInputStream in;
+        final DataOutputStream out;
+        String peerRole;        // ROLE read right after HELLO_ACK (null = old peer/timeout)
+        String peerSid;         // sid carried by that ROLE
+        Proto.Frame first;      // non-ROLE first frame already read (1a compatibility)
+
+        Link(Socket s, DataInputStream in, DataOutputStream out) {
+            this.s = s;
+            this.in = in;
+            this.out = out;
+        }
+    }
+    //pri added by zhuyang,Keep the handshake streams with the socket: later frames must reuse them,20261017,end
+
     private final WifiP2pManager mP2p;
     private final WifiP2pManager.Channel mChannel;
     private BroadcastReceiver mRx;
     private ServerSocket mServer;
-    private volatile Socket mPendingSocket;
-    private volatile Socket mPeerSocket;    //pri added by zhuyang,Receiver: the read connection the verdict is written back on,20261014
+    //pri added by zhuyang,Role convergence: the send channel and the inbound/stash channel are separate handles,20261017,start
+    private volatile Link mSendSocket;      // link used by this phone to send ROLE/OFFER/FULL
+    private volatile Link mStashedSocket;   // accepted link kept for role probing or receiving
+    private volatile Link mPeerSocket;      // receive link: the verdict is written back on it
+    private volatile String mPeerRole = "U";            // last role announced by the peer (U/S/R)
+    private volatile long mPeerSwipedAt;                // elapsedRealtime when the peer ROLE(S) was read
+    private volatile long mLocalSwipedAt;               // elapsedRealtime when the local user swiped
+    private volatile boolean mPeerWantsSend;            // peer announced ROLE(S) this round
+    private volatile boolean mYielded;                  // this phone lost the role race
+    private volatile Thread mRoleListenerThread;        // at most one role listener at a time
+    private volatile Link mRoleListenerAbort;           // listener on this link must exit without closing it
+    //pri added by zhuyang,Frames read on the send link before losing the race; replayed to the receiver,20261017
+    private final java.util.List<Proto.Frame> mPreReadFrames = new java.util.ArrayList<Proto.Frame>();
+    //pri added by zhuyang,Role convergence: the send channel and the inbound/stash channel are separate handles,20261017,end
     private volatile boolean mVerdictSent;  //pri added by zhuyang,Verdict is written back at most once per round,20261014
     private volatile boolean mDoneNotified; //pri added by zhuyang,"transfer done" is delivered at most once per connection,20261014
     private volatile int mExpect;           //pri added by zhuyang,Total image count announced by TYPE_META this round,20261014
@@ -225,10 +267,14 @@ public class Xfer {
      * [startAsSender]：那两个在同一轮里可能被调两次（它们开头的幂等早退就是为这个准备的），
      * 放进去会把同一轮刚起来的服务端又关掉。
      */
-    /** 手上有一条真正接上的 socket（发送方做组主时暂存的连接）。 */
+    /** 手上有一条真正接上的 socket（发送通道 / 暂存通道 / 接收通道）。 */
     private boolean hasLiveLink() {
-        Socket s = mPendingSocket;
-        return s != null && s.isConnected() && !s.isClosed();
+        return isAlive(mSendSocket) || isAlive(mStashedSocket) || isAlive(mPeerSocket);
+    }
+
+    //pri added by zhuyang,A Link counts only while its socket is connected and open,20261017
+    private static boolean isAlive(Link l) {
+        return l != null && l.s.isConnected() && !l.s.isClosed();
     }
 
     private void resetRoundState() {
@@ -251,8 +297,22 @@ public class Xfer {
         mDriveP2p = false;  //pri added by zhuyang,New round: the P2P fallback needs a fresh decision,20261014
         //pri added by zhuyang,Bump the round token and drop the verdict session state of the previous round,20261014,start
         mRound++;
-        try { if (mPeerSocket != null) mPeerSocket.close(); } catch (Exception ignored) {}
+        //pri added by zhuyang,Drop every link of the previous round, including the role listener's,20261017,start
+        closeQuietly(mPeerSocket);
         mPeerSocket = null;
+        closeQuietly(mStashedSocket);
+        mStashedSocket = null;
+        closeQuietly(mSendSocket);
+        mSendSocket = null;
+        mRoleListenerThread = null; // its socket is closed, the thread exits on its own
+        mRoleListenerAbort = null;
+        mPeerRole = "U";
+        mPeerSwipedAt = 0;
+        mLocalSwipedAt = 0;
+        mPeerWantsSend = false;
+        mYielded = false;
+        synchronized (mPreReadFrames) { mPreReadFrames.clear(); }
+        //pri added by zhuyang,Drop every link of the previous round, including the role listener's,20261017,end
         mVerdictSent = false;
         mDoneNotified = false;
         mExpect = 0;
@@ -261,8 +321,6 @@ public class Xfer {
         //pri added by zhuyang,Bump the round token and drop the verdict session state of the previous round,20261014,end
         try { if (mServer != null) mServer.close(); } catch (Exception ignored) {}
         mServer = null;
-        try { if (mPendingSocket != null) mPendingSocket.close(); } catch (Exception ignored) {}
-        mPendingSocket = null;
     }
 
     /** 接收方按下按钮时即开启本地热点,把 SSID/密码写进 payload,让对方免搜索直连。 */
@@ -444,7 +502,7 @@ public class Xfer {
         startConnectStrategy();
         mMain.postDelayed(new Runnable() {
             @Override public void run() {
-                if (mRunning && mGoAddress == null && !mReceiverRole && mPendingSocket == null) {
+                if (mRunning && mGoAddress == null && !mReceiverRole && !hasLiveLink()) {
                     Bus.log("P2P: 仍未建立直连(可退回重新碰一次,或检查两台 Wi-Fi 是否都打开)");
                 }
             }
@@ -457,11 +515,97 @@ public class Xfer {
         mHasPhotos = can; //pri added by zhuyang,The HELLO hp field mirrors the photo state of this round,20261017
     }
 
-    //pri added by zhuyang,Swipe declares the sender role without re-negotiating a channel that is already up,20261014
-    public void setSenderRole() {
-        mReceiverRole = false;
+    //pri modify by zhuyang,Role convergence: swipe records the local clock and announces ROLE(S); false = peer already swiped,20261017,start
+    public boolean setSenderRole() {
         mCanSend = false;
+        if (mPeerWantsSend) {
+            Bus.log("传输: 对端先上滑,本机不再发送(让出),转接收");
+            mReceiverRole = true;
+            mYielded = true;
+            Link stashed = mStashedSocket;
+            if (stashed != null && mPeerSocket != stashed) {
+                sendRoleOnLinkAsync(stashed, "R");
+                startIncomingOnStash(stashed);
+            }
+            notifyRoleYielded();
+            return false;
+        }
+        mReceiverRole = false;
+        mHasPhotos = true;
+        mLocalSwipedAt = SystemClock.elapsedRealtime();
+        Link send = mSendSocket;
+        if (send != null) {
+            sendRoleOnLinkAsync(send, "S");
+        } else if (mStashedSocket != null && mPeerSocket != mStashedSocket) {
+            // Only the peer-initiated link exists: announce our role on it now.
+            sendRoleOnLinkAsync(mStashedSocket, "S");
+        }
+        Bus.log("传输: 本机上滑,宣告 ROLE(S)"
+                + (send != null ? "(发送通道已就绪)" : "(发送通道尚未建立,连接建立后补发)"));
+        return true;
     }
+    //pri modify by zhuyang,Role convergence: swipe records the local clock and announces ROLE(S); false = peer already swiped,20261017,end
+
+    //pri added by zhuyang,Role convergence helpers: ROLE write, listener lifecycle and UI notifications,20261017,start
+    private void sendRoleOnLink(Link link, String role) {
+        if (link == null || link.s.isClosed()) return;
+        try {
+            byte[] b = Proto.buildRole(role, Bus.sid());
+            synchronized (mWriteLock) {
+                Proto.writeFrame(link.out, Proto.TYPE_ROLE, b.length, b);
+                link.out.flush();
+            }
+            Bus.log("传输: 已发送 ROLE(" + role + ")");
+        } catch (Exception e) {
+            Bus.log("传输: 发送 ROLE(" + role + ") 失败: " + e);
+        }
+    }
+
+    //pri added by zhuyang,Main-thread callers (TapService swipe) must not write the socket directly,20261017
+    private void sendRoleOnLinkAsync(final Link link, final String role) {
+        new Thread(new Runnable() {
+            @Override public void run() { sendRoleOnLink(link, role); }
+        }, "role-send").start();
+    }
+
+    private void notifyPeerSwipedFirst() {
+        mMain.post(new Runnable() {
+            @Override public void run() { mListener.onPeerSwipedFirst(); }
+        });
+    }
+
+    private void notifyRoleYielded() {
+        mMain.post(new Runnable() {
+            @Override public void run() { mListener.onRoleYielded(); }
+        });
+    }
+
+    //pri added by zhuyang,Take over a stashed link for receiving without blocking the caller (setSenderRole runs on main),20261017
+    private void startIncomingOnStash(final Link link) {
+        if (mPeerSocket == link) return;
+        new Thread(new Runnable() {
+            @Override public void run() {
+                stopRoleListener(link);
+                if (mPeerSocket == link) return; // the listener already took over as the reader
+                if (link.s.isClosed()) return;
+                handleIncoming(link);
+            }
+        }, "incoming-yield").start();
+    }
+
+    //pri added by zhuyang,Stop the single role listener before the same stream is used by another reader,20261017
+    private void stopRoleListener(Link link) {
+        Thread t = mRoleListenerThread;
+        if (t == null || !t.isAlive() || t == Thread.currentThread()) return;
+        mRoleListenerAbort = link;
+        try { t.join(ROLE_LISTEN_TIMEOUT_MS + 500); } catch (InterruptedException ignored) {}
+        if (t.isAlive() && mPeerSocket != link) {
+            Bus.log("传输: 角色监听线程未退出,关闭旧连接以免并发读");
+            closeQuietly(link);
+        }
+        if (mRoleListenerAbort == link) mRoleListenerAbort = null;
+    }
+    //pri added by zhuyang,Role convergence helpers: ROLE write, listener lifecycle and UI notifications,20261017,end
 
     //pri added by zhuyang,Role intent carried in HELLO: U=undecided S=send R=receive,20261017
     private String localRole() {
@@ -488,17 +632,16 @@ public class Xfer {
         }).start();
     }
 
-    //pri added by zhuyang,Client side of the first-frame handshake: HELLO then a 1500ms HELLO_ACK check,20261017,start
-    private DataInputStream clientHello(Socket s) {
-        DataInputStream in = null;
+    //pri modify by zhuyang,Client handshake returns the Link so every later frame reuses the same streams,20261017,start
+    private Link clientHello(Socket s) {
         try {
             s.setSoTimeout(Proto.HELLO_TIMEOUT_MS);
-            in = new DataInputStream(
+            DataInputStream in = new DataInputStream(
                     new java.io.BufferedInputStream(s.getInputStream(), 256 * 1024));
+            DataOutputStream out = new DataOutputStream(s.getOutputStream());
             if (mPeerSid == null) {
-                Bus.log("传输: [未认证] 本轮无对方 sid,跳过 HELLO 握手");
+                Bus.log("传输: [未认证] 本轮无对方 sid,跳过 HELLO/ROLE 握手(调试路径)");
             } else {
-                DataOutputStream out = new DataOutputStream(s.getOutputStream());
                 byte[] hello = Proto.buildHello(Bus.sid(), localRole(), mHasPhotos);
                 Proto.writeFrame(out, Proto.TYPE_HELLO, hello.length, hello);
                 out.flush();
@@ -515,10 +658,43 @@ public class Xfer {
                     closeQuietly(s);
                     return null;
                 }
-                Bus.log("传输: [认证] HELLO_ACK 校验通过,对方角色=" + ack.role);
+                mPeerRole = ack.role;
+                byte[] role = Proto.buildRole(localRole(), Bus.sid());
+                Proto.writeFrame(out, Proto.TYPE_ROLE, role.length, role);
+                out.flush();
+                Bus.log("传输: [认证] HELLO_ACK 校验通过,对方角色=" + ack.role
+                        + ",本机角色=" + localRole());
+                Link link = new Link(s, in, out);
+                //pri added by zhuyang,Read the peer's ROLE now so a simultaneous swipe can be arbitrated before we offer,20261017,start
+                try {
+                    Proto.Frame pf = Proto.readFrame(in, ROLE_READ_TIMEOUT_MS, Proto.MAX_ROLE_LEN);
+                    if (pf != null) {
+                        if (pf.type == Proto.TYPE_ROLE) {
+                            Proto.Role pr = Proto.parseRole(pf.data);
+                            if (pr != null) {
+                                if (mPeerSid != null && !mPeerSid.equalsIgnoreCase(pr.sid)) {
+                                    Bus.log("传输: [认证] 对端 ROLE sid 不一致,关闭连接");
+                                    closeQuietly(s);
+                                    return null;
+                                }
+                                link.peerRole = pr.role;
+                                link.peerSid = pr.sid;
+                                mPeerRole = pr.role;
+                                Bus.log("传输: [认证] 收到对端 ROLE(" + pr.role + ")");
+                            }
+                        } else {
+                            link.first = pf; // 1a peer wrote data before its ROLE (or has no ROLE)
+                        }
+                    }
+                } catch (java.net.SocketTimeoutException te) {
+                    Bus.log("传输: [认证] 对端未发送 ROLE(" + ROLE_READ_TIMEOUT_MS + "ms),按旧版本兼容");
+                }
+                s.setSoTimeout(0);
+                return link;
+                //pri added by zhuyang,Read the peer's ROLE now so a simultaneous swipe can be arbitrated before we offer,20261017,end
             }
             s.setSoTimeout(0);
-            return in;
+            return new Link(s, in, out);
         } catch (java.net.SocketTimeoutException e) {
             Bus.log("传输: [认证] 等待 HELLO_ACK 超时(" + Proto.HELLO_TIMEOUT_MS + "ms),关闭连接");
         } catch (Exception e) {
@@ -527,15 +703,19 @@ public class Xfer {
         closeQuietly(s);
         return null;
     }
-    //pri added by zhuyang,Client side of the first-frame handshake: HELLO then a 1500ms HELLO_ACK check,20261017,end
+    //pri modify by zhuyang,Client handshake returns the Link so every later frame reuses the same streams,20261017,end
 
     private boolean connectTo(String ip, String how) {
         for (int i = 0; i < 2 && mRunning; i++) {
             try {
                 Socket s = new Socket();
                 s.connect(new InetSocketAddress(ip, PORT), 1500);
-                if (clientHello(s) == null) continue;
-                mPendingSocket = s;
+                Link link = clientHello(s);
+                if (link == null) continue;
+                if (!handleClientRole(link)) {
+                    Bus.log("传输: " + how + "连接交由接收/裁决路径接管 " + ip + ":" + PORT);
+                    return true;
+                }
                 mPauseWarm = true; // 连上后停止 P2P 搜索:射频让路给数据传输(否则吞吐暴跌)
                 try { mP2p.stopPeerDiscovery(mChannel, null); } catch (Throwable ignored) {}
                 Bus.log("传输: " + how + "直连成功 " + ip + ":" + PORT + "(免搜索)");
@@ -611,8 +791,12 @@ public class Xfer {
                 try {
                     Socket s = net.getSocketFactory().createSocket();
                     s.connect(new InetSocketAddress(gw, PORT), 2000);
-                    if (clientHello(s) == null) continue;
-                    mPendingSocket = s;
+                    Link link = clientHello(s);
+                    if (link == null) continue;
+                    if (!handleClientRole(link)) {
+                        Bus.log("传输: 热点连接交由接收/裁决路径接管");
+                        return true;
+                    }
                     mPauseWarm = true; // 接入成功后停 P2P 搜索:射频让路给数据传输(否则吞吐暴跌)
                     try { mP2p.stopPeerDiscovery(mChannel, null); } catch (Throwable ignored) {}
                     Bus.log("传输: 热点直连成功(免搜索)");
@@ -788,13 +972,12 @@ public class Xfer {
         // 发送方且是组员:等用户点「发送」时连组主写图
     }
 
-    //pri added by zhuyang,Sender always writes the offer first: a connection that stays silent is not incoming data,20261014,start
-    private boolean peerSpeaksFirst(Socket s, DataInputStream bufferedIn) {
+    //pri modify by zhuyang,Debug path keeps the pre-1a direction probe; it never sees ROLE frames,20261017,start
+    private boolean peerSpeaksFirst(Link link) {
         long deadline = System.currentTimeMillis() + PROBE_MS;
         try {
-            java.io.InputStream in = bufferedIn != null ? bufferedIn : s.getInputStream();
             while (mRunning && System.currentTimeMillis() < deadline) {
-                if (in.available() > 0) return true;
+                if (link.in.available() > 0) return true;
                 try { Thread.sleep(100); } catch (InterruptedException ignored) {}
             }
         } catch (Throwable t) {
@@ -802,12 +985,13 @@ public class Xfer {
         }
         return false;
     }
-    //pri added by zhuyang,Sender always writes the offer first: a connection that stays silent is not incoming data,20261014,end
+    //pri modify by zhuyang,Debug path keeps the pre-1a direction probe; it never sees ROLE frames,20261017,end
 
-    //pri added by zhuyang,Sender side of an accepted connection: keep it for the offer the user is about to send,20261014
-    private void stashForSending(Socket s) {
-        mPendingSocket = s; // 发送方做组主:暂存连接,等用户点发送
-        Bus.log("传输: 连接已就绪,点「发送给对方」即可发送");
+    //pri added by zhuyang,Install/outdate the send channel; a replaced link is closed,20261017
+    private void setSendLink(Link link) {
+        Link old = mSendSocket;
+        mSendSocket = link;
+        if (old != null && old != link) closeQuietly(old);
     }
 
     private void startServer() {
@@ -839,10 +1023,9 @@ public class Xfer {
         }).start();
     }
 
-    //pri added by zhuyang,Server side of the first-frame handshake, then the original direction classification,20261017,start
+    //pri modify by zhuyang,Server handshake -> Link; classification reads the peer's first ROLE/META frame,20261017,start
     private void authenticateAndClassify(final Socket s) {
         boolean released = false;
-        DataInputStream in = null;
         try {
             if (!mRunning) {
                 closeQuietly(s);
@@ -850,35 +1033,60 @@ public class Xfer {
             }
             final String expected = mPeerSid;
             if (expected == null) {
-                Bus.log("传输: [未认证] 本轮无对方 sid,跳过 HELLO 校验 " + s.getInetAddress());
-            } else {
-                s.setSoTimeout(Proto.HELLO_TIMEOUT_MS);
-                in = new DataInputStream(
-                        new java.io.BufferedInputStream(s.getInputStream(), 256 * 1024));
-                Proto.Frame f = Proto.readFrame(in, Proto.HELLO_TIMEOUT_MS, Proto.MAX_HELLO_LEN);
-                if (f == null || f.type != Proto.TYPE_HELLO) {
-                    Bus.log("传输: [认证] 未收到 HELLO,关闭连接 " + s.getInetAddress());
-                    closeQuietly(s);
-                    return;
-                }
-                Proto.Hello hello = Proto.parseHello(f.data);
-                if (hello == null || hello.version != Proto.HELLO_VERSION
-                        || !expected.equalsIgnoreCase(hello.sid)) {
-                    Bus.log("传输: [认证] HELLO 校验失败,关闭连接 " + s.getInetAddress());
-                    closeQuietly(s);
-                    return;
-                }
-                DataOutputStream out = new DataOutputStream(s.getOutputStream());
-                byte[] ack = Proto.buildHelloAck(Bus.sid(), localRole());
-                Proto.writeFrame(out, Proto.TYPE_HELLO_ACK, ack.length, ack);
-                out.flush();
-                Bus.log("传输: [认证] HELLO 校验通过 " + s.getInetAddress()
-                        + ",对方角色=" + hello.role);
+                Bus.log("传输: [未认证] 本轮无对方 sid,跳过 HELLO/ROLE 校验 " + s.getInetAddress());
                 s.setSoTimeout(0);
+                DataInputStream in = new DataInputStream(
+                        new java.io.BufferedInputStream(s.getInputStream(), 256 * 1024));
+                DataOutputStream out = new DataOutputStream(s.getOutputStream());
+                Link link = new Link(s, in, out);
+                mUnauthCount.decrementAndGet();
+                released = true;
+                classifyDebug(link);
+                return;
             }
+            s.setSoTimeout(Proto.HELLO_TIMEOUT_MS);
+            DataInputStream in = new DataInputStream(
+                    new java.io.BufferedInputStream(s.getInputStream(), 256 * 1024));
+            DataOutputStream out = new DataOutputStream(s.getOutputStream());
+            Proto.Frame f = Proto.readFrame(in, Proto.HELLO_TIMEOUT_MS, Proto.MAX_HELLO_LEN);
+            if (f == null || f.type != Proto.TYPE_HELLO) {
+                Bus.log("传输: [认证] 未收到 HELLO,关闭连接 " + s.getInetAddress());
+                closeQuietly(s);
+                return;
+            }
+            Proto.Hello hello = Proto.parseHello(f.data);
+            if (hello == null || hello.version != Proto.HELLO_VERSION
+                    || !expected.equalsIgnoreCase(hello.sid)) {
+                Bus.log("传输: [认证] HELLO 校验失败,关闭连接 " + s.getInetAddress());
+                closeQuietly(s);
+                return;
+            }
+            byte[] ack = Proto.buildHelloAck(Bus.sid(), localRole());
+            Proto.writeFrame(out, Proto.TYPE_HELLO_ACK, ack.length, ack);
+            byte[] role = Proto.buildRole(localRole(), Bus.sid());
+            Proto.writeFrame(out, Proto.TYPE_ROLE, role.length, role);
+            out.flush();
+            Bus.log("传输: [认证] HELLO 校验通过 " + s.getInetAddress()
+                    + ",对方角色=" + hello.role + ",本机角色=" + localRole());
+            Link link = new Link(s, in, out);
             mUnauthCount.decrementAndGet();
             released = true;
-            classifyConnection(s, in);
+            s.setSoTimeout(ROLE_READ_TIMEOUT_MS);
+            Proto.Frame first = null;
+            try {
+                first = Proto.readFrame(in, ROLE_READ_TIMEOUT_MS, Proto.MAX_ROLE_LEN);
+            } catch (java.net.SocketTimeoutException te) {
+                Bus.log("传输: 对端未在 " + ROLE_READ_TIMEOUT_MS + "ms 内发送角色帧,按未决定处理");
+            }
+            s.setSoTimeout(0);
+            if (first == null) {
+                if (s.isClosed()) return;
+                mGotConnection = true;
+                mStashedSocket = link;
+                startRoleListener(link);
+                return;
+            }
+            classifyAuthenticated(link, first);
         } catch (java.net.SocketTimeoutException e) {
             Bus.log("传输: [认证] HELLO 超时(" + Proto.HELLO_TIMEOUT_MS + "ms),关闭连接 "
                     + s.getInetAddress());
@@ -891,33 +1099,313 @@ public class Xfer {
         }
     }
 
-    private void classifyConnection(Socket s, DataInputStream in) {
+    //pri added by zhuyang,Debug (no sid) classification: pre-1a peerSpeaksFirst behaviour on a Link,20261017,start
+    private void classifyDebug(Link link) {
         if (!mRunning) {
-            closeQuietly(s);
+            closeQuietly(link);
             return;
         }
         mGotConnection = true;
-        Bus.log("传输: 对方已连接 " + s.getInetAddress());
-        //pri added by zhuyang,Classify late: who writes first decides the direction of this socket,20261014,start
+        Bus.log("传输: [未认证] 对方已连接 " + link.s.getInetAddress());
         if (!mReceiverRole) {
-            stashForSending(s);
-        } else if (peerSpeaksFirst(s, in)) {
-            handleIncoming(s, in); // 对方在发报价:本机就是这一轮的接收方
+            setSendLink(link);
+            Bus.log("传输: [未认证] 本机是发送方,连接留作发送通道");
+        } else if (peerSpeaksFirst(link)) {
+            handleIncoming(link); // 对方在发报价:本机就是这一轮的接收方
         } else if (!mReceiverRole || mCanSend) {
-            stashForSending(s); // 本机还有照片没上滑(探测期间上滑也算):留着当发送通道
+            setSendLink(link); // 本机还有照片没上滑(探测期间上滑也算):留着当发送通道
         } else {
-            closeQuietly(s);
-            Bus.log("传输: 对端只是读取方,已释放空连接");
+            closeQuietly(link);
+            Bus.log("传输: [未认证] 对端只是读取方,已释放空连接");
         }
-        //pri added by zhuyang,Classify late: who writes first decides the direction of this socket,20261014,end
     }
-    //pri added by zhuyang,Server side of the first-frame handshake, then the original direction classification,20261017,end
+    //pri added by zhuyang,Debug (no sid) classification: pre-1a peerSpeaksFirst behaviour on a Link,20261017,end
+
+    //pri added by zhuyang,Authenticated classification by the peer's first frame,20261017,start
+    private void classifyAuthenticated(Link link, Proto.Frame first) {
+        if (!mRunning) {
+            closeQuietly(link);
+            return;
+        }
+        mGotConnection = true;
+        Bus.log("传输: 对方已连接 " + link.s.getInetAddress());
+        if (first.type == Proto.TYPE_ROLE) {
+            Proto.Role role = Proto.parseRole(first.data);
+            if (role == null) {
+                Bus.log("传输: ROLE 帧解析失败,暂存连接并监听");
+                mStashedSocket = link;
+                startRoleListener(link);
+                return;
+            }
+            if (mPeerSid != null && !mPeerSid.equalsIgnoreCase(role.sid)) {
+                Bus.log("传输: ROLE 帧 sid 与本轮 sid 不一致,关闭连接");
+                closeQuietly(link);
+                return;
+            }
+            mPeerRole = role.role;
+            Bus.log("传输: 收到首帧 ROLE(" + role.role + ")");
+            if ("S".equals(role.role)) {
+                handlePeerSendRole(link, role.sid);
+            } else if ("U".equals(role.role)) {
+                mStashedSocket = link;
+                startRoleListener(link);
+            } else {
+                // ROLE(R): the peer is receiving, so this accepted link is our send channel.
+                setSendLink(link);
+                mStashedSocket = null;
+                Bus.log("传输: 对端是接收方(ROLE=R),本连接作为发送通道");
+                mMain.post(new Runnable() {
+                    @Override public void run() { mListener.onP2pReady(false, null); }
+                });
+            }
+        } else if (first.type == Proto.TYPE_META) {
+            // Compatibility: a 1a client (or old debug peer) sends the offer directly.
+            mStashedSocket = link;
+            handleIncoming(link, first);
+        } else {
+            Bus.log("传输: 未识别的首帧类型 " + first.type + ",暂存连接并监听");
+            mStashedSocket = link;
+            startRoleListener(link);
+        }
+    }
+    //pri added by zhuyang,Authenticated classification by the peer's first frame,20261017,end
+
+    //pri added by zhuyang,Peer announced ROLE(S) on this link,20261017,start
+    private void handlePeerSendRole(Link link, String peerSid) {
+        mPeerRole = "S";
+        mPeerSwipedAt = SystemClock.elapsedRealtime();
+        mPeerWantsSend = true;
+        if (mYielded) {
+            //pri added by zhuyang,Already yielded this round: keep receiving, never arbitrate again,20261017
+            Bus.log("传输: 本机已让出,按接收方读取对端报价");
+            mStashedSocket = link;
+            handleIncoming(link);
+            return;
+        }
+        if (mLocalSwipedAt == 0) {
+            Bus.log("传输: 对端先上滑(ROLE=S),本机转接收");
+            mStashedSocket = link;
+            notifyPeerSwipedFirst();
+            handleIncoming(link);
+        } else {
+            Bus.log("传输: 双方都想发送,进入角色裁决");
+            arbitrate(link, peerSid, false);
+        }
+    }
+    //pri added by zhuyang,Peer announced ROLE(S) on this link,20261017,end
+
+    //pri added by zhuyang,Client-side classification: the link we opened may be the receive link or our send channel,20261017,start
+    private boolean handleClientRole(Link link) {
+        if (link.first != null) {
+            if (link.first.type == Proto.TYPE_META) {
+                Bus.log("传输: 对端直接发来报价(兼容 1a),本机转接收");
+                mStashedSocket = link;
+                handleIncoming(link, link.first);
+                return false;
+            }
+            Bus.log("传输: 忽略对端首帧类型 " + link.first.type);
+        }
+        String role = link.peerRole;
+        if ("S".equals(role)) {
+            mPeerRole = "S";
+            mPeerSwipedAt = SystemClock.elapsedRealtime();
+            mPeerWantsSend = true;
+            if (mLocalSwipedAt == 0) {
+                Bus.log("传输: 连接建立时对端已宣告 ROLE(S),本机转接收");
+                notifyPeerSwipedFirst();
+                mStashedSocket = link;
+                handleIncoming(link);
+                return false;
+            }
+            arbitrate(link, link.peerSid, true);
+            return !mYielded && mSendSocket == link;
+        }
+        if (mReceiverRole) {
+            mStashedSocket = link;
+            startRoleListener(link);
+            Bus.log("传输: 对端角色=" + (role == null ? "未知" : role) + ",本机接收:暂存连接并监听");
+            return false;
+        }
+        setSendLink(link);
+        Bus.log("传输: 对端角色=" + (role == null ? "未知" : role) + ",本连接作为发送通道");
+        return true;
+    }
+    //pri added by zhuyang,Client-side classification: the link we opened may be the receive link or our send channel,20261017,end
+
+    //pri added by zhuyang,Deterministic role arbitration: both sides are sending, so the smaller sid wins,20261017,start
+    private void arbitrate(Link link, String peerSid, boolean keepOnWin) {
+        boolean localWins;
+        String why;
+        if (mLocalSwipedAt == 0) {
+            localWins = false;
+            why = "本机尚未上滑";
+        } else {
+            int cmp = Bus.sid().compareTo(peerSid);
+            localWins = cmp < 0;
+            why = "比较 sid(" + (cmp < 0 ? "本机小" : "对端小") + ")";
+        }
+        Bus.log("传输: 角色裁决 — " + (localWins ? "本机胜出" : "本机让出(败方)") + ",原因: " + why);
+        if (localWins) {
+            if (keepOnWin) {
+                // This link is the channel we opened; the yielding peer receives on it.
+                if (link == mStashedSocket) mStashedSocket = null;
+                setSendLink(link);
+            } else if (link == mStashedSocket) {
+                // The peer is the loser and turns receiver on this same link, so keep it as a send
+                // channel when there is none yet; hand it to sendImages via onP2pReady.
+                mStashedSocket = null;
+                if (mSendSocket == null) {
+                    mSendSocket = link;
+                    try { link.s.setSoTimeout(0); } catch (Exception ignored) {}
+                    Bus.log("传输: 胜利方沿用对端连接作为发送通道");
+                    mMain.post(new Runnable() {
+                        @Override public void run() { mListener.onP2pReady(false, null); }
+                    });
+                } else {
+                    closeQuietly(link);
+                }
+            } else if (link != mSendSocket) {
+                closeQuietly(link);
+            }
+            return;
+        }
+        yieldToPeer(link);
+    }
+
+    private void yieldToPeer(Link link) {
+        mYielded = true;
+        mReceiverRole = true;
+        mCanSend = false;
+        mPeerRole = "S";
+        Link send = mSendSocket;
+        boolean sameLink = send == link;
+        mSendSocket = null;
+        if (send != null && !sameLink) closeQuietly(send);
+        //pri added by zhuyang,The link that carried the arbitration also carries the winner's offer,20261017,start
+        Link recv = link != null ? link : mStashedSocket;
+        mStashedSocket = recv;
+        //pri added by zhuyang,The link that carried the arbitration also carries the winner's offer,20261017,end
+        if (recv != null) {
+            try { recv.s.setSoTimeout(0); } catch (Exception ignored) {}
+            sendRoleOnLinkAsync(recv, "R");
+        }
+        notifyRoleYielded();
+        if (recv != null && mPeerSocket != recv) {
+            stopRoleListener(recv);
+            if (mPeerSocket != recv && !recv.s.isClosed()) handleIncoming(recv);
+        }
+    }
+    //pri added by zhuyang,Deterministic role arbitration: both sides are sending, so the smaller sid wins,20261017,end
+
+    //pri added by zhuyang,Role listener: the only reader of a stashed link until it yields or receives,20261017,start
+    private void startRoleListener(final Link link) {
+        if (!mRunning) {
+            closeQuietly(link);
+            return;
+        }
+        Thread existing = mRoleListenerThread;
+        if (existing != null && existing.isAlive()) {
+            Bus.log("传输: 已有角色监听线程,关闭多余连接 " + link.s.getInetAddress());
+            closeQuietly(link);
+            return;
+        }
+        try { link.s.setSoTimeout(0); } catch (Exception ignored) {}
+        Thread t = new Thread(new Runnable() {
+            @Override public void run() { roleListenerLoop(link); }
+        }, "role-listen");
+        mRoleListenerThread = t;
+        t.start();
+    }
+
+    private boolean localRoleSettled() {
+        long t = mLocalSwipedAt;
+        return t != 0 && SystemClock.elapsedRealtime() - t > ROLE_CONFLICT_WINDOW_MS;
+    }
+
+    //pri added by zhuyang,The local swipe window passed with no peer ROLE(S): this phone wins,20261017
+    private boolean settleRoleListener(Link link) {
+        if (!localRoleSettled()) return false;
+        if (!mReceiverRole && mSendSocket == null && mStashedSocket == link) {
+            mStashedSocket = null;
+            mSendSocket = link;
+            try { link.s.setSoTimeout(0); } catch (Exception ignored) {}
+            Bus.log("传输: 本机先上滑(对端未宣告发送),沿用对端连接作为发送通道");
+            mMain.post(new Runnable() {
+                @Override public void run() { mListener.onP2pReady(false, null); }
+            });
+        }
+        return true;
+    }
+
+    private void roleListenerLoop(Link link) {
+        Bus.log("传输: 开始监听对端角色(50ms 轮询)");
+        try {
+            while (mRunning) {
+                if (mStashedSocket != link || mRoleListenerAbort == link) break;
+                Proto.Frame f;
+                try {
+                    if (link.in.available() <= 0) {
+                        if (settleRoleListener(link)) break;
+                        Thread.sleep(50); //pri added by zhuyang,Poll instead of a timed frame read so a partial frame is never lost,20261017
+                        continue;
+                    }
+                    f = Proto.readFrame(link.in, 0, Proto.MAX_FRAME_LEN);
+                } catch (InterruptedException ie) {
+                    continue;
+                } catch (Exception e) {
+                    Bus.log("传输: 角色监听结束: " + e);
+                    break;
+                }
+                if (f == null) {
+                    Bus.log("传输: 角色监听连接已关闭");
+                    break;
+                }
+                if (f.type == Proto.TYPE_ROLE) {
+                    Proto.Role role = Proto.parseRole(f.data);
+                    if (role == null) continue;
+                    if (mPeerSid != null && !mPeerSid.equalsIgnoreCase(role.sid)) {
+                        Bus.log("传输: ROLE 帧 sid 不一致,已忽略");
+                        continue;
+                    }
+                    Bus.log("传输: 收到角色帧 ROLE(" + role.role + ")");
+                    if ("S".equals(role.role)) {
+                        handlePeerSendRole(link, role.sid);
+                    } else {
+                        mPeerRole = role.role;
+                    }
+                } else if (f.type == Proto.TYPE_META) {
+                    Bus.log("传输: 角色监听读到报价,本机按接收处理");
+                    mStashedSocket = link;
+                    handleIncoming(link, f);
+                    break;
+                } else {
+                    Bus.log("传输: 角色监听忽略帧类型 " + f.type);
+                }
+                if (mStashedSocket != link) break;
+                if (settleRoleListener(link)) break;
+            }
+        } finally {
+            if (mRoleListenerThread == Thread.currentThread()) mRoleListenerThread = null;
+            // A normal exit means this link has no owner any more. An abort hands it to another reader.
+            if (mRoleListenerAbort != link && mStashedSocket == link && mPeerSocket != link) {
+                mStashedSocket = null;
+                closeQuietly(link);
+            }
+            Bus.log("传输: 角色监听结束");
+        }
+    }
+    //pri added by zhuyang,Role listener: the only reader of a stashed link until it yields or receives,20261017,end
 
     private void closeQuietly(Socket s) {
         try { if (s != null) s.close(); } catch (Exception ignored) {}
     }
 
+    private void closeQuietly(Link link) {
+        try { if (link != null) link.s.close(); } catch (Exception ignored) {}
+    }
+
     /** 接收方是组员:主动连组主,等待读图。 */
+    //pri modify by zhuyang,Client-side receiver classifies the owner's ROLE on the same Link,20261017,start
     private void startClientRead() {
         new Thread(new Runnable() {
             @Override public void run() {
@@ -925,14 +1413,18 @@ public class Xfer {
                     try {
                         Socket s = new Socket();
                         s.connect(new InetSocketAddress(mGoAddress, PORT), 5000);
-                        DataInputStream hs = clientHello(s);
-                        if (hs == null) {
+                        Link link = clientHello(s);
+                        if (link == null) {
                             Bus.log("传输: 连接组主未通过 HELLO 校验(第 " + (i + 1) + " 次)");
                             try { Thread.sleep(2000); } catch (InterruptedException ignored) {}
                             continue;
                         }
                         Bus.log("传输: 已连接组主,等待接收图片…");
-                        handleIncoming(s, hs);
+                        if (mPeerSid == null) {
+                            handleIncoming(link);
+                            return;
+                        }
+                        handleClientRole(link);
                         return;
                     } catch (Exception e) {
                         Bus.log("传输: 连接组主失败(第 " + (i + 1) + " 次): " + e);
@@ -942,35 +1434,66 @@ public class Xfer {
             }
         }).start();
     }
+    //pri modify by zhuyang,Client-side receiver classifies the owner's ROLE on the same Link,20261017,end
 
     /** 从一条已建立的 TCP 连接上读图片(可多张,每张一帧):显示 + 存相册。
      *  读线程只管收;解码+入库放 mIo 单线程队列,收完一张立刻收下一张(否则发送端被背压卡住)。 */
-    private void handleIncoming(Socket s, DataInputStream handshakeIn) {
+    private void handleIncoming(Link link) {
+        handleIncoming(link, null);
+    }
+
+    //pri modify by zhuyang,Receive on a Link, skip control frames, and accept a first frame already read,20261017,start
+    private void handleIncoming(Link link, Proto.Frame preRead) {
         final java.util.ArrayList<Bitmap> all = new java.util.ArrayList<Bitmap>();
         try {
-            DataInputStream in = handshakeIn != null ? handshakeIn
-                    : new DataInputStream(
-                            new java.io.BufferedInputStream(s.getInputStream(), 256 * 1024));
-            mPeerSocket = s;        //pri added by zhuyang,Keep the socket so the verdict can be written back on it,20261014
+            link.s.setSoTimeout(0);
+            mPeerSocket = link;     //pri added by zhuyang,Keep the link so the verdict can be written back on it,20261014
+            mStashedSocket = link;
             mVerdictSent = false;   //pri added by zhuyang,Reset the per-connection verdict/done flags,20261014,start
             mDoneNotified = false;
             //pri added by zhuyang,Reset the per-connection verdict/done flags,20261014,end
             int count = 0;
             int total = 0;
             int expect = 0;
+            //pri added by zhuyang,Replay frames buffered on the send link before the role loss,20261017,start
+            final java.util.ArrayDeque<Proto.Frame> replay = new java.util.ArrayDeque<Proto.Frame>();
+            if (preRead != null) replay.add(preRead);
+            synchronized (mPreReadFrames) {
+                replay.addAll(mPreReadFrames);
+                mPreReadFrames.clear();
+            }
+            Proto.Frame f = replay.pollFirst();
+            //pri added by zhuyang,Replay frames buffered on the send link before the role loss,20261017,end
             while (mRunning) {
-                Proto.Frame f;
-                try {
-                    f = Proto.readFrame(in, 0, Proto.MAX_FRAME_LEN);
-                } catch (Exception e) {
-                    Bus.log("传输: 帧读取失败 " + e);
-                    break;
-                }
+                if (f == null) f = replay.pollFirst(); //pri added by zhuyang,Drain every buffered frame before touching the stream,20261017
                 if (f == null) {
-                    break; // 对方关闭连接 = 发送完毕
+                    try {
+                        f = Proto.readFrame(link.in, 0, Proto.MAX_FRAME_LEN);
+                    } catch (Exception e) {
+                        Bus.log("传输: 帧读取失败 " + e);
+                        break;
+                    }
+                    if (f == null) {
+                        break; // 对方关闭连接 = 发送完毕
+                    }
                 }
-                int type = f.type;
-                int len = f.length;
+                final Proto.Frame frame = f;
+                f = null;
+                int type = frame.type;
+                int len = frame.length;
+                if (type == Proto.TYPE_ROLE) {
+                    //pri added by zhuyang,Role updates may arrive before META; never count them as images,20261017,start
+                    Proto.Role role = Proto.parseRole(frame.data);
+                    if (role != null) {
+                        mPeerRole = role.role;
+                        if ("S".equals(role.role) && mPeerSwipedAt == 0) {
+                            mPeerSwipedAt = SystemClock.elapsedRealtime();
+                        }
+                        Bus.log("传输: 接收连接收到 ROLE(" + role.role + ")");
+                    }
+                    continue;
+                    //pri added by zhuyang,Role updates may arrive before META; never count them as images,20261017,end
+                }
                 if (type == Proto.TYPE_META) {
                     expect = len; // 对方预告总张数:接收页文案不再回退成 1
                     mExpect = expect; //pri added by zhuyang,Record the announced total for this round,20261014
@@ -981,8 +1504,12 @@ public class Xfer {
                     });
                     continue;
                 }
+                if (type != Proto.TYPE_PREVIEW && type != Proto.TYPE_FULL) {
+                    Bus.log("传输: 接收连接忽略帧类型 " + type);
+                    continue;
+                }
                 Bus.log("传输: 正在接收" + (type == Proto.TYPE_PREVIEW ? "预览" : "第 " + (count + 1) + " 张") + " " + len + " 字节…");
-                final byte[] data = f.data;
+                final byte[] data = frame.data;
                 if (type == Proto.TYPE_PREVIEW) {
                     final Bitmap pbmp = decode(data);
                     mMain.post(new Runnable() {
@@ -1039,8 +1566,11 @@ public class Xfer {
         } catch (Exception e) {
             Bus.log("传输: 接收异常 " + e);
         } finally {
-            if (mPeerSocket == s) mPeerSocket = null; //pri added by zhuyang,Do not keep a dead socket for the verdict write-back,20261014
-            try { s.close(); } catch (Exception ignored) {}
+            //pri modify by zhuyang,Clear both role handles for the dead Link before closing it,20261017,start
+            if (mPeerSocket == link) mPeerSocket = null;
+            if (mStashedSocket == link) mStashedSocket = null;
+            closeQuietly(link);
+            //pri modify by zhuyang,Clear both role handles for the dead Link before closing it,20261017,end
         }
     }
 
@@ -1057,65 +1587,104 @@ public class Xfer {
         });
     }
 
-    /** 发送方:把选中的图片(可多张)推给对方(组主用暂存的连接,组员连组主)。 */
-    //pri modify by zhuyang,Two-phase: offer (META+one preview) first, full images only after ACCEPT,20261014
+    //pri added by zhuyang,Promote the peer-initiated stashed link to the send channel (P2P owner case),20261017,start
+    private Link promoteStashedToSend() {
+        Link l = mStashedSocket;
+        if (l == null || l == mPeerSocket) return null;
+        if (!isAlive(l)) { mStashedSocket = null; return null; }
+        mStashedSocket = null;
+        stopRoleListener(l);
+        if (!isAlive(l)) return null;
+        mSendSocket = l;
+        try { l.s.setSoTimeout(0); } catch (Exception ignored) {}
+        sendRoleOnLink(l, "S");
+        Bus.log("传输: 暂存连接提升为发送通道");
+        return l;
+    }
+    //pri added by zhuyang,Promote the peer-initiated stashed link to the send channel (P2P owner case),20261017,end
+
+    /** 发送方:把选中的图片(可多张)推给对方(组主用发送通道,组员连组主)。 */
+    //pri modify by zhuyang,Role convergence: send on the Link, wait out the 300ms role window, and abort when yielding,20261017,start
     public void sendImages(final java.util.List<Uri> uris) {
         new Thread(new Runnable() {
             @Override public void run() {
                 try {
-                    Socket s = mPendingSocket;
-                    if (s == null && !mImGo && mGoAddress != null) {
+                    Link send = mSendSocket;
+                    if (send == null && !mImGo && mGoAddress != null) {
                         // P2P 组已建立且本机是组员:主动连组主(组主的 8988 服务已在跑)。
                         // 原来这条路径没接上 —— 组先建好时上面的策略会因 mGoAddress != null 早退,发送方一直干等
                         try {
                             Socket t = new Socket();
                             t.connect(new InetSocketAddress(mGoAddress, PORT), 3000);
-                            if (clientHello(t) == null) {
+                            Link link = clientHello(t);
+                            if (link == null) {
                                 Bus.log("传输: P2P 连接未通过 HELLO 校验");
+                            } else if (!handleClientRole(link)) {
+                                Bus.log("传输: P2P 连接交由接收/裁决路径接管");
+                                return;
                             } else {
-                                mPendingSocket = t;
-                                s = t;
+                                send = mSendSocket;
                                 Bus.log("传输: 已连接组主 " + mGoAddress + "(P2P)");
                             }
                         } catch (Exception e) {
                             Bus.log("传输: 连接组主失败 " + e);
                         }
                     }
-                    if (s == null) {
-                        if (mImGo) {
-                            // 本机是组主但对方(接收方)还没连上:等一会儿
-                            for (int i = 0; i < 10 && mRunning && s == null; i++) {
-                                try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
-                                s = mPendingSocket;
+                    if (send == null) {
+                        int seconds = mImGo ? 10 : 20;
+                        for (int i = 0; i < seconds && mRunning && send == null && !mYielded; i++) {
+                            try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
+                            send = mSendSocket;
+                            if (send == null) send = promoteStashedToSend();
+                        }
+                        if (send == null) {
+                            if (mYielded) {
+                                Bus.log("传输: 本机已让出,不再建立发送通道");
+                                return;
                             }
-                            if (s == null) { fail("对方尚未连接,请让对方保持在前台再试"); return; }
-                        } else {
-                            // 热点接入中:等待连接就绪(最多 20 秒),不要立刻失败
-                            for (int i = 0; i < 20 && mRunning && s == null; i++) {
-                                try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
-                                s = mPendingSocket;
-                            }
-                            if (s == null) { fail("连接尚未就绪(热点接入中,请稍候再上滑)"); return; }
+                            fail(mImGo ? "对方尚未连接,请让对方保持在前台再试"
+                                    : "连接尚未就绪(热点接入中,请稍候再上滑)");
+                            return;
                         }
                     }
-                    DataOutputStream out = new DataOutputStream(s.getOutputStream());
-                    int total = 0;
+                    if (mPeerWantsSend && mLocalSwipedAt == 0) {
+                        Bus.log("传输: 对端先上滑,本机不再发送");
+                        mYielded = true;
+                        notifyRoleYielded();
+                        return;
+                    }
+                    if (mLocalSwipedAt == 0) mLocalSwipedAt = SystemClock.elapsedRealtime();
+                    //pri added by zhuyang,Give a simultaneous peer the 300ms window to announce ROLE(S) before our offer,20261017,start
+                    if (!settleRoleWindow(send)) {
+                        Bus.log("传输: 角色窗口内本机让出或连接断开,放弃发送报价");
+                        return;
+                    }
+                    //pri added by zhuyang,Give a simultaneous peer the 300ms window to announce ROLE(S) before our offer,20261017,end
                     final int round = mRound; //pri added by zhuyang,Round token: a stale verdict is discarded by readVerdict,20261014
+                    int total = 0;
                     //pri added by zhuyang,Offer stage: META(total) + one preview, then wait for the verdict,20261014,start
                     synchronized (mWriteLock) {
-                        Proto.writeFrame(out, Proto.TYPE_META, uris.size(), null);
+                        //pri added by zhuyang,Guarantee ROLE(S) precedes META on this link even if the async write lost the race,20261017
+                        sendRoleOnLink(send, "S");
+                        Proto.writeFrame(send.out, Proto.TYPE_META, uris.size(), null);
                         if (!uris.isEmpty()) {
                             byte[] thumb = thumbnail(uris.get(0)); //pri added by zhuyang,Only the first preview, the receive card consumes the last one,20261014
                             if (thumb != null) {
-                                Proto.writeFrame(out, Proto.TYPE_PREVIEW, thumb.length, thumb);
+                                Proto.writeFrame(send.out, Proto.TYPE_PREVIEW, thumb.length, thumb);
                             }
                         }
-                        out.flush();
+                        send.out.flush();
                     }
                     Bus.log("传输: 已报价(" + uris.size() + " 张 + 预览),等对方「接收/拒绝」…");
-                    int verdict = readVerdict(s, round);
+                    int verdict = readVerdict(send, round);
+                    if (verdict == VERDICT_YIELDED) {
+                        Bus.log("传输: 已让出并转入接收,本机报价作废");
+                        return;
+                    }
                     if (verdict != Proto.TYPE_ACCEPT) {
-                        try { s.close(); } catch (Exception ignored) {}
+                        closeQuietly(send);
+                        if (mSendSocket == send) mSendSocket = null;
+                        if (mStashedSocket == send) mStashedSocket = null;
                         Bus.log("传输: 对方未同意接收,整图未发出");
                         releaseHotspotLater();
                         return;
@@ -1142,15 +1711,17 @@ public class Xfer {
                     for (int i = 0; i < uris.size(); i++) {
                         Object o = q.take();
                         if (o == eod) break;
+                        if (mYielded) break;
                         byte[] data = (byte[]) o;
                         Bus.log("传输: 正在发送第 " + (i + 1) + "/" + uris.size() + " 张 " + data.length + " 字节…");
-                        Proto.writeFrame(out, Proto.TYPE_FULL, data.length, data);
+                        Proto.writeFrame(send.out, Proto.TYPE_FULL, data.length, data);
                         total += data.length;
                     }
-                    out.flush();
+                    send.out.flush();
                     }
-                    s.close();
-                    mPendingSocket = null;
+                    closeQuietly(send);
+                    if (mSendSocket == send) mSendSocket = null;
+                    if (mStashedSocket == send) mStashedSocket = null;
                     Bus.log("传输: 发送完成,共 " + uris.size() + " 张 " + total + " 字节");
                     releaseHotspotLater();
                     final int n = total;
@@ -1159,38 +1730,112 @@ public class Xfer {
                     });
                     //pri added by zhuyang,Delivery stage: full images only after ACCEPT,20261014,end
                 } catch (Exception e) {
-                    fail("发送失败: " + e);
+                    if (mYielded) {
+                        Bus.log("传输: 本机已让出,放弃发送: " + e);
+                    } else {
+                        fail("发送失败: " + e);
+                    }
                 }
             }
         }).start();
     }
+    //pri modify by zhuyang,Role convergence: send on the Link, wait out the 300ms role window, and abort when yielding,20261017,end
+
+    //pri added by zhuyang,Wait out the role window while reading frames: a peer ROLE(S) in the window is arbitrated by sid,20261017,start
+    private boolean settleRoleWindow(Link send) {
+        long deadline = mLocalSwipedAt + ROLE_CONFLICT_WINDOW_MS;
+        try {
+            while (mRunning && !mYielded) {
+                long remaining = deadline - SystemClock.elapsedRealtime();
+                if (remaining <= 0) return true;
+                if (send.in.available() <= 0) {
+                    try { Thread.sleep(Math.min(remaining, 20)); } catch (InterruptedException ignored) {}
+                    continue;
+                }
+                Proto.Frame f = Proto.readFrame(send.in, 0, Proto.MAX_FRAME_LEN);
+                if (f == null) {
+                    Bus.log("传输: 角色窗口内连接已关闭");
+                    return false;
+                }
+                if (f.type == Proto.TYPE_ROLE) {
+                    Proto.Role role = Proto.parseRole(f.data);
+                    if (role == null) continue;
+                    if (mPeerSid != null && !mPeerSid.equalsIgnoreCase(role.sid)) continue;
+                    mPeerRole = role.role;
+                    if ("S".equals(role.role)) {
+                        Bus.log("传输: 角色窗口内收到对端 ROLE(S)");
+                        mPeerSwipedAt = SystemClock.elapsedRealtime();
+                        mPeerWantsSend = true;
+                        arbitrate(send, role.sid, true);
+                        if (mYielded) return false;
+                    }
+                } else if (f.type == Proto.TYPE_META || f.type == Proto.TYPE_PREVIEW
+                        || f.type == Proto.TYPE_FULL) {
+                    synchronized (mPreReadFrames) { mPreReadFrames.add(f); }
+                    Bus.log("传输: 角色窗口内暂存帧类型 " + f.type);
+                }
+            }
+            return false;
+        } catch (Exception e) {
+            Bus.log("传输: 角色窗口内读帧失败: " + e);
+            return false;
+        } finally {
+            try { send.s.setSoTimeout(0); } catch (Exception ignored) {}
+        }
+    }
+    //pri added by zhuyang,Wait out the role window while reading frames: a peer ROLE(S) in the window is arbitrated by sid,20261017,end
 
     //pri added by zhuyang,Offer/verdict layer of the two-phase protocol,20261014,start
-    //pri added by zhuyang,Sender: block up to VERDICT_WAIT_MS for ACCEPT/REJECT; 0 = no valid verdict,20261014
-    private int readVerdict(Socket s, final int round) {
+    //pri modify by zhuyang,Read verdict frames in a loop: ROLE/META/PREVIEW are skipped, 0 = no valid verdict,20261017,start
+    private int readVerdict(Link link, final int round) {
         int verdict = 0;
-        boolean stale = false;
+        long deadline = SystemClock.elapsedRealtime() + VERDICT_WAIT_MS;
         try {
-            s.setSoTimeout(VERDICT_WAIT_MS);
-            DataInputStream in = new DataInputStream(
-                    new java.io.BufferedInputStream(s.getInputStream(), 8 * 1024));
-            Proto.Frame f = Proto.readFrame(in, VERDICT_WAIT_MS, Proto.MAX_FRAME_LEN);
-            if (f == null) {
-                Bus.log("传输: 回执连接已关闭");
-            } else if (round != mRound) {
-                stale = true;
-                Bus.log("传输: 收到上一轮的回执,已忽略");
-            } else if (f.type == Proto.TYPE_ACCEPT || f.type == Proto.TYPE_REJECT) {
-                verdict = f.type;
-            } else {
-                Bus.log("传输: 未知的回执类型 " + f.type);
+            while (mRunning) {
+                long remaining = deadline - SystemClock.elapsedRealtime();
+                if (remaining <= 0) throw new java.net.SocketTimeoutException();
+                link.s.setSoTimeout((int) Math.min(remaining, Integer.MAX_VALUE));
+                Proto.Frame f = Proto.readFrame(link.in, 0, Proto.MAX_FRAME_LEN);
+                if (f == null) {
+                    Bus.log("传输: 回执连接已关闭");
+                    break;
+                }
+                if (round != mRound) {
+                    Bus.log("传输: 收到上一轮的回执,已忽略");
+                    return 0;
+                }
+                if (f.type == Proto.TYPE_ACCEPT || f.type == Proto.TYPE_REJECT) {
+                    verdict = f.type;
+                    break;
+                }
+                if (f.type == Proto.TYPE_ROLE) {
+                    Proto.Role role = Proto.parseRole(f.data);
+                    if (role != null) {
+                        mPeerRole = role.role;
+                        if ("S".equals(role.role) && mLocalSwipedAt != 0 && !mYielded
+                                && mPeerSwipedAt == 0) {
+                            Bus.log("传输: 发送连接上收到对端 ROLE(S),进入角色裁决");
+                            mPeerSwipedAt = SystemClock.elapsedRealtime();
+                            mPeerWantsSend = true;
+                            arbitrate(link, role.sid, true);
+                            if (mYielded) return VERDICT_YIELDED;
+                        }
+                    }
+                    continue;
+                }
+                if (f.type == Proto.TYPE_META || f.type == Proto.TYPE_PREVIEW) {
+                    //pri added by zhuyang,Keep the winner's offer frames: a loser replays them as receiver,20261017
+                    synchronized (mPreReadFrames) { mPreReadFrames.add(f); }
+                }
+                Bus.log("传输: 忽略非回执帧类型 " + f.type);
             }
         } catch (java.net.SocketTimeoutException e) {
             Bus.log("传输: 等待对方「接收/拒绝」超时(" + (VERDICT_WAIT_MS / 1000) + "s)");
         } catch (Exception e) {
             Bus.log("传输: 未收到回执(对方已断开): " + e);
         }
-        if (stale) return 0;
+        if (mYielded) return VERDICT_YIELDED;
+        synchronized (mPreReadFrames) { mPreReadFrames.clear(); } //pri added by zhuyang,No yield: the peer's offer frames are stale,20261017
         if (verdict == Proto.TYPE_ACCEPT) {
             Bus.log("传输: 对方已确认接收");
             mMain.post(new Runnable() {
@@ -1208,6 +1853,7 @@ public class Xfer {
         }
         return verdict;
     }
+    //pri modify by zhuyang,Read verdict frames in a loop: ROLE/META/PREVIEW are skipped, 0 = no valid verdict,20261017,end
 
     //pri added by zhuyang,Receiver: write the ACCEPT verdict back (images follow from the peer),20261014
     public void confirmReceived() {
@@ -1219,14 +1865,14 @@ public class Xfer {
         writeVerdict(Proto.TYPE_REJECT);
     }
 
-    //pri added by zhuyang,Write the verdict on the same connection at most once per round,20261014
+    //pri modify by zhuyang,Write the verdict on the receive Link at most once per round,20261017
     private void writeVerdict(final int type) {
         if (mVerdictSent) {
             Bus.log("传输: 本轮回执已发过,忽略");
             return;
         }
-        final Socket s = mPeerSocket;
-        if (s == null || s.isClosed() || !s.isConnected()) {
+        final Link link = mPeerSocket;
+        if (link == null || link.s.isClosed() || !link.s.isConnected()) {
             Bus.log("传输: 回执写回失败(连接已关闭) type=" + type);
             return;
         }
@@ -1234,10 +1880,9 @@ public class Xfer {
         mIo.execute(new Runnable() {
             @Override public void run() {
                 try {
-                    DataOutputStream out = new DataOutputStream(s.getOutputStream());
                     synchronized (mWriteLock) {
-                        Proto.writeFrame(out, type, 0, null);
-                        out.flush();
+                        Proto.writeFrame(link.out, type, 0, null);
+                        link.out.flush();
                     }
                     Bus.log("传输: 已" + (type == Proto.TYPE_ACCEPT ? "同意接收" : "拒绝接收") + ",回执已写回");
                 } catch (Exception e) {
@@ -1292,7 +1937,9 @@ public class Xfer {
     public void destroy() {
         mRunning = false;
         try { if (mServer != null) mServer.close(); } catch (Exception ignored) {}
-        try { if (mPendingSocket != null) mPendingSocket.close(); } catch (Exception ignored) {}
+        closeQuietly(mPeerSocket);
+        closeQuietly(mStashedSocket);
+        closeQuietly(mSendSocket);
         try { if (mRx != null) mCtx.unregisterReceiver(mRx); } catch (Exception ignored) {}
         mRx = null;
         releaseNetworkRequest();

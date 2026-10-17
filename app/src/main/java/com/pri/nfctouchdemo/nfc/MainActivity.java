@@ -567,6 +567,16 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback,
         @Override public void onVerdictTimeout() {
             Bus.log("联调页: 等待对方回执超时");
         }
+
+        //pri added by zhuyang,Role convergence callbacks: this debug page only logs them,20261017,start
+        @Override public void onPeerSwipedFirst() {
+            Bus.log("联调页: 对端先上滑,本机应转为接收");
+        }
+
+        @Override public void onRoleYielded() {
+            Bus.log("联调页: 本机在角色裁决中让出,应转为接收");
+        }
+        //pri added by zhuyang,Role convergence callbacks: this debug page only logs them,20261017,end
         //pri added by zhuyang,Stubs for the two-phase protocol callbacks (batch 1: interface only),20261014,end
     };
 

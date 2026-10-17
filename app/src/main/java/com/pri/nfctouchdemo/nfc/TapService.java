@@ -40,6 +40,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
     private volatile boolean mLinkReady;
     private volatile boolean mUserWantsSend;                            //pri added by zhuyang,Local user swiped: this phone is the sender,20261014
     private boolean mSendStarted;                                       //pri added by zhuyang,sendImages already handed over this round,20261014
+    private volatile boolean mRoleYielded;                              //pri added by zhuyang,This round lost the role race: never send,20261017
     private boolean mRejected;                                          //pri added by zhuyang,Peer transfer rejected this round (blocks re-showing),20261014
     private boolean mPeerOffered;                                       //pri added by zhuyang,Peer announced a transfer this round (Xfer onSendStarted),20261014
     private Bitmap mLastBmp;                                            // 最近一张预览 / 整图(动效层卡片 + 预览落盘都用它)
@@ -176,9 +177,19 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         if (intent != null && OverlayService.ACTION_UI_SEND_CONFIRMED.equals(intent.getAction())) {
             // 等价于旧 SendPage.Listener.onSwipedSend():上滑过阈值那一刻
             if (sXfer == null || PENDING.isEmpty()) return START_STICKY;
+            if (mRoleYielded) { //pri added by zhuyang,Already lost the role race this round: never send,20261017
+                Bus.log("服务: 本轮已让出接收,忽略这次上滑");
+                return START_STICKY;
+            }
             //pri modify by zhuyang,Swipe now declares the sender role and triggers the link negotiation,20261014,start
             mUserWantsSend = true;
-            sXfer.setSenderRole(); //pri added by zhuyang,Swipe declares the sender role even when the link is already up,20261014
+            if (!sXfer.setSenderRole()) { //pri modify by zhuyang,Peer announced ROLE(S) first: yield instead of sending,20261017
+                Bus.log("服务: 对端先上滑,本机让出,不发送");
+                mUserWantsSend = false;
+                mRoleYielded = true;
+                // Xfer posts onRoleYielded, which turns the send page into the receive card.
+                return START_STICKY;
+            }
             if (mLinkReady) {
                 if (!mSendStarted) {
                     mSendStarted = true;
@@ -259,6 +270,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         mReceiveShown = false; // 同理,接收页标记清零
         mUserWantsSend = false; //pri added by zhuyang,New round: role flags reset,20261014,start
         mSendStarted = false;
+        mRoleYielded = false;
         mRejected = false;
         mPeerOffered = false;
         mLastBmp = null;        //pri added by zhuyang,Preview bitmap is sticky across rounds,20261014
@@ -373,12 +385,14 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         mLinkReady = true;
         mMain.post(new Runnable() { @Override public void run() { // 回到主线程再改 UI
             //pri modify by zhuyang,Role-aware guard: never paint the send page over the receive card,20261014,start
-            if (mUserWantsSend) {
+            if (mUserWantsSend && !mRoleYielded) {
                 startService(OverlayService.statusIntent(TapService.this, "正在发送…"));
                 if (!mSendStarted) {
                     mSendStarted = true;
                     sXfer.sendImages(new ArrayList<Uri>(PENDING));
                 }
+            } else if (mRoleYielded) { //pri added by zhuyang,Lost the role race: the send page must not come back,20261017
+                startService(OverlayService.statusIntent(TapService.this, "对方先上滑,本机准备接收…"));
             } else if (mReceiveShown || mRejected) {
                 startService(OverlayService.statusIntent(TapService.this, "已连接,等待接收…"));
             } else if (hasPending()) {
@@ -401,7 +415,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
 
     @Override public void onSendStarted(int total) {
         //pri modify by zhuyang,Receive card appears here (with the real count) instead of at tap time,20261014,start
-        if (mUserWantsSend) return;
+        if (mUserWantsSend && !mRoleYielded) return; //pri modify by zhuyang,After yielding the send intent no longer blocks the receive card,20261017
         if (mRejected) return;
         mPeerOffered = true; //pri added by zhuyang,Empty state: the peer swiped - a page raise still in flight must not arm the wait,20261014
         mTotalCount = Math.max(total, 0);
@@ -513,6 +527,37 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
                 getString(R.string.fail_title), getString(R.string.fail_timeout)));
     }
     //pri added by zhuyang,Two-phase protocol callbacks,20261014,end
+
+    //pri added by zhuyang,Role convergence UI: peer swiped first / this phone yielded,20261017,start
+    @Override public void onPeerSwipedFirst() {
+        Bus.log("服务: 对端先上滑(ROLE=S),本机准备接收");
+        mMain.post(new Runnable() { @Override public void run() {
+            if (mRejected) return;
+            if (mReceiveShown) {
+                startService(OverlayService.statusIntent(TapService.this, "对方正在发送,等待预览…"));
+                return;
+            }
+            if (mSendShown || hasPending()) {
+                switchSendPageToReceive(); // 发送页就地切成接收卡,复用既有动效
+            } else {
+                showReceivePage(mPeerLabel, 0);
+            }
+            // Bus.lockRole stays held: this round continues as the receiver.
+        }});
+    }
+
+    @Override public void onRoleYielded() {
+        Bus.log("服务: 角色裁决本机让出(败方),转为接收方");
+        mMain.post(new Runnable() { @Override public void run() {
+            mRoleYielded = true;
+            mUserWantsSend = false;
+            if (mRejected) return;
+            if (!mReceiveShown) switchSendPageToReceive(); // 让出后用户只应看到接收卡
+            startService(OverlayService.statusIntent(TapService.this, "对方先上滑,本机准备接收…"));
+            // Bus.lockRole stays held: this round continues as the receiver, released on accept/reject/failure.
+        }});
+    }
+    //pri added by zhuyang,Role convergence UI: peer swiped first / this phone yielded,20261017,end
 
     /** 读取对方(接收方动作,由透明跳板转交)。 */
     private void handleTag(final android.nfc.Tag tag) {

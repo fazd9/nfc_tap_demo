@@ -18,11 +18,13 @@ public final class Proto {
     public static final int TYPE_REJECT = 5;
     public static final int TYPE_HELLO = 6;
     public static final int TYPE_HELLO_ACK = 7;
+    public static final int TYPE_ROLE = 8; //pri added by zhuyang,Role convergence frame: r=<U|S|R>|sid=<sender sid>,20261017
 
     public static final int MAX_FRAME_LEN = 64 * 1024 * 1024;
     public static final int HELLO_VERSION = 1;
     public static final int HELLO_TIMEOUT_MS = 1500;
     public static final int MAX_HELLO_LEN = 1024;
+    public static final int MAX_ROLE_LEN = 256; //pri added by zhuyang,ROLE payload is a short text line,20261017
 
     public static final class Frame {
         public final int type;
@@ -49,6 +51,18 @@ public final class Proto {
             this.hasPhotos = hasPhotos;
         }
     }
+
+    //pri added by zhuyang,Decoded ROLE frame used by the role arbitration,20261017,start
+    public static final class Role {
+        public final String role;
+        public final String sid;
+
+        Role(String role, String sid) {
+            this.role = role;
+            this.sid = sid;
+        }
+    }
+    //pri added by zhuyang,Decoded ROLE frame used by the role arbitration,20261017,end
 
     private Proto() {}
 
@@ -102,6 +116,33 @@ public final class Proto {
         String s = "v=" + HELLO_VERSION + "|sid=" + sid + "|r=" + role;
         return s.getBytes(StandardCharsets.UTF_8);
     }
+
+    //pri added by zhuyang,Build/parse the ROLE frame that follows HELLO_ACK on every authenticated link,20261017,start
+    public static byte[] buildRole(String role, String sid) {
+        String s = "r=" + role + "|sid=" + sid;
+        return s.getBytes(StandardCharsets.UTF_8);
+    }
+
+    public static Role parseRole(byte[] data) {
+        if (data == null) return null;
+        String role = null;
+        String sid = null;
+        String text = new String(data, StandardCharsets.UTF_8);
+        for (String kv : text.split("\\|")) {
+            int eq = kv.indexOf('=');
+            if (eq <= 0) continue;
+            String k = kv.substring(0, eq);
+            String v = kv.substring(eq + 1);
+            if ("r".equals(k)) {
+                role = v;
+            } else if ("sid".equals(k)) {
+                sid = v;
+            }
+        }
+        if (!isRole(role) || !isHex32(sid)) return null;
+        return new Role(role, sid);
+    }
+    //pri added by zhuyang,Build/parse the ROLE frame that follows HELLO_ACK on every authenticated link,20261017,end
 
     public static Hello parseHello(byte[] data) {
         if (data == null) return null;
