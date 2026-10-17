@@ -438,6 +438,10 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback,
             // 夹在 SELECT 与 EXCHANGE 之间会让链路超时,EXCHANGE 永远送不到对方
             // (与 TapService.handleTag 同一个坑)
             byte[] ex = Bus.buildExchangeApdu(Bus.selfPayload());
+            if (ex == null) { //pri added by zhuyang,Explicit payload failure aborts the read instead of crashing on transceive,20261017
+                Bus.log("读取失败: 本机 payload 超长,无法发起 EXCHANGE");
+                return;
+            }
             iso.setTimeout(3000);
             if (!iso.isConnected()) iso.connect();
             Bus.log("NFC 链路已建立(ISO-DEP, maxTransceive=" + iso.getMaxTransceiveLength() + ")");
@@ -453,7 +457,7 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback,
                 Bus.log("响应为空");
                 return;
             }
-            Bus.log("收到对方信息: " + peer);
+            Bus.log("收到对方信息: " + Bus.redactPayload(peer)); //pri modify by zhuyang,Redact sid and hotspot password,20261017
             Bus.onPeerData(peer, "reader");
         } catch (IOException e) {
             Bus.log("读取失败(" + e.getClass().getSimpleName()

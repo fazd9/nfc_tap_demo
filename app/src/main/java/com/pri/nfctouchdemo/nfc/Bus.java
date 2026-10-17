@@ -6,6 +6,7 @@ import android.os.Handler;
 import android.os.Looper;
 
 import java.nio.charset.StandardCharsets;
+import java.security.SecureRandom;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
@@ -21,7 +22,7 @@ import java.util.UUID;
  *   card   -> reader: 90 00
  *   reader -> card : 80 10 00 00 <Lc> <readerPayload> 00            (EXCHANGE, INS=0x10)
  *   card   -> reader: <cardPayload> 90 00
- * Payload format: "n=<model>|b=<btName>|t=<token>|ts=<time>|p=<p2pName>|ip=<lanIpv4>"
+ * Payload format: "n=<model>|b=<btName>|t=<token>|sid=<32hex>|ts=<time>|p=<p2pName>|ip=<lanIpv4>"
  */
 public final class Bus {
 
@@ -38,7 +39,7 @@ public final class Bus {
     public static final byte[] SW_OK = {(byte) 0x90, 0x00};
     public static final byte[] SW_INS_NOT_SUPPORTED = {0x6D, 0x00};
 
-    private static final int MAX_PAYLOAD = 200;
+    private static final int MAX_PAYLOAD = 240; //pri modify by zhuyang,Raise the payload limit to fit sid; short APDU Lc still caps at 255,20261017
 
     /**
      * payload 短缓存时长：见 [selfPayload] 的注释 —— 碰触时这个方法是在 NFC 会话**中间**被调用的，
@@ -57,14 +58,32 @@ public final class Bus {
     private static volatile boolean sUserWantsReader;
     private static volatile String sPayloadCache;
     private static volatile long sPayloadCacheAt;
+    private static volatile String sSid; //pri added by zhuyang,Process-wide session id shared by every round,20261017
 
     private Bus() {}
+
+    //pri added by zhuyang,Generate the 128-bit sid once per process and keep it for all rounds,20261017,start
+    public static String sid() {
+        String s = sSid;
+        if (s != null) return s;
+        synchronized (Bus.class) {
+            if (sSid == null) {
+                byte[] b = new byte[16];
+                new SecureRandom().nextBytes(b);
+                StringBuilder sb = new StringBuilder(32);
+                for (byte x : b) sb.append(String.format(Locale.US, "%02x", x & 0xFF));
+                sSid = sb.toString();
+            }
+            return sSid;
+        }
+    }
+    //pri added by zhuyang,Generate the 128-bit sid once per process and keep it for all rounds,20261017,end
 
     /** 本机开的热点信息(SSID/密码),随 payload 传给对方,对方可免搜索直连。 */
     public static void setHotspotInfo(String ssid, String pass) {
         if (ssid != null) sHotspotSsid = ssid;
         if (pass != null) sHotspotPass = pass;
-        android.util.Log.i("NfcTapDemo", "热点信息: SSID=" + sHotspotSsid + " / " + sHotspotPass);
+        android.util.Log.i("NfcTapDemo", "热点信息: SSID=" + sHotspotSsid + " / pass=***"); //pri modify by zhuyang,Never print the hotspot password,20261017
         payloadChanged();
     }
 
@@ -94,13 +113,8 @@ public final class Bus {
     }
 
     public static byte[] buildExchangeApdu(String payload) {
-        byte[] d = payload.getBytes(StandardCharsets.UTF_8);
-        if (d.length > MAX_PAYLOAD) {
-            Bus.log("payload 超长已截断: " + d.length + " -> " + MAX_PAYLOAD);
-            byte[] trimmed = new byte[MAX_PAYLOAD];
-            System.arraycopy(d, 0, trimmed, 0, MAX_PAYLOAD);
-            d = trimmed;
-        }
+        byte[] d = payloadBytes(payload, "buildExchangeApdu");
+        if (d == null) return null;
         byte[] apdu = new byte[5 + d.length + 1];
         apdu[0] = (byte) 0x80;
         apdu[1] = 0x10;
@@ -111,6 +125,44 @@ public final class Bus {
         apdu[5 + d.length] = 0x00;
         return apdu;
     }
+
+    //pri added by zhuyang,HCE response builder with the same explicit length check (no truncation),20261017,start
+    public static byte[] buildExchangeResponse(String payload) {
+        byte[] d = payloadBytes(payload, "buildExchangeResponse");
+        if (d == null) return null;
+        byte[] resp = new byte[d.length + 2];
+        System.arraycopy(d, 0, resp, 0, d.length);
+        resp[d.length] = (byte) 0x90;
+        resp[d.length + 1] = 0x00;
+        return resp;
+    }
+
+    private static byte[] payloadBytes(String payload, String where) {
+        byte[] d = payload.getBytes(StandardCharsets.UTF_8);
+        if (d.length > MAX_PAYLOAD) {
+            android.util.Log.e("NfcTapDemo", where + ": payload too long (" + d.length
+                    + " > " + MAX_PAYLOAD + "), rejected without truncation");
+            Bus.log(where + ": payload 超长(" + d.length + " > " + MAX_PAYLOAD + "),已拒绝,不截断");
+            return null;
+        }
+        return d;
+    }
+    //pri added by zhuyang,HCE response builder with the same explicit length check (no truncation),20261017,end
+
+    //pri added by zhuyang,Redact sid and hotspot password before a payload reaches any log,20261017,start
+    public static String redactPayload(String payload) {
+        if (payload == null) return null;
+        String[] parts = payload.split("\\|", -1);
+        StringBuilder sb = new StringBuilder(payload.length());
+        for (String kv : parts) {
+            if (sb.length() > 0) sb.append('|');
+            if (kv.startsWith("sid=")) sb.append("sid=***");
+            else if (kv.startsWith("hp=")) sb.append("hp=***");
+            else sb.append(kv);
+        }
+        return sb.toString();
+    }
+    //pri added by zhuyang,Redact sid and hotspot password before a payload reaches any log,20261017,end
 
     public static String parseExchangeResponse(byte[] resp) {
         if (resp == null || resp.length < 2) return null;
@@ -163,6 +215,7 @@ public final class Bus {
             base = "n=" + safe(Build.MODEL)
                     + "|b=" + safe(btName)
                     + "|t=" + UUID.randomUUID().toString().substring(0, 8)
+                    + "|sid=" + sid() //pri added by zhuyang,Keep sid right after t so a tail cut can never drop it,20261017
                     + "|ts=" + new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date());
             sSelfPayload = base;
         }

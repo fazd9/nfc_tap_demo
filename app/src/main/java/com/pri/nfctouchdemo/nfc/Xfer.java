@@ -54,14 +54,9 @@ public class Xfer {
     private final Object mWriteLock = new Object();
     public static final String HS_SSID = "TapShare-Transfer";
     public static final String HS_PASS = "tapshare2026";
-    private static final int MAGIC = 0x4E464331; // "NFC1"
-    private static final int TYPE_PREVIEW = 1;   // 预览缩略图(确认前发送)
-    private static final int TYPE_FULL = 2;      // 完整图片(用户确认后发送)
-    private static final int TYPE_META = 3;      // 发送预告:总张数(len 字段即张数,无 payload)
-    private static final int TYPE_ACCEPT = 4;        //pri added by zhuyang,Receiver verdict frame: accept (len=0),20261014
-    private static final int TYPE_REJECT = 5;        //pri added by zhuyang,Receiver verdict frame: reject (len=0),20261014
     private static final int VERDICT_WAIT_MS = 60000;  //pri added by zhuyang,Sender waits this long for the verdict,20261014
     private static final int PROBE_MS = 3000;          //pri added by zhuyang,An accepted connection that stays silent this long carries no incoming data,20261014
+    private static final int MAX_UNAUTH_CONNECTIONS = 4; //pri added by zhuyang,Cap concurrent connections that still owe a HELLO,20261017
 
     private final Context mCtx;
     private final java.util.List<Listener> mAll =
@@ -146,7 +141,12 @@ public class Xfer {
     private volatile String mPeerLanIp;
     private volatile String mPeerHsSsid;
     private volatile String mPeerHsPass;
+    private volatile String mPeerSid; //pri added by zhuyang,Peer session id from the NFC payload; null means the debug path skips HELLO,20261017
     private volatile boolean mGotConnection;
+    //pri added by zhuyang,Counter of accepted sockets whose HELLO has not been checked yet,20261017
+    private final java.util.concurrent.atomic.AtomicInteger mUnauthCount =
+            new java.util.concurrent.atomic.AtomicInteger();
+    private volatile boolean mHasPhotos; //pri added by zhuyang,Whether this phone still holds photos (HELLO hp field),20261017
     private volatile WifiManager.LocalOnlyHotspotReservation mHotspotReservation;
     private volatile boolean mHotspotActive;
     private volatile boolean mHotspotStarting;
@@ -183,7 +183,7 @@ public class Xfer {
     }
 
     public void setExpectedPeer(String modelName, String btName, String p2pName, String p2pAddr,
-                                String lanIp, String hsSsid, String hsPass) {
+                                String lanIp, String hsSsid, String hsPass, String peerSid) {
         // 每轮碰触只会走到这里一次（TapService 解析出对方 payload 后设目标），所以这里就是
         // "新一轮开始"的钩子：先清掉上一轮的连接状态。不清的话会踩这个坑 ——
         //   mGoAddress / mSenderWaiting 只要连成过一次就永远非空/为真，而 TapService 是常驻服务、
@@ -203,6 +203,14 @@ public class Xfer {
         mPeerLanIp = lanIp;
         mPeerHsSsid = hsSsid;
         mPeerHsPass = hsPass;
+        mPeerSid = (peerSid == null || peerSid.isEmpty()) ? null : peerSid;
+        //pri added by zhuyang,The debug path has no sid: both ends must skip HELLO and say so in the log,20261017,start
+        if (mPeerSid == null) {
+            Bus.log("传输: [未认证] 本轮对方 payload 没有 sid,跳过 HELLO 握手(调试路径)");
+        } else {
+            Bus.log("传输: [认证] 本轮将在每条 TCP 连接首帧校验对方 sid");
+        }
+        //pri added by zhuyang,The debug path has no sid: both ends must skip HELLO and say so in the log,20261017,end
         Bus.log("P2P: 目标设备 = " + modelName + "/" + btName
                 + (p2pName != null ? ", P2P名=" + p2pName : "")
                 + (p2pAddr != null ? ", P2P地址=" + p2pAddr : "")
@@ -238,6 +246,8 @@ public class Xfer {
         mPauseWarm = false;
         mReceiverRole = false;
         mCanSend = false;   //pri added by zhuyang,New round: undecided until TapService reports the photos,20261014
+        mHasPhotos = false; //pri added by zhuyang,New round: no photos reported yet,20261017
+        mPeerSid = null;    //pri added by zhuyang,New round: the peer sid is set again from the new payload,20261017
         mDriveP2p = false;  //pri added by zhuyang,New round: the P2P fallback needs a fresh decision,20261014
         //pri added by zhuyang,Bump the round token and drop the verdict session state of the previous round,20261014,start
         mRound++;
@@ -444,12 +454,19 @@ public class Xfer {
     //pri added by zhuyang,TapService tells the link layer whether this phone still holds photos (may swipe later),20261014
     public void setCanSend(boolean can) {
         mCanSend = can;
+        mHasPhotos = can; //pri added by zhuyang,The HELLO hp field mirrors the photo state of this round,20261017
     }
 
     //pri added by zhuyang,Swipe declares the sender role without re-negotiating a channel that is already up,20261014
     public void setSenderRole() {
         mReceiverRole = false;
         mCanSend = false;
+    }
+
+    //pri added by zhuyang,Role intent carried in HELLO: U=undecided S=send R=receive,20261017
+    private String localRole() {
+        if (!mReceiverRole) return "S";
+        return mCanSend ? "U" : "R";
     }
 
     //pri added by zhuyang,Who may drive P2P discovery/connect: a decided receiver, or a sender whose ①② attempts failed,20261014
@@ -471,11 +488,53 @@ public class Xfer {
         }).start();
     }
 
+    //pri added by zhuyang,Client side of the first-frame handshake: HELLO then a 1500ms HELLO_ACK check,20261017,start
+    private DataInputStream clientHello(Socket s) {
+        DataInputStream in = null;
+        try {
+            s.setSoTimeout(Proto.HELLO_TIMEOUT_MS);
+            in = new DataInputStream(
+                    new java.io.BufferedInputStream(s.getInputStream(), 256 * 1024));
+            if (mPeerSid == null) {
+                Bus.log("传输: [未认证] 本轮无对方 sid,跳过 HELLO 握手");
+            } else {
+                DataOutputStream out = new DataOutputStream(s.getOutputStream());
+                byte[] hello = Proto.buildHello(Bus.sid(), localRole(), mHasPhotos);
+                Proto.writeFrame(out, Proto.TYPE_HELLO, hello.length, hello);
+                out.flush();
+                Proto.Frame f = Proto.readFrame(in, Proto.HELLO_TIMEOUT_MS, Proto.MAX_HELLO_LEN);
+                if (f == null || f.type != Proto.TYPE_HELLO_ACK) {
+                    Bus.log("传输: [认证] 对方未回 HELLO_ACK,关闭连接");
+                    closeQuietly(s);
+                    return null;
+                }
+                Proto.Hello ack = Proto.parseHello(f.data);
+                if (ack == null || ack.version != Proto.HELLO_VERSION
+                        || !mPeerSid.equalsIgnoreCase(ack.sid)) {
+                    Bus.log("传输: [认证] HELLO_ACK 校验失败,关闭连接");
+                    closeQuietly(s);
+                    return null;
+                }
+                Bus.log("传输: [认证] HELLO_ACK 校验通过,对方角色=" + ack.role);
+            }
+            s.setSoTimeout(0);
+            return in;
+        } catch (java.net.SocketTimeoutException e) {
+            Bus.log("传输: [认证] 等待 HELLO_ACK 超时(" + Proto.HELLO_TIMEOUT_MS + "ms),关闭连接");
+        } catch (Exception e) {
+            Bus.log("传输: [认证] HELLO 握手失败: " + e);
+        }
+        closeQuietly(s);
+        return null;
+    }
+    //pri added by zhuyang,Client side of the first-frame handshake: HELLO then a 1500ms HELLO_ACK check,20261017,end
+
     private boolean connectTo(String ip, String how) {
         for (int i = 0; i < 2 && mRunning; i++) {
             try {
                 Socket s = new Socket();
                 s.connect(new InetSocketAddress(ip, PORT), 1500);
+                if (clientHello(s) == null) continue;
                 mPendingSocket = s;
                 mPauseWarm = true; // 连上后停止 P2P 搜索:射频让路给数据传输(否则吞吐暴跌)
                 try { mP2p.stopPeerDiscovery(mChannel, null); } catch (Throwable ignored) {}
@@ -552,6 +611,7 @@ public class Xfer {
                 try {
                     Socket s = net.getSocketFactory().createSocket();
                     s.connect(new InetSocketAddress(gw, PORT), 2000);
+                    if (clientHello(s) == null) continue;
                     mPendingSocket = s;
                     mPauseWarm = true; // 接入成功后停 P2P 搜索:射频让路给数据传输(否则吞吐暴跌)
                     try { mP2p.stopPeerDiscovery(mChannel, null); } catch (Throwable ignored) {}
@@ -650,19 +710,14 @@ public class Xfer {
         }
     }
 
+    //pri modify by zhuyang,Exact P2P address/name only: no Android* wildcard and no model/BT fallback,20261017,start
     private boolean matchesPeer(WifiP2pDevice d) {
         String addr = d.deviceAddress;
         String name = d.deviceName;
         if (mPeerP2pAddr != null && addr != null && mPeerP2pAddr.equalsIgnoreCase(addr)) return true;
-        if (mPeerP2pName != null && name != null && mPeerP2pName.equalsIgnoreCase(name)) return true;
-        if (mPeerP2pAddr == null && mPeerP2pName == null) {
-            // 对方 payload 没带 P2P 信息时的兜底:按手机常见命名/机型名
-            if (name != null && name.startsWith("Android")) return true;
-            if (mPeerName != null && name != null && name.equalsIgnoreCase(mPeerName)) return true;
-            if (mPeerBt != null && name != null && name.equalsIgnoreCase(mPeerBt)) return true;
-        }
-        return false;
+        return mPeerP2pName != null && name != null && mPeerP2pName.equalsIgnoreCase(name);
     }
+    //pri modify by zhuyang,Exact P2P address/name only: no Android* wildcard and no model/BT fallback,20261017,end
 
     private void onPeers(WifiP2pDeviceList peers) {
         Collection<WifiP2pDevice> list = peers.getDeviceList();
@@ -676,6 +731,13 @@ public class Xfer {
 
         // 只有接收方主动发起直连;局域网已连上(mGotConnection)后不再发起 P2P,避免传输中协商抢射频
         if (!mayDriveP2p() || mGoAddress != null || mConnecting || mGotConnection) return;
+
+        //pri added by zhuyang,No P2P identity from the peer payload: never guess a device by name,20261017,start
+        if (mPeerP2pAddr == null && mPeerP2pName == null) {
+            Bus.log("P2P: 对方 P2P 信息缺失,不发起 P2P 连接(请重新碰触或改用同网/热点)");
+            return;
+        }
+        //pri added by zhuyang,No P2P identity from the peer payload: never guess a device by name,20261017,end
 
         WifiP2pDevice target = null;
         for (WifiP2pDevice d : list) {
@@ -727,10 +789,10 @@ public class Xfer {
     }
 
     //pri added by zhuyang,Sender always writes the offer first: a connection that stays silent is not incoming data,20261014,start
-    private boolean peerSpeaksFirst(Socket s) {
+    private boolean peerSpeaksFirst(Socket s, DataInputStream bufferedIn) {
         long deadline = System.currentTimeMillis() + PROBE_MS;
         try {
-            java.io.InputStream in = s.getInputStream();
+            java.io.InputStream in = bufferedIn != null ? bufferedIn : s.getInputStream();
             while (mRunning && System.currentTimeMillis() < deadline) {
                 if (in.available() > 0) return true;
                 try { Thread.sleep(100); } catch (InterruptedException ignored) {}
@@ -756,27 +818,103 @@ public class Xfer {
                     mServer = new ServerSocket(PORT);
                     Bus.log("传输: 已监听端口 " + PORT + ",等待对方连接…");
                     while (mRunning) {
-                        Socket s = mServer.accept();
-                        mGotConnection = true;
-                        Bus.log("传输: 对方已连接 " + s.getInetAddress());
-                        //pri added by zhuyang,Classify late: who writes first decides the direction of this socket,20261014,start
-                        if (!mReceiverRole) {
-                            stashForSending(s);
-                        } else if (peerSpeaksFirst(s)) {
-                            handleIncoming(s); // 对方在发报价:本机就是这一轮的接收方
-                        } else if (!mReceiverRole || mCanSend) {
-                            stashForSending(s); // 本机还有照片没上滑(探测期间上滑也算):留着当发送通道
-                        } else {
-                            try { s.close(); } catch (Exception ignored) {}
-                            Bus.log("传输: 对端只是读取方,已释放空连接");
+                        final Socket s = mServer.accept();
+                        //pri added by zhuyang,Accept only accepts: HELLO is read on its own thread with a hard cap,20261017,start
+                        if (mUnauthCount.incrementAndGet() > MAX_UNAUTH_CONNECTIONS) {
+                            mUnauthCount.decrementAndGet();
+                            Bus.log("传输: 未认证连接超过上限(" + MAX_UNAUTH_CONNECTIONS
+                                    + "),直接关闭 " + s.getInetAddress());
+                            closeQuietly(s);
+                            continue;
                         }
-                        //pri added by zhuyang,Classify late: who writes first decides the direction of this socket,20261014,end
+                        new Thread(new Runnable() {
+                            @Override public void run() { authenticateAndClassify(s); }
+                        }, "accept-auth").start();
+                        //pri added by zhuyang,Accept only accepts: HELLO is read on its own thread with a hard cap,20261017,end
                     }
                 } catch (Exception e) {
                     if (mRunning) Bus.log("传输: 监听异常 " + e);
                 }
             }
         }).start();
+    }
+
+    //pri added by zhuyang,Server side of the first-frame handshake, then the original direction classification,20261017,start
+    private void authenticateAndClassify(final Socket s) {
+        boolean released = false;
+        DataInputStream in = null;
+        try {
+            if (!mRunning) {
+                closeQuietly(s);
+                return;
+            }
+            final String expected = mPeerSid;
+            if (expected == null) {
+                Bus.log("传输: [未认证] 本轮无对方 sid,跳过 HELLO 校验 " + s.getInetAddress());
+            } else {
+                s.setSoTimeout(Proto.HELLO_TIMEOUT_MS);
+                in = new DataInputStream(
+                        new java.io.BufferedInputStream(s.getInputStream(), 256 * 1024));
+                Proto.Frame f = Proto.readFrame(in, Proto.HELLO_TIMEOUT_MS, Proto.MAX_HELLO_LEN);
+                if (f == null || f.type != Proto.TYPE_HELLO) {
+                    Bus.log("传输: [认证] 未收到 HELLO,关闭连接 " + s.getInetAddress());
+                    closeQuietly(s);
+                    return;
+                }
+                Proto.Hello hello = Proto.parseHello(f.data);
+                if (hello == null || hello.version != Proto.HELLO_VERSION
+                        || !expected.equalsIgnoreCase(hello.sid)) {
+                    Bus.log("传输: [认证] HELLO 校验失败,关闭连接 " + s.getInetAddress());
+                    closeQuietly(s);
+                    return;
+                }
+                DataOutputStream out = new DataOutputStream(s.getOutputStream());
+                byte[] ack = Proto.buildHelloAck(Bus.sid(), localRole());
+                Proto.writeFrame(out, Proto.TYPE_HELLO_ACK, ack.length, ack);
+                out.flush();
+                Bus.log("传输: [认证] HELLO 校验通过 " + s.getInetAddress()
+                        + ",对方角色=" + hello.role);
+                s.setSoTimeout(0);
+            }
+            mUnauthCount.decrementAndGet();
+            released = true;
+            classifyConnection(s, in);
+        } catch (java.net.SocketTimeoutException e) {
+            Bus.log("传输: [认证] HELLO 超时(" + Proto.HELLO_TIMEOUT_MS + "ms),关闭连接 "
+                    + s.getInetAddress());
+            closeQuietly(s);
+        } catch (Exception e) {
+            Bus.log("传输: [认证] HELLO 处理失败,关闭连接: " + e);
+            closeQuietly(s);
+        } finally {
+            if (!released) mUnauthCount.decrementAndGet();
+        }
+    }
+
+    private void classifyConnection(Socket s, DataInputStream in) {
+        if (!mRunning) {
+            closeQuietly(s);
+            return;
+        }
+        mGotConnection = true;
+        Bus.log("传输: 对方已连接 " + s.getInetAddress());
+        //pri added by zhuyang,Classify late: who writes first decides the direction of this socket,20261014,start
+        if (!mReceiverRole) {
+            stashForSending(s);
+        } else if (peerSpeaksFirst(s, in)) {
+            handleIncoming(s, in); // 对方在发报价:本机就是这一轮的接收方
+        } else if (!mReceiverRole || mCanSend) {
+            stashForSending(s); // 本机还有照片没上滑(探测期间上滑也算):留着当发送通道
+        } else {
+            closeQuietly(s);
+            Bus.log("传输: 对端只是读取方,已释放空连接");
+        }
+        //pri added by zhuyang,Classify late: who writes first decides the direction of this socket,20261014,end
+    }
+    //pri added by zhuyang,Server side of the first-frame handshake, then the original direction classification,20261017,end
+
+    private void closeQuietly(Socket s) {
+        try { if (s != null) s.close(); } catch (Exception ignored) {}
     }
 
     /** 接收方是组员:主动连组主,等待读图。 */
@@ -787,8 +925,14 @@ public class Xfer {
                     try {
                         Socket s = new Socket();
                         s.connect(new InetSocketAddress(mGoAddress, PORT), 5000);
+                        DataInputStream hs = clientHello(s);
+                        if (hs == null) {
+                            Bus.log("传输: 连接组主未通过 HELLO 校验(第 " + (i + 1) + " 次)");
+                            try { Thread.sleep(2000); } catch (InterruptedException ignored) {}
+                            continue;
+                        }
                         Bus.log("传输: 已连接组主,等待接收图片…");
-                        handleIncoming(s);
+                        handleIncoming(s, hs);
                         return;
                     } catch (Exception e) {
                         Bus.log("传输: 连接组主失败(第 " + (i + 1) + " 次): " + e);
@@ -801,11 +945,12 @@ public class Xfer {
 
     /** 从一条已建立的 TCP 连接上读图片(可多张,每张一帧):显示 + 存相册。
      *  读线程只管收;解码+入库放 mIo 单线程队列,收完一张立刻收下一张(否则发送端被背压卡住)。 */
-    private void handleIncoming(Socket s) {
+    private void handleIncoming(Socket s, DataInputStream handshakeIn) {
         final java.util.ArrayList<Bitmap> all = new java.util.ArrayList<Bitmap>();
         try {
-            DataInputStream in = new DataInputStream(
-                    new java.io.BufferedInputStream(s.getInputStream(), 256 * 1024));
+            DataInputStream in = handshakeIn != null ? handshakeIn
+                    : new DataInputStream(
+                            new java.io.BufferedInputStream(s.getInputStream(), 256 * 1024));
             mPeerSocket = s;        //pri added by zhuyang,Keep the socket so the verdict can be written back on it,20261014
             mVerdictSent = false;   //pri added by zhuyang,Reset the per-connection verdict/done flags,20261014,start
             mDoneNotified = false;
@@ -814,19 +959,19 @@ public class Xfer {
             int total = 0;
             int expect = 0;
             while (mRunning) {
-                int magic;
+                Proto.Frame f;
                 try {
-                    magic = in.readInt();
-                } catch (java.io.EOFException e) {
-                    break; // 对方关闭连接 = 发送完毕
-                }
-                if (magic != MAGIC) {
-                    Bus.log("传输: 数据头不匹配 " + Integer.toHexString(magic));
+                    f = Proto.readFrame(in, 0, Proto.MAX_FRAME_LEN);
+                } catch (Exception e) {
+                    Bus.log("传输: 帧读取失败 " + e);
                     break;
                 }
-                int type = in.readInt();
-                int len = in.readInt();
-                if (type == TYPE_META) {
+                if (f == null) {
+                    break; // 对方关闭连接 = 发送完毕
+                }
+                int type = f.type;
+                int len = f.length;
+                if (type == Proto.TYPE_META) {
                     expect = len; // 对方预告总张数:接收页文案不再回退成 1
                     mExpect = expect; //pri added by zhuyang,Record the announced total for this round,20261014
                     final int n = expect;
@@ -836,10 +981,9 @@ public class Xfer {
                     });
                     continue;
                 }
-                Bus.log("传输: 正在接收" + (type == TYPE_PREVIEW ? "预览" : "第 " + (count + 1) + " 张") + " " + len + " 字节…");
-                final byte[] data = new byte[len];
-                in.readFully(data);
-                if (type == TYPE_PREVIEW) {
+                Bus.log("传输: 正在接收" + (type == Proto.TYPE_PREVIEW ? "预览" : "第 " + (count + 1) + " 张") + " " + len + " 字节…");
+                final byte[] data = f.data;
+                if (type == Proto.TYPE_PREVIEW) {
                     final Bitmap pbmp = decode(data);
                     mMain.post(new Runnable() {
                         @Override public void run() { mListener.onPreview(pbmp); }
@@ -926,9 +1070,13 @@ public class Xfer {
                         try {
                             Socket t = new Socket();
                             t.connect(new InetSocketAddress(mGoAddress, PORT), 3000);
-                            mPendingSocket = t;
-                            s = t;
-                            Bus.log("传输: 已连接组主 " + mGoAddress + "(P2P)");
+                            if (clientHello(t) == null) {
+                                Bus.log("传输: P2P 连接未通过 HELLO 校验");
+                            } else {
+                                mPendingSocket = t;
+                                s = t;
+                                Bus.log("传输: 已连接组主 " + mGoAddress + "(P2P)");
+                            }
                         } catch (Exception e) {
                             Bus.log("传输: 连接组主失败 " + e);
                         }
@@ -955,23 +1103,18 @@ public class Xfer {
                     final int round = mRound; //pri added by zhuyang,Round token: a stale verdict is discarded by readVerdict,20261014
                     //pri added by zhuyang,Offer stage: META(total) + one preview, then wait for the verdict,20261014,start
                     synchronized (mWriteLock) {
-                        out.writeInt(MAGIC);
-                        out.writeInt(TYPE_META);   // 先告知总张数:接收端文案/进度用
-                        out.writeInt(uris.size());
+                        Proto.writeFrame(out, Proto.TYPE_META, uris.size(), null);
                         if (!uris.isEmpty()) {
                             byte[] thumb = thumbnail(uris.get(0)); //pri added by zhuyang,Only the first preview, the receive card consumes the last one,20261014
                             if (thumb != null) {
-                                out.writeInt(MAGIC);
-                                out.writeInt(TYPE_PREVIEW);
-                                out.writeInt(thumb.length);
-                                out.write(thumb);
+                                Proto.writeFrame(out, Proto.TYPE_PREVIEW, thumb.length, thumb);
                             }
                         }
                         out.flush();
                     }
                     Bus.log("传输: 已报价(" + uris.size() + " 张 + 预览),等对方「接收/拒绝」…");
                     int verdict = readVerdict(s, round);
-                    if (verdict != TYPE_ACCEPT) {
+                    if (verdict != Proto.TYPE_ACCEPT) {
                         try { s.close(); } catch (Exception ignored) {}
                         Bus.log("传输: 对方未同意接收,整图未发出");
                         releaseHotspotLater();
@@ -1001,10 +1144,7 @@ public class Xfer {
                         if (o == eod) break;
                         byte[] data = (byte[]) o;
                         Bus.log("传输: 正在发送第 " + (i + 1) + "/" + uris.size() + " 张 " + data.length + " 字节…");
-                        out.writeInt(MAGIC);
-                        out.writeInt(TYPE_FULL);
-                        out.writeInt(data.length);
-                        out.write(data);
+                        Proto.writeFrame(out, Proto.TYPE_FULL, data.length, data);
                         total += data.length;
                     }
                     out.flush();
@@ -1034,18 +1174,16 @@ public class Xfer {
             s.setSoTimeout(VERDICT_WAIT_MS);
             DataInputStream in = new DataInputStream(
                     new java.io.BufferedInputStream(s.getInputStream(), 8 * 1024));
-            int magic = in.readInt();
-            int type = in.readInt();
-            in.readInt(); //pri added by zhuyang,Verdict frame len is always 0: read it to stay frame-aligned,20261014
-            if (magic != MAGIC) {
-                Bus.log("传输: 回执头不匹配 " + Integer.toHexString(magic));
+            Proto.Frame f = Proto.readFrame(in, VERDICT_WAIT_MS, Proto.MAX_FRAME_LEN);
+            if (f == null) {
+                Bus.log("传输: 回执连接已关闭");
             } else if (round != mRound) {
                 stale = true;
                 Bus.log("传输: 收到上一轮的回执,已忽略");
-            } else if (type == TYPE_ACCEPT || type == TYPE_REJECT) {
-                verdict = type;
+            } else if (f.type == Proto.TYPE_ACCEPT || f.type == Proto.TYPE_REJECT) {
+                verdict = f.type;
             } else {
-                Bus.log("传输: 未知的回执类型 " + type);
+                Bus.log("传输: 未知的回执类型 " + f.type);
             }
         } catch (java.net.SocketTimeoutException e) {
             Bus.log("传输: 等待对方「接收/拒绝」超时(" + (VERDICT_WAIT_MS / 1000) + "s)");
@@ -1053,12 +1191,12 @@ public class Xfer {
             Bus.log("传输: 未收到回执(对方已断开): " + e);
         }
         if (stale) return 0;
-        if (verdict == TYPE_ACCEPT) {
+        if (verdict == Proto.TYPE_ACCEPT) {
             Bus.log("传输: 对方已确认接收");
             mMain.post(new Runnable() {
                 @Override public void run() { mListener.onPeerAccepted(); }
             });
-        } else if (verdict == TYPE_REJECT) {
+        } else if (verdict == Proto.TYPE_REJECT) {
             Bus.log("传输: 对方拒收");
             mMain.post(new Runnable() {
                 @Override public void run() { mListener.onPeerRejected(); }
@@ -1073,12 +1211,12 @@ public class Xfer {
 
     //pri added by zhuyang,Receiver: write the ACCEPT verdict back (images follow from the peer),20261014
     public void confirmReceived() {
-        writeVerdict(TYPE_ACCEPT);
+        writeVerdict(Proto.TYPE_ACCEPT);
     }
 
     //pri added by zhuyang,Receiver: write the REJECT verdict back (no image was ever sent),20261014
     public void rejectTransfer() {
-        writeVerdict(TYPE_REJECT);
+        writeVerdict(Proto.TYPE_REJECT);
     }
 
     //pri added by zhuyang,Write the verdict on the same connection at most once per round,20261014
@@ -1098,12 +1236,10 @@ public class Xfer {
                 try {
                     DataOutputStream out = new DataOutputStream(s.getOutputStream());
                     synchronized (mWriteLock) {
-                        out.writeInt(MAGIC);
-                        out.writeInt(type);
-                        out.writeInt(0);
+                        Proto.writeFrame(out, type, 0, null);
                         out.flush();
                     }
-                    Bus.log("传输: 已" + (type == TYPE_ACCEPT ? "同意接收" : "拒绝接收") + ",回执已写回");
+                    Bus.log("传输: 已" + (type == Proto.TYPE_ACCEPT ? "同意接收" : "拒绝接收") + ",回执已写回");
                 } catch (Exception e) {
                     Bus.log("传输: 回执写回异常 " + e);
                 }

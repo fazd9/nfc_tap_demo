@@ -127,13 +127,13 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         if (intent != null && "com.pri.nfcdemo.PEER".equals(intent.getAction())) {
             // 卡侧(HCE)碰到的对方信息经 intent 转交:服务没跑时会被冷启,事件不会丢
             String payload = intent.getStringExtra("payload");
-            Bus.log("服务: 收到碰触信息" + (payload == null ? "" : ",对方=" + payload));
+            Bus.log("服务: 收到碰触信息" + (payload == null ? "" : ",对方=" + Bus.redactPayload(payload))); //pri modify by zhuyang,Redact sid and hotspot password,20261017
             Bus.onPeerData(payload, intent.getStringExtra("role"));
         }
         if (intent != null && "com.pri.nfcdemo.DEBUG".equals(intent.getAction())) {
             // 调试:把 NFC 交换这一步用 adb 参数顶掉,其余流程走真实代码(免物理碰触做回归/演示)
             String payload = intent.getStringExtra("payload");
-            Bus.log("调试: 模拟碰一碰,对方信息 = " + payload);
+            Bus.log("调试: 模拟碰一碰,对方信息 = " + Bus.redactPayload(payload)); //pri modify by zhuyang,Redact sid and hotspot password,20261017
             Bus.onPeerData(payload, intent.getStringExtra("role"));
         }
         //pri added by zhuyang,AssistContent probe triggered by am startservice: unlike am start it does not change the,20261016
@@ -314,7 +314,8 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         final String label = peerName(payload);
         Xfer x = xfer(this);
         x.setExpectedPeer(field(payload,"n"), field(payload,"b"), field(payload,"p"),
-                field(payload,"a"), field(payload,"ip"), field(payload,"hs"), field(payload,"hp"));
+                field(payload,"a"), field(payload,"ip"), field(payload,"hs"), field(payload,"hp"),
+                field(payload,"sid")); //pri added by zhuyang,Carry the peer sid into the first-frame handshake,20261017
         x.startAsReceiver(); // 服务端先就绪
         if (!Bus.lockRole()) { Bus.log("角色已定,忽略重复的碰触事件"); return; }
         mPeerLabel = label;
@@ -524,6 +525,10 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
                 // (真机实测:对方在"AID 被选中"后 249ms 就链路丢失,本机第二次 transceive 抛
                 //  IOException,EXCHANGE 永远送不到卡方)
                 byte[] ex = Bus.buildExchangeApdu(Bus.selfPayload());
+                if (ex == null) { //pri added by zhuyang,Explicit payload failure aborts the read without touching the UI flow,20261017
+                    Bus.log("读卡: 本机 payload 超长,无法发起 EXCHANGE,本轮中止");
+                    return;
+                }
                 iso.setTimeout(3000);
                 if (!iso.isConnected()) iso.connect();
                 Bus.log("NFC 链路已建立(ISO-DEP)");
@@ -533,7 +538,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
                 byte[] resp = iso.transceive(ex);
                 String peer = Bus.parseExchangeResponse(resp);
                 if (peer == null) { Bus.log("响应为空"); return; }
-                Bus.log("收到对方信息: " + peer);
+                Bus.log("收到对方信息: " + Bus.redactPayload(peer)); //pri modify by zhuyang,Redact sid and hotspot password,20261017
                 Bus.onPeerData(peer, "reader");
             } catch (Throwable t) {
                 Bus.log("读取失败: " + t + " — 贴紧约 1 秒再分开,重试一次");

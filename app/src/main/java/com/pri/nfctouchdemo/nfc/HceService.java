@@ -36,7 +36,8 @@ public class HceService extends HostApduService {
             return new byte[]{0x67, 0x00};
         }
         // 诊断用：每个进来的 APDU 都记一行 —— "EXCHANGE 没到" 和 "到了但解析失败" 一眼可分
-        Bus.log("HCE: 收到 APDU(" + apdu.length + "B) " + hex(apdu));
+        boolean exchange = apdu.length > 4 && (apdu[0] & 0xFF) == 0x80 && (apdu[1] & 0xFF) == 0x10;
+        Bus.log("HCE: 收到 APDU(" + apdu.length + "B) " + (exchange ? "(EXCHANGE,data hidden)" : hex(apdu))); //pri modify by zhuyang,Hide payload bytes so sid and hotspot credentials never reach the log,20261017
         try {
             if (isSelectOurAid(apdu)) {
                 Bus.log("HCE: 对方选中了我们的 AID");
@@ -47,13 +48,13 @@ public class HceService extends HostApduService {
             int ins = apdu[1] & 0xFF;
             if ((apdu[0] & 0xFF) == 0x80 && ins == 0x10) {
                 String peer = new String(Bus.apduData(apdu), StandardCharsets.UTF_8);
-                Bus.log("HCE: 收到对方(接收方)信息: " + peer);
+                Bus.log("HCE: 收到对方(接收方)信息: " + Bus.redactPayload(peer)); //pri modify by zhuyang,Redact sid and hotspot password,20261017
                 // ① 先把响应拼好（Bus 里有短缓存，正常就是字符串拼接）
-                byte[] mine = Bus.selfPayload().getBytes(StandardCharsets.UTF_8);
-                byte[] resp = new byte[mine.length + 2];
-                System.arraycopy(mine, 0, resp, 0, mine.length);
-                resp[mine.length] = (byte) 0x90;
-                resp[mine.length + 1] = 0x00;
+                byte[] resp = Bus.buildExchangeResponse(Bus.selfPayload()); //pri modify by zhuyang,Explicit length failure instead of silent truncation,20261017
+                if (resp == null) {
+                    Bus.log("HCE: 本机 payload 超长,回 6700(wrong length)");
+                    return new byte[]{0x67, 0x00};
+                }
                 // ② 再转交常驻服务 —— 绝不能同步做，否则响应会被拖过对方的超时
                 postPeerToService(peer);
                 return resp;
