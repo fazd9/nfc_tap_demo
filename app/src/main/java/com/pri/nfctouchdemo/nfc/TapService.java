@@ -52,6 +52,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
     private final ArrayList<Bitmap> mBmps = new ArrayList<Bitmap>();    // 本次收到的全部整图
     private boolean mSendShown;                                         // 本轮发送动效页是否已拉起(替代原来的 mSendPage != null)
     private boolean mReceiveShown;                                      // 本轮接收动效页是否已拉起(替代原来的 mReceivePage != null)
+    private long mLastErrorAt;                                          //pri added by zhuyang,Batch 5: coded error already rendered,20261017
 
     /** 相册推送过来的"当前选中照片"。 */
     private static final ArrayList<Uri> PENDING = new ArrayList<Uri>();
@@ -534,78 +535,119 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
     @Override
     public void onStorageInsufficient(long totalBytes) {
         String mb = String.format(java.util.Locale.US, "%.0f", totalBytes / 1048576.0);
-        final String line = getString(R.string.fail_no_space, mb);
-        Bus.log("服务: 存储空间不足,拒绝接收 — " + line);
-        mRejected = true;
-        mReceiveShown = false;
-        startService(OverlayService.statusIntent(this, line));
-        //pri added by zhuyang,Batch 4: hide after a short delay, then raise the banner last so a late receive-card command cannot cover it,20261017,start
-        mMain.postDelayed(new Runnable() {
-            @Override public void run() {
-                startService(OverlayService.hideIntent(TapService.this, OverlayService.DISSOLVE_MS));
-                startService(OverlayService.failBannerIntent(TapService.this,
-                        getString(R.string.fail_title_receive), line));
-            }
-        }, 600);
-        //pri added by zhuyang,Batch 4: hide after a short delay, then raise the banner last so a late receive-card command cannot cover it,20261017,end
-        Bus.unlockRole();
+        Bus.log("服务: 存储空间不足,拒绝接收 — 需要 " + mb + "MB");
+        forwardLegacyFailure(new XferError(XferError.Stage.OFFER, XferError.NO_SPACE, "需要 " + mb + "MB"));
     }
     //pri added by zhuyang,Batch 4: storage precheck refused the offer before the user accepted,20261017,end
 
+    //pri added by zhuyang,Batch 5: one coded failure exit; receiver and sender both get a banner,20261017,start
+    @Override
+    public void onTransferError(XferError.Stage stage, int code, String detail) {
+        handleTransferError(new XferError(stage, code, detail));
+    }
+
     @Override
     public void onXferFailed(String why) {
-        //pri modify by zhuyang,Receiver failures close the receive card and report instead of hanging,20261017,start
-        if (mReceiveShown && !mUserWantsSend) {
-            Bus.log("服务: 接收失败,收窗 — " + why);
-            if (!mRejected) {
-                mRejected = true;
-                mReceiveShown = false;
-                String detail = why == null ? "" : why;
-                if (detail.length() > 12) detail = detail.substring(0, 12);
-                startService(OverlayService.hideIntent(this, OverlayService.DISSOLVE_MS));
-                startService(OverlayService.failBannerIntent(this,
-                        getString(R.string.fail_title_receive), detail));
-            }
-            Bus.unlockRole();
+        //pri added by zhuyang,Batch 5: Xfer emits onTransferError first; never paint twice,20261017
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (now - mLastErrorAt < 1000) {
+            Bus.log("服务: 兼容失败回调已由错误码处理,忽略 — " + why);
             return;
         }
-        //pri modify by zhuyang,Receiver failures close the receive card and report instead of hanging,20261017,end
-        if (!mSendShown && !PENDING.isEmpty()) showSendPage(); // 失败也要让用户看到原因(发送页此时可能还没弹)
-        startService(OverlayService.statusIntent(this, why)); // 失败原因同样走动效页底部状态行
-        //pri added by zhuyang,D1: banner only for a failure after this phone declared itself sender,20261014,start
-        if (mUserWantsSend) {
-            String detail = why == null ? "" : why;
-            if (detail.length() > 12) detail = detail.substring(0, 12); //pri added by zhuyang,Long text stays in the status line; the banner only fits a short line,20261014
-            startService(OverlayService.failBannerIntent(this, getString(R.string.fail_title), detail));
+        handleTransferError(new XferError(XferError.Stage.TRANSFER, XferError.UNKNOWN, why));
+    }
+
+    private void forwardLegacyFailure(XferError err) {
+        long now = android.os.SystemClock.elapsedRealtime();
+        if (now - mLastErrorAt < 1000) {
+            Bus.log("服务: 兼容失败回调已由错误码处理,忽略 — " + err);
+            return;
         }
-        //pri added by zhuyang,D1: banner only for a failure after this phone declared itself sender,20261014,end
-        // 流程结束(失败):立即释放角色锁,保证下一轮碰触能重新开始
+        handleTransferError(err);
+    }
+
+    private void handleTransferError(XferError err) {
+        mLastErrorAt = android.os.SystemClock.elapsedRealtime();
+        boolean sender = (mUserWantsSend && !mRoleYielded)
+                || (mSendShown && !mReceiveShown && !mRoleYielded);
+        String line = failureText(err.code, !sender);
+        if (err.detail != null && !err.detail.trim().isEmpty() && err.code != XferError.UNKNOWN) {
+            if (!err.detail.startsWith(line)) line = line + " — " + err.detail;
+        } else if (err.code == XferError.UNKNOWN && err.detail != null && !err.detail.trim().isEmpty()) {
+            line = err.detail;
+        }
+        Bus.log("服务: 传输错误 " + err + " → " + line + (sender ? "(发送侧)" : "(接收侧)"));
+        if (sender) {
+            //pri added by zhuyang,Batch 5: drop the full-screen send page so the banner is not covered,20261017
+            mSendShown = false;
+            startService(OverlayService.statusIntent(this, line));
+            final String title = err.code == XferError.NFC_FAIL
+                    ? getString(R.string.fail_title_nfc) : getString(R.string.fail_title);
+            final String bannerLine = line;
+            mMain.postDelayed(new Runnable() {
+                @Override public void run() {
+                    startService(OverlayService.hideIntent(TapService.this, OverlayService.DISSOLVE_MS));
+                    startService(OverlayService.failBannerIntent(TapService.this, title, bannerLine));
+                }
+            }, 600);
+        } else {
+            mRejected = true;
+            mReceiveShown = false;
+            startService(OverlayService.statusIntent(this, line));
+            final String bannerLine = line;
+            mMain.postDelayed(new Runnable() {
+                @Override public void run() {
+                    startService(OverlayService.hideIntent(TapService.this, OverlayService.DISSOLVE_MS));
+                    startService(OverlayService.failBannerIntent(TapService.this,
+                            getString(R.string.fail_title_receive), bannerLine));
+                }
+            }, 600);
+        }
+        Bus.unlockRole();
+    }
+
+    private String failureText(int code, boolean receiver) {
+        switch (code) {
+            case XferError.NFC_FAIL: return getString(R.string.err_nfc);
+            case XferError.CONNECT_TIMEOUT: return getString(R.string.err_connect_timeout);
+            case XferError.CONNECT_REFUSED: return getString(R.string.err_connect_refused);
+            case XferError.AUTH_FAILED: return getString(R.string.err_auth_failed);
+            case XferError.OFFER_TIMEOUT:
+                return getString(receiver ? R.string.err_offer_timeout_receive : R.string.err_offer_timeout_send);
+            case XferError.PEER_REJECTED: return getString(R.string.err_peer_rejected);
+            case XferError.NO_SPACE: return getString(R.string.err_no_space);
+            case XferError.TRANSFER_TIMEOUT: return getString(R.string.err_transfer_timeout);
+            case XferError.TRANSFER_STALL: return getString(R.string.err_transfer_stall);
+            case XferError.CHECKSUM_FAILED: return getString(R.string.err_checksum);
+            case XferError.PROTOCOL_ERROR: return getString(R.string.err_protocol);
+            case XferError.CANCELLED: return getString(R.string.err_cancelled);
+            case XferError.ROLE_CONFLICT: return getString(R.string.err_role_conflict);
+            case XferError.DONE_ACK_TIMEOUT: return getString(R.string.err_done_ack_timeout);
+            default: return getString(R.string.err_unknown);
+        }
+    }
+    //pri added by zhuyang,Batch 5: one coded failure exit; receiver and sender both get a banner,20261017,end
+
+    //pri added by zhuyang,Batch 5: NFC exchange failure gets the same stable banner,20261017
+    private void reportNfcFailure(Throwable t) {
+        XferError err = new XferError(XferError.Stage.NFC_EXCHANGE, XferError.NFC_FAIL, "NFC 交换失败: " + t);
+        Bus.log("服务: " + err);
+        mLastErrorAt = android.os.SystemClock.elapsedRealtime();
+        String line = getString(R.string.err_nfc);
+        startService(OverlayService.statusIntent(this, line));
+        startService(OverlayService.failBannerIntent(this, getString(R.string.fail_title_nfc), line));
         Bus.unlockRole();
     }
 
     //pri added by zhuyang,Two-phase protocol callbacks,20261014,start
     @Override public void onOfferExpired() {
         Bus.log("服务: 对方超时未发货,本轮结束");
-        //pri modify by zhuyang,Batch 2: close the receive card and tell the user the peer never started,20261017,start
-        if (!mReceiveShown) {
-            Bus.unlockRole();
-            return;
-        }
-        mReceiveShown = false;
-        mRejected = true; //pri added by zhuyang,This round must not re-open the card,20261014
-        startService(OverlayService.hideIntent(this, OverlayService.DISSOLVE_MS)); //pri modify by zhuyang,E5: dissolve before detaching,20261014
-        startService(OverlayService.failBannerIntent(this,
-                getString(R.string.fail_title_receive), getString(R.string.fail_no_offer)));
-        Bus.unlockRole();
-        //pri modify by zhuyang,Batch 2: close the receive card and tell the user the peer never started,20261017,end
+        forwardLegacyFailure(new XferError(XferError.Stage.OFFER, XferError.OFFER_TIMEOUT, null));
     }
 
     @Override public void onPeerRejected() {
         Bus.log("服务: 对方拒收");
-        Bus.unlockRole();
-        //pri modify by zhuyang,D1: the status line becomes the top fail banner,20261014
-        startService(OverlayService.failBannerIntent(this,
-                getString(R.string.fail_title), getString(R.string.fail_rejected)));
+        forwardLegacyFailure(new XferError(XferError.Stage.OFFER, XferError.PEER_REJECTED, null));
     }
 
     @Override public void onPeerAccepted() {
@@ -616,10 +658,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
 
     @Override public void onVerdictTimeout() {
         Bus.log("服务: 对方未响应(等回执超时)");
-        Bus.unlockRole();
-        //pri modify by zhuyang,D1: the status line becomes the top fail banner,20261014
-        startService(OverlayService.failBannerIntent(this,
-                getString(R.string.fail_title), getString(R.string.fail_timeout)));
+        forwardLegacyFailure(new XferError(XferError.Stage.OFFER, XferError.OFFER_TIMEOUT, null));
     }
     //pri added by zhuyang,Two-phase protocol callbacks,20261014,end
 
@@ -682,6 +721,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
                 Bus.onPeerData(peer, "reader");
             } catch (Throwable t) {
                 Bus.log("读取失败: " + t + " — 贴紧约 1 秒再分开,重试一次");
+                reportNfcFailure(t);
             } finally { try { iso.close(); } catch (Throwable ignored) {} }
         }}).start();
     }

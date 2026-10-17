@@ -7,6 +7,7 @@
   applies topInsetPx() as the root padding.
   pri added by zhuyang,Fail banner (D1): content of a dedicated top-anchored small overlay window,20261014,end
 -->
+<!--pri modify by zhuyang,Batch 5: stable failure text may use two lines,20261017-->
 <FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:id="@+id/fail_root"
     android:layout_width="match_parent"
@@ -53,6 +54,8 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:layout_marginStart="6dp"
+                android:ellipsize="end"
+                android:maxLines="2"
                 android:textColor="#FFB9C2CC"
                 android:textSize="13sp" />
         </LinearLayout>

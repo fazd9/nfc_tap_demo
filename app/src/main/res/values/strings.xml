@@ -93,6 +93,26 @@
     <string name="result_title_receive">接收完成</string>
     <!--pri added by zhuyang,Batch 4: partial failure summary + storage precheck rejection,20261017,end-->
 
+    <!--pri added by zhuyang,Batch 5: stable failure text per stage/code; status line and banner share one mapping,20261017,start-->
+    <string name="fail_title_nfc">碰触失败</string>
+    <string name="err_nfc">贴紧 1 秒再试</string>
+    <string name="err_connect_timeout">连接超时，请重碰一次</string>
+    <string name="err_connect_refused">无法连接对方，请重碰一次</string>
+    <string name="err_auth_failed">连接校验失败，请重碰一次</string>
+    <string name="err_offer_timeout_send">对方未确认接收</string>
+    <string name="err_offer_timeout_receive">对方未开始发送</string>
+    <string name="err_peer_rejected">对方拒收</string>
+    <string name="err_no_space">存储空间不足</string>
+    <string name="err_transfer_timeout">传输中断，请重碰一次</string>
+    <string name="err_transfer_stall">传输停滞，连接已断开</string>
+    <string name="err_checksum">图片校验失败</string>
+    <string name="err_protocol">传输数据异常</string>
+    <string name="err_cancelled">传输已取消</string>
+    <string name="err_role_conflict">同时发送冲突，请重碰一次</string>
+    <string name="err_done_ack_timeout">对方未确认完成</string>
+    <string name="err_unknown">传输失败</string>
+    <!--pri added by zhuyang,Batch 5: stable failure text per stage/code; status line and banner share one mapping,20261017,end-->
+
     <!--pri added by zhuyang,D5: in-app image viewer (replaces the Google Photos pager),20261014,start-->
     <string name="viewer_load_failed">图片加载失败</string>
     <string name="viewer_position">%1$d / %2$d</string>

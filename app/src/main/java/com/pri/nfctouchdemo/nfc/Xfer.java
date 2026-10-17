@@ -51,6 +51,8 @@ public class Xfer {
         void onTransferDone(java.util.List<Bitmap> bmps);  // 对方发送完毕(连接关闭),bmps=本次收到的全部整图
         void onImageSent(int bytes);
         void onXferFailed(String why);
+        //pri added by zhuyang,Batch 5: coded failure callback; TapService maps it to strings.xml,20261017
+        default void onTransferError(XferError.Stage stage, int code, String detail) {}
         void onOfferExpired();                         //pri added by zhuyang,Receiver: peer never delivered the offer,20261014
         void onPeerRejected();                         //pri added by zhuyang,Sender: peer rejected the transfer,20261014
         void onPeerAccepted();                         //pri added by zhuyang,Sender: peer accepted the transfer,20261014
@@ -97,6 +99,11 @@ public class Xfer {
     private static final int ROLE_READ_TIMEOUT_MS = 1500;   //pri added by zhuyang,Wait this long for the peer ROLE frame after HELLO_ACK,20261017
     private static final int ROLE_LISTEN_TIMEOUT_MS = 1000; //pri added by zhuyang,Upper bound for joining the role listener before reusing its stream,20261017
     private static final int VERDICT_YIELDED = -1;          //pri added by zhuyang,readVerdict result: this phone yielded and now receives,20261017
+    //pri added by zhuyang,Batch 5: connect stage budget (LAN once + P2P 1/2/4s backoff),20261017,start
+    private static final int LAN_CONNECT_TIMEOUT_MS = 2000;
+    private static final int P2P_DISCOVER_MAX = 3;
+    private static final int[] P2P_BACKOFF_MS = {1000, 2000, 4000};
+    //pri added by zhuyang,Batch 5: connect stage budget (LAN once + P2P 1/2/4s backoff),20261017,end
 
     private final Context mCtx;
     private final java.util.List<Listener> mAll =
@@ -128,6 +135,9 @@ public class Xfer {
         }
         @Override public void onXferFailed(String w) {
             for (Listener l : mAll) l.onXferFailed(w);
+        }
+        @Override public void onTransferError(XferError.Stage stage, int code, String detail) {
+            for (Listener l : mAll) l.onTransferError(stage, code, detail);
         }
         @Override public void onOfferExpired() {
             for (Listener l : mAll) l.onOfferExpired();
@@ -162,6 +172,17 @@ public class Xfer {
         if (l != null && !mAll.contains(l)) mAll.add(l);
     }
 
+    //pri added by zhuyang,Batch 5: an authentication/protocol failure must abort the whole connect stage,20261017,start
+    private static final class FatalXferException extends java.io.IOException {
+        final XferError error;
+
+        FatalXferException(XferError error) {
+            super(error == null ? "fatal xfer error" : error.toString());
+            this.error = error;
+        }
+    }
+    //pri added by zhuyang,Batch 5: an authentication/protocol failure must abort the whole connect stage,20261017,end
+
     //pri added by zhuyang,Keep the handshake streams with the socket: later frames must reuse them,20261017,start
     private static final class Link {
         final Socket s;
@@ -182,6 +203,7 @@ public class Xfer {
         final java.util.concurrent.atomic.AtomicBoolean offerExpiredCb =
                 new java.util.concurrent.atomic.AtomicBoolean();
         volatile String failReason;
+        volatile XferError failError; //pri added by zhuyang,Batch 5: coded reason for the reader/writer to report,20261017
         volatile Thread hbThread;
         //pri added by zhuyang,Per-link liveness state shared by the reader, writer and heartbeat,20261017,end
         String peerRole;        // ROLE read right after HELLO_ACK (null = old peer/timeout)
@@ -270,8 +292,8 @@ public class Xfer {
     private volatile boolean mImGo;
     private volatile boolean mConnecting;
     private volatile boolean mDiscovering;
-    private int mRetry;
-    private boolean mSenderWaiting;
+    private int mP2pAttempt; //pri modify by zhuyang,Batch 5: local P2P discovery counter, 1/2/4s backoff,20261017
+    private volatile boolean mSenderWaiting; //pri modify by zhuyang,Batch 5: also read by the connect-strategy thread,20261017
 
     // 碰一碰交换到的对方设备名/IP(用于挑对目标)
     private volatile String mPeerName;
@@ -376,6 +398,15 @@ public class Xfer {
         return l != null && l.s.isConnected() && !l.s.isClosed();
     }
 
+    //pri added by zhuyang,Batch 5: a stray inbound connection must not fail an already-running round,20261017
+    private void failInbound(XferError err) {
+        if (hasLiveLink()) {
+            Bus.log("传输: [认证] 已有活动连接,忽略本次入站失败 " + err);
+            return;
+        }
+        fail(err);
+    }
+
     private void resetRoundState() {
         if (mGoAddress != null || mSenderWaiting || mServer != null || mGotConnection) {
             Bus.log("传输: 新一轮开始,清掉上一轮状态(组主=" + mGoAddress + ", 等直连=" + mSenderWaiting
@@ -387,7 +418,7 @@ public class Xfer {
         mDiscovering = false;
         mGotConnection = false;
         mSenderWaiting = false;
-        mRetry = 0;
+        mP2pAttempt = 0;
         mPauseWarm = false;
         mReceiverRole = false;
         mCanSend = false;   //pri added by zhuyang,New round: undecided until TapService reports the photos,20261014
@@ -554,7 +585,7 @@ public class Xfer {
         mReceiverRole = true;
         register();
         if (mP2p == null || mChannel == null) {
-            fail("本机不支持 Wi-Fi Direct");
+            fail(new XferError(XferError.Stage.CONNECT, XferError.CONNECT_REFUSED, "本机不支持 Wi-Fi Direct"));
             return;
         }
         checkWifi();
@@ -572,7 +603,7 @@ public class Xfer {
             return;
         }
         mDiscovering = true;
-        mRetry = 0;
+        mP2pAttempt = 0;
         Bus.log("P2P: 等待热点/局域网直连,20 秒后仍未连上则 P2P 搜索兜底…");
         try {
             mP2p.removeGroup(mChannel, null); // 清掉可能残留的分组,失败无妨
@@ -591,7 +622,7 @@ public class Xfer {
         mReceiverRole = false;
         register();
         if (mP2p == null || mChannel == null) {
-            fail("本机不支持 Wi-Fi Direct");
+            fail(new XferError(XferError.Stage.CONNECT, XferError.CONNECT_REFUSED, "本机不支持 Wi-Fi Direct"));
             return;
         }
         checkWifi();
@@ -875,17 +906,20 @@ public class Xfer {
             while (mRunning && link.hbRunning && !link.s.isClosed()) {
                 long now = SystemClock.elapsedRealtime();
                 if (now - link.hbStartedAt >= TRANSFER_TOTAL_MS) {
-                    signalLinkDead(link, "传输超时(超过 " + (TRANSFER_TOTAL_MS / 60000) + " 分钟)");
+                    signalLinkDead(link, new XferError(XferError.Stage.TRANSFER, XferError.TRANSFER_TIMEOUT,
+                            "传输超时(超过 " + (TRANSFER_TOTAL_MS / 60000) + " 分钟)"));
                     return;
                 }
                 if (link.hbWritePhase) {
                     //pri added by zhuyang,Transfer phase: a blocked write is caught by the stall watchdog,20261017
                     if (now - link.lastWriteProgressAt >= WRITE_STALL_MS) {
-                        signalLinkDead(link, "写停滞超过 " + (WRITE_STALL_MS / 1000) + "s,连接失效");
+                        signalLinkDead(link, new XferError(XferError.Stage.TRANSFER, XferError.TRANSFER_STALL,
+                                "写停滞超过 " + (WRITE_STALL_MS / 1000) + "s,连接失效"));
                         return;
                     }
                 } else if (link.hbExpectRx && now - link.lastRx.get() >= HEARTBEAT_DEAD_MS) {
-                    signalLinkDead(link, "连接超时(" + (HEARTBEAT_DEAD_MS / 1000) + "s 未收到对端任何数据)");
+                    signalLinkDead(link, new XferError(XferError.Stage.TRANSFER, XferError.TRANSFER_TIMEOUT,
+                            "连接超时(" + (HEARTBEAT_DEAD_MS / 1000) + "s 未收到对端任何数据)"));
                     return;
                 }
                 if (now - link.lastTx.get() >= HEARTBEAT_IDLE_MS) {
@@ -899,7 +933,8 @@ public class Xfer {
                             Bus.log("传输: 心跳 PING(" + (link.hbWritePhase ? "传输中" : "等待中") + ")");
                         }
                     } catch (Exception e) {
-                        signalLinkDead(link, "心跳发送失败(连接已断开)");
+                        signalLinkDead(link, new XferError(XferError.Stage.TRANSFER, XferError.TRANSFER_TIMEOUT,
+                                "心跳发送失败(连接已断开)"));
                         return;
                     } finally {
                         if (locked) mWriteLock.unlock();
@@ -918,32 +953,40 @@ public class Xfer {
     //pri added by zhuyang,One lightweight loop per link: PING when idle, fail on silence or write stall,20261017,end
 
     //pri added by zhuyang,Declare a link dead and close it; the owning reader/writer reports the failure once,20261017
-    private void signalLinkDead(final Link link, final String why) {
+    private void signalLinkDead(final Link link, final XferError err) {
         if (!link.linkDead.compareAndSet(false, true)) return;
-        link.failReason = why;
-        Bus.log("传输: 连接失效 — " + why + ",关闭连接");
+        link.failError = err;
+        link.failReason = err == null ? null : err.detail;
+        Bus.log("传输: 连接失效 — " + err + ",关闭连接");
         closeQuietly(link);
     }
 
-    private void notifyLinkFailedOnce(Link link, String why) {
+    private void notifyLinkFailedOnce(Link link, XferError err) {
+        if (err == null) return;
         if (link == null) {
-            fail(why);
+            fail(err);
             return;
         }
         if (!link.failCb.compareAndSet(false, true)) return;
-        Bus.log("传输: " + why);
-        final String w = why;
-        mMain.post(new Runnable() {
-            @Override public void run() { mListener.onXferFailed(w); }
-        });
+        Bus.log("传输: " + err);
+        fail(err);
     }
 
-    private void notifyOfferExpiredOnce(Link link, String why) {
-        if (!link.offerExpiredCb.compareAndSet(false, true)) return;
-        Bus.log("传输: " + why);
+    private void notifyOfferExpiredOnce(Link link, XferError err) {
+        if (err == null) return;
+        if (link != null && !link.offerExpiredCb.compareAndSet(false, true)) return;
+        Bus.log("传输: " + err);
+        fail(err);
         mMain.post(new Runnable() {
             @Override public void run() { mListener.onOfferExpired(); }
         });
+    }
+
+    //pri added by zhuyang,Batch 5: a dead link keeps its coded reason for the waiting reader,20261017
+    private static XferError linkError(Link link, XferError.Stage fallbackStage) {
+        if (link != null && link.failError != null) return link.failError;
+        String why = link != null && link.failReason != null ? link.failReason : "连接已断开";
+        return new XferError(fallbackStage, XferError.TRANSFER_TIMEOUT, why);
     }
 
     //pri added by zhuyang,Reply PONG without ever interleaving it with a business frame,20261017
@@ -1008,9 +1051,19 @@ public class Xfer {
         new Thread(new Runnable() {
             @Override public void run() {
                 if (mPeerHsSsid != null && joinHotspot(mPeerHsSsid, mPeerHsPass)) return;
+                if (!mSenderWaiting) {
+                    Bus.log("传输: 连接阶段已判定失败,不再走 LAN/P2P 兜底");
+                    return;
+                }
                 if (mPeerLanIp != null && connectTo(mPeerLanIp, "局域网")) return;
+                if (!mSenderWaiting) {
+                    Bus.log("传输: 连接阶段已判定失败,不再走 P2P 兜底");
+                    return;
+                }
                 Bus.log("传输: 热点/同网直连未成功(对方热点没开?不在同一 Wi-Fi?),走 Wi-Fi Direct 兜底…");
                 mDriveP2p = true; //pri added by zhuyang,Only here does the sender take over P2P discovery/connect,20261014
+                mDiscovering = true; //pri added by zhuyang,Batch 5: the sender's P2P fallback owns the same 1/2/4s budget,20261017
+                mP2pAttempt = 0;
                 mPauseWarm = false;
                 warmDiscoverLoop();
             }
@@ -1018,7 +1071,7 @@ public class Xfer {
     }
 
     //pri modify by zhuyang,Client handshake returns the Link so every later frame reuses the same streams,20261017,start
-    private Link clientHello(Socket s) {
+    private Link clientHello(Socket s) throws FatalXferException {
         try {
             s.setSoTimeout(Proto.HELLO_TIMEOUT_MS);
             //pri added by zhuyang,Wrap the socket streams so liveness sees byte-level progress,20261017,start
@@ -1041,14 +1094,16 @@ public class Xfer {
                 if (f == null || f.type != Proto.TYPE_HELLO_ACK) {
                     Bus.log("传输: [认证] 对方未回 HELLO_ACK,关闭连接");
                     closeQuietly(s);
-                    return null;
+                    throw new FatalXferException(new XferError(XferError.Stage.CONNECT,
+                            XferError.AUTH_FAILED, "对方未回 HELLO_ACK(校验失败)"));
                 }
                 Proto.Hello ack = Proto.parseHello(f.data);
                 if (ack == null || ack.version != Proto.HELLO_VERSION
                         || !mPeerSid.equalsIgnoreCase(ack.sid)) {
                     Bus.log("传输: [认证] HELLO_ACK 校验失败,关闭连接");
                     closeQuietly(s);
-                    return null;
+                    throw new FatalXferException(new XferError(XferError.Stage.CONNECT,
+                            XferError.AUTH_FAILED, "HELLO_ACK 的 sid/版本不匹配"));
                 }
                 mPeerRole = ack.role;
                 byte[] role = Proto.buildRole(localRole(), Bus.sid());
@@ -1069,7 +1124,8 @@ public class Xfer {
                                 if (mPeerSid != null && !mPeerSid.equalsIgnoreCase(pr.sid)) {
                                     Bus.log("传输: [认证] 对端 ROLE sid 不一致,关闭连接");
                                     closeQuietly(s);
-                                    return null;
+                                    throw new FatalXferException(new XferError(XferError.Stage.CONNECT,
+                                            XferError.AUTH_FAILED, "对端 ROLE sid 不一致"));
                                 }
                                 link.peerRole = pr.role;
                                 link.peerSid = pr.sid;
@@ -1089,6 +1145,9 @@ public class Xfer {
             }
             s.setSoTimeout(0);
             return new Link(s, in, out, rxAt, txAt);
+        } catch (FatalXferException fe) {
+            closeQuietly(s);
+            throw fe;
         } catch (java.net.SocketTimeoutException e) {
             Bus.log("传输: [认证] 等待 HELLO_ACK 超时(" + Proto.HELLO_TIMEOUT_MS + "ms),关闭连接");
         } catch (Exception e) {
@@ -1100,10 +1159,11 @@ public class Xfer {
     //pri modify by zhuyang,Client handshake returns the Link so every later frame reuses the same streams,20261017,end
 
     private boolean connectTo(String ip, String how) {
-        for (int i = 0; i < 2 && mRunning; i++) {
+        //pri modify by zhuyang,Batch 5: the LAN layer gets one 2s attempt; P2P owns its own budget,20261017,start
+        for (int i = 0; i < 1 && mRunning; i++) {
             try {
                 Socket s = new Socket();
-                s.connect(new InetSocketAddress(ip, PORT), 1500);
+                s.connect(new InetSocketAddress(ip, PORT), LAN_CONNECT_TIMEOUT_MS);
                 Link link = clientHello(s);
                 if (link == null) continue;
                 if (!handleClientRole(link)) {
@@ -1115,10 +1175,14 @@ public class Xfer {
                 Bus.log("传输: " + how + "直连成功 " + ip + ":" + PORT + "(免搜索)");
                 mListener.onP2pReady(false, ip);
                 return true;
+            } catch (FatalXferException fe) {
+                fail(fe.error);
+                return false;
             } catch (Exception e) {
                 Bus.log("传输: " + how + "直连尝试 " + (i + 1) + " 失败: " + e);
             }
         }
+        //pri modify by zhuyang,Batch 5: the LAN layer gets one 2s attempt; P2P owns its own budget,20261017,end
         return false;
     }
 
@@ -1196,6 +1260,10 @@ public class Xfer {
                     Bus.log("传输: 热点直连成功(免搜索)");
                     mListener.onP2pReady(false, gw);
                     return true;
+                } catch (FatalXferException fe) {
+                    fail(fe.error);
+                    releaseNetworkRequest();
+                    return false;
                 } catch (Exception e) {
                     Bus.log("传输: 热点内连接尝试 " + (i + 1) + " 失败: " + e);
                     try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
@@ -1231,26 +1299,36 @@ public class Xfer {
                 }
             });
         } catch (Throwable t) {
-            fail("搜索异常: " + t);
+            fail(new XferError(XferError.Stage.CONNECT, XferError.CONNECT_REFUSED, "搜索异常: " + t));
         }
     }
 
+    //pri modify by zhuyang,Batch 5: P2P discovery owns its retry count; 1/2/4s backoff, max 3,20261017,start
     private void retryDiscovery() {
-        if (!mRunning || !mayDriveP2p() || mRetry >= 5) {
+        if (!mDiscovering) return; //pri added by zhuyang,Batch 5: a failed round must not fail again on late peer events,20261017
+        if (!mRunning || !mayDriveP2p()) {
             mDiscovering = false;
             mConnecting = false;
-            fail("P2P 搜索多次失败");
             return;
         }
-        mRetry++;
-        long delay = 3000L + mRetry * 2000L;
-        Bus.log("P2P: " + (delay / 1000) + " 秒后重试搜索(第 " + mRetry + " 次)");
+        if (mP2pAttempt >= P2P_DISCOVER_MAX) {
+            mDiscovering = false;
+            mConnecting = false;
+            fail(new XferError(XferError.Stage.CONNECT, XferError.CONNECT_TIMEOUT,
+                    "P2P 发现失败(" + mP2pAttempt + " 次,预算 " + P2P_DISCOVER_MAX + " 次)"));
+            return;
+        }
+        long delay = P2P_BACKOFF_MS[mP2pAttempt];
+        mP2pAttempt++;
+        Bus.log("P2P: " + (delay / 1000) + " 秒后重试搜索(第 " + mP2pAttempt + " 次,上限 "
+                + P2P_DISCOVER_MAX + " 次)");
         mMain.postDelayed(new Runnable() {
             @Override public void run() {
                 if (mRunning && mDiscovering && mGoAddress == null) startDiscovery();
             }
         }, delay);
     }
+    //pri modify by zhuyang,Batch 5: P2P discovery owns its retry count; 1/2/4s backoff, max 3,20261017,end
 
     private void register() {
         if (mRx != null) return;
@@ -1345,7 +1423,7 @@ public class Xfer {
             });
         } catch (Throwable t) {
             mConnecting = false;
-            fail("直连异常: " + t);
+            fail(new XferError(XferError.Stage.CONNECT, XferError.CONNECT_REFUSED, "直连异常: " + t));
         }
     }
 
@@ -1449,6 +1527,7 @@ public class Xfer {
             if (f == null || f.type != Proto.TYPE_HELLO) {
                 Bus.log("传输: [认证] 未收到 HELLO,关闭连接 " + s.getInetAddress());
                 closeQuietly(s);
+                failInbound(new XferError(XferError.Stage.CONNECT, XferError.AUTH_FAILED, "未收到 HELLO"));
                 return;
             }
             Proto.Hello hello = Proto.parseHello(f.data);
@@ -1456,6 +1535,7 @@ public class Xfer {
                     || !expected.equalsIgnoreCase(hello.sid)) {
                 Bus.log("传输: [认证] HELLO 校验失败,关闭连接 " + s.getInetAddress());
                 closeQuietly(s);
+                failInbound(new XferError(XferError.Stage.CONNECT, XferError.AUTH_FAILED, "HELLO 的 sid/版本不匹配"));
                 return;
             }
             //pri modify by zhuyang,Batch 4: answer with our own completed bitmap; keep the peer's on the Link,20261017,start
@@ -1492,9 +1572,11 @@ public class Xfer {
             Bus.log("传输: [认证] HELLO 超时(" + Proto.HELLO_TIMEOUT_MS + "ms),关闭连接 "
                     + s.getInetAddress());
             closeQuietly(s);
+            failInbound(new XferError(XferError.Stage.CONNECT, XferError.CONNECT_TIMEOUT, "HELLO 握手超时"));
         } catch (Exception e) {
             Bus.log("传输: [认证] HELLO 处理失败,关闭连接: " + e);
             closeQuietly(s);
+            failInbound(new XferError(XferError.Stage.CONNECT, XferError.PROTOCOL_ERROR, "HELLO 处理失败: " + e));
         } finally {
             if (!released) mUnauthCount.decrementAndGet();
         }
@@ -1541,6 +1623,7 @@ public class Xfer {
             if (mPeerSid != null && !mPeerSid.equalsIgnoreCase(role.sid)) {
                 Bus.log("传输: ROLE 帧 sid 与本轮 sid 不一致,关闭连接");
                 closeQuietly(link);
+                failInbound(new XferError(XferError.Stage.CONNECT, XferError.AUTH_FAILED, "ROLE 帧 sid 不一致"));
                 return;
             }
             mPeerRole = role.role;
@@ -1748,8 +1831,8 @@ public class Xfer {
                 if (mStashedSocket != link || mRoleListenerAbort == link) break;
                 //pri added by zhuyang,No offer within 20s: close and let the receive page report it,20261017,start
                 if (SystemClock.elapsedRealtime() - listenStart >= OFFER_WAIT_MS) {
-                    notifyOfferExpiredOnce(link, "已连接 " + (OFFER_WAIT_MS / 1000)
-                            + "s 仍未收到报价(对方未开始发送)");
+                    notifyOfferExpiredOnce(link, new XferError(XferError.Stage.OFFER, XferError.OFFER_TIMEOUT,
+                            "已连接 " + (OFFER_WAIT_MS / 1000) + "s 仍未收到报价(对方未开始发送)"));
                     break;
                 }
                 //pri added by zhuyang,No offer within 20s: close and let the receive page report it,20261017,end
@@ -1830,6 +1913,7 @@ public class Xfer {
     private void startClientRead() {
         new Thread(new Runnable() {
             @Override public void run() {
+                boolean connected = false;
                 for (int i = 0; i < 6 && mRunning; i++) {
                     try {
                         Socket s = new Socket();
@@ -1841,16 +1925,24 @@ public class Xfer {
                             continue;
                         }
                         Bus.log("传输: 已连接组主,等待接收图片…");
+                        connected = true;
                         if (mPeerSid == null) {
                             handleIncoming(link);
                             return;
                         }
                         handleClientRole(link);
                         return;
+                    } catch (FatalXferException fe) {
+                        fail(fe.error);
+                        return;
                     } catch (Exception e) {
                         Bus.log("传输: 连接组主失败(第 " + (i + 1) + " 次): " + e);
                         try { Thread.sleep(2000); } catch (InterruptedException ignored) {}
                     }
+                }
+                //pri added by zhuyang,Batch 5: an exhausted connect stage reports CONNECT_TIMEOUT instead of silence,20261017
+                if (!connected && mRunning && mReceiverRole && !hasLiveLink()) {
+                    fail(new XferError(XferError.Stage.CONNECT, XferError.CONNECT_TIMEOUT, "连接组主失败"));
                 }
             }
         }).start();
@@ -1871,6 +1963,7 @@ public class Xfer {
         int total = 0;
         int expect = 0;
         String readError = null;
+        XferError error = null; //pri added by zhuyang,Batch 5: the first coded reason of this receive runs to the banner,20261017
         boolean doneReceived = false;
         boolean legacyComplete = false;
         boolean chunkedStarted = false;
@@ -1891,6 +1984,8 @@ public class Xfer {
         long curBytes = 0;
         final String sid = storeSid(); //pri added by zhuyang,Batch 4: .part paths and resume bitmap are bound to this session,20261017
         final String advertisedHave = mStore.haveHex(sid); //pri added by zhuyang,Batch 4: the bitmap this connection advertised in HELLO,20261017
+        //pri added by zhuyang,Batch 5: a live peer that keeps PINGing must not extend the offer wait forever,20261017
+        final long offerDeadline = SystemClock.elapsedRealtime() + OFFER_WAIT_MS;
         try {
             link.s.setSoTimeout(OFFER_WAIT_MS); //pri modify by zhuyang,No receive read may block forever,20261017
             mPeerSocket = link;     //pri added by zhuyang,Keep the link so the verdict can be written back on it,20261014
@@ -1916,6 +2011,14 @@ public class Xfer {
             while (mRunning && !link.linkDead.get()) {
                 if (f == null) f = replay.pollFirst(); //pri added by zhuyang,Drain every buffered frame before touching the stream,20261017
                 if (f == null) {
+                    //pri modify by zhuyang,Batch 5: absolute 20s offer deadline even while PING keeps arriving,20261017,start
+                    if (expect == 0 && count == 0 && !chunkedStarted
+                            && SystemClock.elapsedRealtime() >= offerDeadline) {
+                        readError = "等待报价超时(" + (OFFER_WAIT_MS / 1000) + "s 未收到 META)";
+                        error = new XferError(XferError.Stage.OFFER, XferError.OFFER_TIMEOUT, readError);
+                        break;
+                    }
+                    //pri modify by zhuyang,Batch 5: absolute 20s offer deadline even while PING keeps arriving,20261017,end
                     //pri modify by zhuyang,Offer wait stays at 20s; the data phase tightens to 10s (a chunk or PING must arrive),20261017,start
                     int readTimeout = expect > 0 ? RX_DATA_TIMEOUT_MS : OFFER_WAIT_MS;
                     try {
@@ -1923,13 +2026,19 @@ public class Xfer {
                         f = Proto.readFrame(link.in, readTimeout, Proto.MAX_FRAME_LEN);
                     } catch (java.net.SocketTimeoutException te) {
                         Bus.log("传输: 接收超时(" + readTimeout + "ms 未读到完整帧)");
-                        readError = expect > 0
-                                ? "接收超时(" + (RX_DATA_TIMEOUT_MS / 1000) + "s 未收到数据)"
-                                : "对方未开始发送(报价超时)";
+                        if (expect > 0) {
+                            readError = "接收超时(" + (RX_DATA_TIMEOUT_MS / 1000) + "s 未收到数据)";
+                            error = new XferError(XferError.Stage.TRANSFER, XferError.TRANSFER_TIMEOUT, readError);
+                        } else {
+                            readError = "对方未开始发送(报价超时)";
+                            error = new XferError(XferError.Stage.OFFER, XferError.OFFER_TIMEOUT, readError);
+                        }
                         break;
                     } catch (Exception e) {
                         Bus.log("传输: 帧读取失败 " + e);
-                        readError = "传输中断: " + e;
+                        readError = "传输中断(读帧失败)";
+                        error = link.linkDead.get() ? linkError(link, XferError.Stage.TRANSFER)
+                                : new XferError(XferError.Stage.TRANSFER, XferError.PROTOCOL_ERROR, readError);
                         break;
                     }
                     //pri modify by zhuyang,Offer wait stays at 20s; the data phase tightens to 10s (a chunk or PING must arrive),20261017,end
@@ -1996,6 +2105,9 @@ public class Xfer {
                         Bus.log("传输: 存储空间不足,ACCEPT 前拒绝(需要 " + mbText(need) + "MB,可用 "
                                 + mbText(avail) + "MB)");
                         sendRejectNow(link, "存储空间不足");
+                        //pri added by zhuyang,Batch 5: NO_SPACE now travels as a coded failure,20261017
+                        fail(new XferError(XferError.Stage.OFFER, XferError.NO_SPACE,
+                                "需要 " + mbText(need) + "MB,可用 " + mbText(avail) + "MB"));
                         mMain.post(new Runnable() {
                             @Override public void run() { mListener.onStorageInsufficient(need); }
                         });
@@ -2009,6 +2121,7 @@ public class Xfer {
                     Proto.FileBegin fi = Proto.parseFileBegin(frame.data);
                     if (fi == null) {
                         readError = "文件元信息解析失败";
+                        error = new XferError(XferError.Stage.TRANSFER, XferError.PROTOCOL_ERROR, readError);
                         sendCancel(link, readError);
                         break;
                     }
@@ -2054,6 +2167,9 @@ public class Xfer {
                             curOut = mStore.open(sid, fi.index);
                         } catch (Exception e) {
                             readError = "无法创建临时文件: " + e;
+                            error = new XferError(XferError.Stage.TRANSFER,
+                                    String.valueOf(e).toLowerCase(java.util.Locale.US).contains("space")
+                                            ? XferError.NO_SPACE : XferError.PROTOCOL_ERROR, readError);
                             sendCancel(link, readError);
                             break;
                         }
@@ -2061,6 +2177,7 @@ public class Xfer {
                             curMd = MessageDigest.getInstance("SHA-256");
                         } catch (Exception e) {
                             readError = "本机不支持 SHA-256";
+                            error = new XferError(XferError.Stage.TRANSFER, XferError.PROTOCOL_ERROR, readError);
                             sendCancel(link, readError);
                             break;
                         }
@@ -2076,17 +2193,20 @@ public class Xfer {
                 if (type == Proto.TYPE_DATA) {
                     if (curFile == null || (!curReuse && curOut == null)) {
                         readError = "未收到 FILE_BEGIN 就收到数据块";
+                        error = new XferError(XferError.Stage.TRANSFER, XferError.PROTOCOL_ERROR, readError);
                         sendCancel(link, readError);
                         break;
                     }
                     if (frame.length < 4) {
                         readError = "DATA 帧缺少序号";
+                        error = new XferError(XferError.Stage.TRANSFER, XferError.PROTOCOL_ERROR, readError);
                         sendCancel(link, readError);
                         break;
                     }
                     int seq = Proto.readSeq(frame.data);
                     if (seq != expectedSeq) {
                         readError = "数据块序号不连续(期望 " + expectedSeq + ",收到 " + seq + ")";
+                        error = new XferError(XferError.Stage.TRANSFER, XferError.PROTOCOL_ERROR, readError);
                         Bus.log("传输: " + readError);
                         sendCancel(link, readError);
                         break;
@@ -2097,6 +2217,9 @@ public class Xfer {
                             curMd.update(frame.data, 4, frame.length - 4);
                         } catch (Exception e) {
                             readError = "写入临时文件失败: " + e;
+                            error = new XferError(XferError.Stage.TRANSFER,
+                                    String.valueOf(e).toLowerCase(java.util.Locale.US).contains("space")
+                                            ? XferError.NO_SPACE : XferError.PROTOCOL_ERROR, readError);
                             sendCancel(link, readError);
                             break;
                         }
@@ -2112,6 +2235,7 @@ public class Xfer {
                     Proto.Done done = Proto.parseDone(frame.data);
                     if (done == null) {
                         readError = "完成帧解析失败";
+                        error = new XferError(XferError.Stage.TRANSFER, XferError.PROTOCOL_ERROR, readError);
                         sendCancel(link, readError);
                         break;
                     }
@@ -2143,6 +2267,7 @@ public class Xfer {
                         readError = "完成校验失败(完成帧 " + done.count + " 张/" + done.totalBytes
                                 + "B,实收 " + receivedFiles + " 张/" + rxBytes + "B,预告 " + expect
                                 + " 张,跳过 " + skipped + " 张)";
+                        error = new XferError(XferError.Stage.TRANSFER, XferError.PROTOCOL_ERROR, readError);
                         Bus.log("传输: " + readError);
                         sendCancel(link, "完成校验失败");
                         break;
@@ -2159,7 +2284,8 @@ public class Xfer {
                         postProgress(progress, true);
                         mDoneNotified = true;
                         Bus.log("传输: 所有图片均校验失败,已回 DONE_ACK(" + failedFiles + ") — " + why);
-                        notifyLinkFailedOnce(link, why);
+                        notifyLinkFailedOnce(link, new XferError(XferError.Stage.TRANSFER,
+                                XferError.CHECKSUM_FAILED, why));
                         break;
                         //pri added by zhuyang,Batch 4: every image failed -> report a transfer failure, with the frame counts acknowledged,20261017,end
                     }
@@ -2185,6 +2311,7 @@ public class Xfer {
                 }
                 if (type == Proto.TYPE_CANCEL) {
                     readError = "对方取消: " + new String(frame.data, java.nio.charset.StandardCharsets.UTF_8);
+                    error = new XferError(XferError.Stage.TRANSFER, XferError.CANCELLED, readError);
                     Bus.log("传输: " + readError);
                     break;
                 }
@@ -2228,25 +2355,31 @@ public class Xfer {
                         enqueueTransferDone(all);
                     }
                 } else if (expect > 0 || count > 0 || mVerdictSent || chunkedStarted) {
-                    String why;
-                    if (link.linkDead.get() && link.failReason != null) {
-                        why = link.failReason;
-                    } else if (readError != null) {
-                        why = readError;
-                    } else if (chunkedStarted) {
-                        why = "传输中断: 未收到完成帧(实收 " + receivedFiles + " 张)";
-                    } else if (expect > 0) {
-                        why = "传输中断: 只收到 " + count + "/" + expect + " 张";
-                    } else {
-                        why = "传输中断";
+                    XferError cerr = error;
+                    if (cerr == null) {
+                        if (link.linkDead.get()) {
+                            cerr = linkError(link, XferError.Stage.TRANSFER);
+                        } else if (readError != null) {
+                            cerr = new XferError(XferError.Stage.TRANSFER, XferError.PROTOCOL_ERROR, readError);
+                        } else if (chunkedStarted) {
+                            cerr = new XferError(XferError.Stage.TRANSFER, XferError.PROTOCOL_ERROR,
+                                    "传输中断: 未收到完成帧(实收 " + receivedFiles + " 张)");
+                        } else if (expect > 0) {
+                            cerr = new XferError(XferError.Stage.TRANSFER, XferError.PROTOCOL_ERROR,
+                                    "传输中断: 只收到 " + count + "/" + expect + " 张");
+                        } else {
+                            cerr = new XferError(XferError.Stage.TRANSFER, XferError.PROTOCOL_ERROR, "传输中断");
+                        }
                     }
-                    progress.fail(why);
+                    progress.fail(cerr.detail);
                     postProgress(progress, true);
-                    notifyLinkFailedOnce(link, why);
+                    notifyLinkFailedOnce(link, cerr);
                 } else {
-                    progress.fail("对方未开始发送");
+                    XferError cerr = error != null ? error
+                            : new XferError(XferError.Stage.OFFER, XferError.OFFER_TIMEOUT, "对方未开始发送(报价超时或连接断开)");
+                    progress.fail(cerr.detail);
                     postProgress(progress, true);
-                    notifyOfferExpiredOnce(link, "对方未开始发送(报价超时或连接断开)");
+                    notifyOfferExpiredOnce(link, cerr);
                 }
             }
             //pri modify by zhuyang,Only DONE (or the legacy FULL count) completes; EOF alone is never success,20261017,end
@@ -2255,14 +2388,18 @@ public class Xfer {
             //pri added by zhuyang,Every receive failure path must call back exactly once,20261017,start
             if (mRunning && !doneReceived && !failedNotified && !storageRejected) {
                 if (expect > 0 || count > 0 || mVerdictSent || chunkedStarted) {
-                    String why = "传输中断: " + e;
-                    progress.fail(why);
+                    XferError cerr = error != null ? error
+                            : (link.linkDead.get() ? linkError(link, XferError.Stage.TRANSFER)
+                            : new XferError(XferError.Stage.TRANSFER, XferError.PROTOCOL_ERROR, "传输中断: " + e));
+                    progress.fail(cerr.detail);
                     postProgress(progress, true);
-                    notifyLinkFailedOnce(link, why);
+                    notifyLinkFailedOnce(link, cerr);
                 } else {
-                    progress.fail("对方未开始发送");
+                    XferError cerr = error != null ? error
+                            : new XferError(XferError.Stage.OFFER, XferError.OFFER_TIMEOUT, "对方未开始发送(接收异常)");
+                    progress.fail(cerr.detail);
                     postProgress(progress, true);
-                    notifyOfferExpiredOnce(link, "对方未开始发送(接收异常)");
+                    notifyOfferExpiredOnce(link, cerr);
                 }
             }
             //pri added by zhuyang,Every receive failure path must call back exactly once,20261017,end
@@ -2418,6 +2555,8 @@ public class Xfer {
         new Thread(new Runnable() {
             @Override public void run() {
                 Link send = null;
+                //pri added by zhuyang,Batch 5: the send thread owns its stage locally,20261017
+                XferError.Stage stage = XferError.Stage.CONNECT;
                 try {
                     send = mSendSocket;
                     if (send == null && !mImGo && mGoAddress != null) {
@@ -2436,6 +2575,9 @@ public class Xfer {
                                 send = mSendSocket;
                                 Bus.log("传输: 已连接组主 " + mGoAddress + "(P2P)");
                             }
+                        } catch (FatalXferException fe) {
+                            fail(fe.error);
+                            return;
                         } catch (Exception e) {
                             Bus.log("传输: 连接组主失败 " + e);
                         }
@@ -2452,8 +2594,9 @@ public class Xfer {
                                 Bus.log("传输: 本机已让出,不再建立发送通道");
                                 return;
                             }
-                            fail(mImGo ? "对方尚未连接,请让对方保持在前台再试"
-                                    : "连接尚未就绪(热点接入中,请稍候再上滑)");
+                            fail(new XferError(XferError.Stage.CONNECT, XferError.CONNECT_TIMEOUT,
+                                    mImGo ? "对方尚未连接,请让对方保持在前台再试"
+                                            : "连接尚未就绪(热点接入中,请稍候再上滑)"));
                             return;
                         }
                     }
@@ -2467,9 +2610,16 @@ public class Xfer {
                     //pri added by zhuyang,Give a simultaneous peer the 300ms window to announce ROLE(S) before our offer,20261017,start
                     if (!settleRoleWindow(send)) {
                         Bus.log("传输: 角色窗口内本机让出或连接断开,放弃发送报价");
+                        if (!mYielded) {
+                            notifyLinkFailedOnce(send, send.linkDead.get()
+                                    ? linkError(send, XferError.Stage.CONNECT)
+                                    : new XferError(XferError.Stage.CONNECT, XferError.PROTOCOL_ERROR,
+                                            "角色窗口内读帧失败"));
+                        }
                         return;
                     }
                     //pri added by zhuyang,Give a simultaneous peer the 300ms window to announce ROLE(S) before our offer,20261017,end
+                    stage = XferError.Stage.OFFER; //pri added by zhuyang,Batch 5: offer/verdict stage begins,20261017
                     //pri added by zhuyang,Heartbeat starts before the offer (keep the receiver alive) but rx-dead is armed only for the verdict wait,20261017,start
                     startHeartbeat(send, false);
                     //pri added by zhuyang,Heartbeat starts before the offer (keep the receiver alive) but rx-dead is armed only for the verdict wait,20261017,end
@@ -2540,6 +2690,7 @@ public class Xfer {
                     }
                     //pri added by zhuyang,Offer stage: META(total) + one preview, then wait for the verdict,20261014,end
                     //pri modify by zhuyang,Delivery stage: stream each image in 128KB DATA frames, then DONE/DONE_ACK,20261017,start
+                    stage = XferError.Stage.TRANSFER; //pri added by zhuyang,Batch 5: accepted; images are now streaming,20261017
                     //pri added by zhuyang,From here on a blocked write is caught by the stall watchdog,20261017
                     send.hbWritePhase = true;
                     send.hbExpectRx = false;
@@ -2625,8 +2776,9 @@ public class Xfer {
                         return;
                     }
                     if (send.linkDead.get()) {
-                        throw new java.io.IOException(send.failReason == null ? "连接已断开" : send.failReason);
+                        throw new FatalXferException(linkError(send, XferError.Stage.TRANSFER));
                     }
+                    stage = XferError.Stage.DONE; //pri added by zhuyang,Batch 5: DONE/DONE_ACK completion stage,20261017
                     byte[] done = Proto.buildDone(sentCount, sentBytes);
                     mWriteLock.lock();
                     try {
@@ -2644,13 +2796,17 @@ public class Xfer {
                     int ack = readDoneAck(send);
                     if (ack < 0) {
                         if (ack == -2) {
-                            throw new java.io.IOException("等待对方确认完成超时(" + (DONE_ACK_TIMEOUT_MS / 1000) + "s)");
+                            throw new FatalXferException(new XferError(XferError.Stage.DONE,
+                                    XferError.DONE_ACK_TIMEOUT,
+                                    "等待对方确认完成超时(" + (DONE_ACK_TIMEOUT_MS / 1000) + "s)"));
                         } else if (ack == -3) {
-                            throw new java.io.IOException("对方取消了本次传输");
+                            throw new FatalXferException(new XferError(XferError.Stage.DONE,
+                                    XferError.CANCELLED, "对方取消了本次传输"));
                         } else if (ack == -4) {
-                            throw new java.io.IOException(send.failReason == null ? "连接已断开" : send.failReason);
+                            throw new FatalXferException(linkError(send, XferError.Stage.DONE));
                         } else {
-                            throw new java.io.IOException("对方未确认完成");
+                            throw new FatalXferException(new XferError(XferError.Stage.DONE,
+                                    XferError.PROTOCOL_ERROR, "对方未确认完成"));
                         }
                     }
                     //pri added by zhuyang,Batch 4: DONE_ACK code > 0 is the receiver's failure count (partial success),20261017,start
@@ -2676,16 +2832,51 @@ public class Xfer {
                         @Override public void run() { mListener.onImageSent(n); }
                     });
                     //pri modify by zhuyang,Delivery stage: stream each image in 128KB DATA frames, then DONE/DONE_ACK,20261017,end
+                } catch (FatalXferException fe) {
+                    if (send != null) stopHeartbeat(send);
+                    if (mYielded) {
+                        Bus.log("传输: 本机已让出,放弃发送: " + fe.getMessage());
+                    } else {
+                        if (send != null) sendCancel(send, "发送失败");
+                        fail(fe.error);
+                        //pri added by zhuyang,Batch 5: a failed send link is closed so the next round starts clean,20261017
+                        if (send != null) {
+                            closeQuietly(send);
+                            if (mSendSocket == send) mSendSocket = null;
+                            if (mStashedSocket == send) mStashedSocket = null;
+                        }
+                        releaseHotspotLater();
+                    }
                 } catch (Exception e) {
                     if (send != null) stopHeartbeat(send);
                     if (mYielded) {
                         Bus.log("传输: 本机已让出,放弃发送: " + e);
-                    } else if (send != null && send.linkDead.get() && send.failReason != null) {
-                        sendCancel(send, "发送失败");
-                        notifyLinkFailedOnce(send, send.failReason);
                     } else {
+                        Bus.log("传输: 发送异常(" + stage + "): " + e);
+                        XferError err;
+                        if (send != null && send.failError != null) {
+                            err = send.failError;
+                        } else if (stage == XferError.Stage.CONNECT) {
+                            err = new XferError(XferError.Stage.CONNECT, XferError.CONNECT_TIMEOUT,
+                                    "发送通道异常");
+                        } else if (stage == XferError.Stage.OFFER) {
+                            err = new XferError(XferError.Stage.OFFER, XferError.PROTOCOL_ERROR,
+                                    "报价发送失败");
+                        } else if (stage == XferError.Stage.DONE) {
+                            err = new XferError(XferError.Stage.DONE, XferError.PROTOCOL_ERROR,
+                                    "完成确认失败");
+                        } else {
+                            err = new XferError(XferError.Stage.TRANSFER, XferError.TRANSFER_TIMEOUT,
+                                    "发送中断");
+                        }
                         if (send != null) sendCancel(send, "发送失败");
-                        fail("发送失败: " + e);
+                        fail(err);
+                        if (send != null) {
+                            closeQuietly(send);
+                            if (mSendSocket == send) mSendSocket = null;
+                            if (mStashedSocket == send) mStashedSocket = null;
+                        }
+                        releaseHotspotLater();
                     }
                 }
             }
@@ -2886,13 +3077,16 @@ public class Xfer {
             });
         } else if (verdict == Proto.TYPE_REJECT) {
             Bus.log("传输: 对方拒收");
+            fail(new XferError(XferError.Stage.OFFER, XferError.PEER_REJECTED, "对方拒收"));
             mMain.post(new Runnable() {
                 @Override public void run() { mListener.onPeerRejected(); }
             });
         } else if (link.linkDead.get() && link.failReason != null) {
             //pri added by zhuyang,Heartbeat already judged the peer dead: report that, not a plain timeout,20261017
-            notifyLinkFailedOnce(link, link.failReason);
+            notifyLinkFailedOnce(link, linkError(link, XferError.Stage.OFFER));
         } else {
+            fail(new XferError(XferError.Stage.OFFER, XferError.OFFER_TIMEOUT,
+                    "等待对方「接收/拒绝」超时(" + (VERDICT_WAIT_MS / 1000) + "s)"));
             mMain.post(new Runnable() {
                 @Override public void run() { mListener.onVerdictTimeout(); }
             });
@@ -3002,12 +3196,30 @@ public class Xfer {
 
     // ---------- helpers ----------
 
-    private void fail(final String why) {
-        Bus.log("传输: " + why);
+    //pri modify by zhuyang,Batch 5: every stage funnels through one coded failure exit,20261017,start
+    private void fail(final XferError err) {
+        if (err == null) return;
+        mSenderWaiting = false;
+        mDiscovering = false; //pri added by zhuyang,Batch 5: a failed round stops its connect stage,20261017
+        mDriveP2p = false;
+        Bus.log("传输: [失败] " + err.code + "(" + XferError.nameOf(err.code) + ") stage=" + err.stage
+                + " — " + (err.detail == null ? "" : err.detail));
+        final String legacy = err.detail == null ? XferError.nameOf(err.code) : err.detail;
         mMain.post(new Runnable() {
-            @Override public void run() { mListener.onXferFailed(why); }
+            @Override public void run() {
+                for (Listener l : mAll) {
+                    l.onTransferError(err.stage, err.code, err.detail);
+                    l.onXferFailed(legacy);
+                }
+            }
         });
     }
+
+    //pri added by zhuyang,Batch 5: compatibility shell for callers without a stage/code,20261017
+    private void fail(final String why) {
+        fail(new XferError(XferError.Stage.CONNECT, XferError.UNKNOWN, why));
+    }
+    //pri modify by zhuyang,Batch 5: every stage funnels through one coded failure exit,20261017,end
 
     private static String errName(int reason) {
         switch (reason) {
