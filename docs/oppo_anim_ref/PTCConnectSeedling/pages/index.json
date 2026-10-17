@@ -1,0 +1,234 @@
+{
+  "template": [
+    {
+      "type": "card-template",
+      "attr": {
+        "category": "modular",
+        "entry": "notification"
+      },
+      "children": [
+        {
+          "type": "compact",
+          "attr": {},
+          "children": [
+            {
+              "type": "leading",
+              "attr": {},
+              "children": [
+                {
+                  "type": "image",
+                  "attr": {
+                    "level": "A*",
+                    "src": "{{OAF_card_icon}}"
+                  }
+                },
+                {
+                  "type": "text",
+                  "attr": {
+                    "level": "B*"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "trailing",
+              "attr": {},
+              "children": [
+                {
+                  "type": "text",
+                  "attr": {
+                    "level": "B0",
+                    "value": "{{OAF_capsule_title}}"
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "type": "image",
+          "attr": {
+            "level": "A1*",
+            "src": "{{OAF_card_icon}}",
+            "shapeStyle": "round-rectangle"
+          }
+        },
+        {
+          "type": "expanded",
+          "attr": {
+            "bgColor": "#000000",
+            "borderColor": "#000000",
+            "level": "F1*"
+          },
+          "children": [
+            {
+              "type": "center",
+              "attr": {
+                "category": "common"
+              },
+              "children": [
+                {
+                  "type": "text",
+                  "attr": {
+                    "level": "B1*",
+                    "value": "{{OAF_card_title}}"
+                  }
+                },
+                {
+                  "type": "text",
+                  "attr": {
+                    "level": "C2",
+                    "value": "{{OAF_card_subtitle}}"
+                  }
+                },
+                {
+                  "type": "div",
+                  "attr": {
+                    "level": "G1"
+                  },
+                  "shown": "{{show_apk_icon}}",
+                  "children": [
+                    {
+                      "type": "image",
+                      "attr": {
+                        "level": "D2",
+                        "src": "{{OAF_apk_icon}}"
+                      }
+                    }
+                  ]
+                },
+                {
+                  "type": "image",
+                  "attr": {
+                    "level": "D1",
+                    "src": "{{OAF_card_icon}}",
+                    "shapeStyle": "round-rectangle"
+                  },
+                  "shown": "{{show_icon}}"
+                },
+                {
+                  "type": "button",
+                  "attr": {
+                    "level": "E1",
+                    "type": "circle",
+                    "icon": "{{OAF_button_right}}"
+                  },
+                  "shown": "{{show_right_button}}",
+                  "events": {
+                    "click": "clickRightButton"
+                  }
+                },
+                {
+                  "type": "button",
+                  "attr": {
+                    "level": "E2",
+                    "type": "circle",
+                    "icon": "{{OAF_button_left}}"
+                  },
+                  "shown": "{{show_left_button}}",
+                  "events": {
+                    "click": "clickLeftButton"
+                  }
+                },
+                {
+                  "type": "button",
+                  "attr": {
+                    "level": "E4",
+                    "type": "capsule",
+                    "value": "{{OAF_button_title}}"
+                  },
+                  "shown": "{{show_business_button}}",
+                  "events": {
+                    "click": "clickCastScreen"
+                  }
+                }
+              ]
+            },
+            {
+              "type": "trailing",
+              "attr": {
+                "category": "multi-buttons"
+              },
+              "shown": "{{show_trailing_button}}",
+              "children": [
+                {
+                  "type": "button",
+                  "attr": {
+                    "level": "E14",
+                    "type": "capsule",
+                    "value": "{{OAF_bottom_left_title}}"
+                  },
+                  "shown": "{{show_bottom_left_button}}",
+                  "events": {
+                    "click": "clickLeftButton"
+                  }
+                },
+                {
+                  "type": "button",
+                  "attr": {
+                    "level": "E15",
+                    "type": "capsule",
+                    "value": "{{OAF_bottom_right_title}}"
+                  },
+                  "shown": "{{show_bottom_right_button}}",
+                  "events": {
+                    "click": "clickRightButton"
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "data": {
+    "OAF_capsule_title": "投屏至平板",
+    "OAF_card_title": "设备靠近互动",
+    "OAF_card_subtitle": "将手机画面投屏至平板",
+    "OAF_card_icon": "$r('images.icon')",
+    "show_icon": true,
+    "OAF_apk_icon": "$r('images.apk')",
+    "show_apk_icon": false,
+    "OAF_button_left": "$r('images.cancel')",
+    "OAF_button_right": "$r('images.confirm')",
+    "show_right_button": false,
+    "show_left_button": false,
+    "OAF_button_title": "投屏",
+    "show_business_button": false,
+    "show_trailing_button": false,
+    "show_bottom_left_button": false,
+    "show_bottom_right_button": false,
+    "OAF_bottom_left_title": "了解更多",
+    "OAF_bottom_right_title": "不再提醒",
+    "paramsJson": " "
+  },
+  "actions": {
+    "clickCastScreen": {
+      "type": "message",
+      "method": "clickCastScreen",
+      "uri": "com.oplus.interconnect.nfc.ui.seedling.NfcEventContentLifeCycleProvider",
+      "params": {
+        "message": "{{paramsJson}}"
+      }
+    },
+    "clickLeftButton": {
+      "type": "message",
+      "method": "clickLeftButton",
+      "uri": "com.oplus.interconnect.nfc.ui.seedling.NfcEventContentLifeCycleProvider",
+      "params": {
+        "message": "{{paramsJson}}"
+      }
+    },
+    "clickRightButton": {
+      "type": "message",
+      "method": "clickRightButton",
+      "uri": "com.oplus.interconnect.nfc.ui.seedling.NfcEventContentLifeCycleProvider",
+      "params": {
+        "message": "{{paramsJson}}"
+      }
+    }
+  },
+  "styles": {},
+  "apiVersion": {}
+}

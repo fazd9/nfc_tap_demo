@@ -1,0 +1,14 @@
+{
+    "images": {
+        "icon": "assets/images/cast_icon_dark.png",
+        "cancel": "assets/images/bt_cancel_dark.png",
+        "confirm": "assets/images/bt_confirm_dark.png",
+        "apk": "assets/images/apk_icon_dark.png",
+        "failed": "assets/images/failed_dark.png",
+        "share": "assets/images/share_icon_dark.png",
+        "apk_share": "assets/images/apk_share_dark.png",
+        "apk_cast": "assets/images/apk_cast_dark.png",
+        "oshare_hint": "assets/images/oshare_hint_image_dark.webp",
+        "share_hint_icon": "assets/images/share_hint_icon.webp"
+    }
+}

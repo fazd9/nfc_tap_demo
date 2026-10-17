@@ -2,7 +2,7 @@
 
 > 研究对象：`Temp/AccessoryFramework.apk`（`com.heytap.accessory` / OPPO Quick Connect，versionName **16.35.0**，versionCode 160350000）。
 > 反编译树：`_Temp/afk/jadx_out/`；smali：`_Temp/afk/smali_classes*/`。
-> 动画素材：`_Temp/oppo_anim/`（`.coz`、纹理、OGG、`.he`、UPK 均已在其中）。
+> 动画素材：`docs/oppo_anim_ref/`（`.coz`、纹理、OGG、`.he`、UPK 均已在其中）。
 > 本文所有结论来自反编译代码 + `.coz` 数据；不确定处标 `[未确定]`。**预览图/GIF 是近似示意，不是 OPPO 原始渲染。**
 
 ---
@@ -36,8 +36,8 @@
 | `NfcShare d.java` | `.../nfc/share/d.java`（NfcShare） |
 | `COEEngine.java` | `.../com/oplus/vfxsdk/naive/COEEngine.java` |
 | `syseffect e.java` | `.../com/coe/syseffect/e.java`（COESysEffect） |
-| `scene.json` | `_Temp/oppo_anim/CardRotate0424/scene.json` |
-| `water scene.json` | `_Temp/oppo_anim/water_0812/scene.json` |
+| `scene.json` | `docs/oppo_anim_ref/CardRotate0424/scene.json` |
+| `water scene.json` | `docs/oppo_anim_ref/water_0812/scene.json` |
 | `aapt2` 资源表 | `aapt2 dump resources Temp/AccessoryFramework.apk` |
 
 行号以当前反编译文件为准；jadx 行号可能因重跑变化，类/方法名与日志文本是稳定锚点。
@@ -475,7 +475,7 @@ setInterpolator(new com.oplus.interconnect.nfc.ui.cardmodleview.b());  // 半段
 
 > 以下为**竖屏**（`switchAnimIndex(1)`）的 animator；横屏 `Land_*` 使用另一套值（例如 `Land_Admission` 的 edgeProgress 终点 `1169.64 = Screen_Width*1.083*Edge_Factor`，`castCenter.x=-324`、`Card appear` 的 X=0.436 等）。时间单位为秒，`→` 前后为关键帧时间/值。`ipol=spring` 的 `spring` 数组语义 `[未确定]`，但代码渲染时使用它。
 >
-> 数据源：`_Temp/oppo_anim/CardRotate0424/scene.json`；机器可读全量见 `_Temp/oppo_anim/preview/keyframes.csv`。
+> 数据源：`docs/oppo_anim_ref/CardRotate0424/scene.json`；机器可读全量见 `docs/oppo_anim_ref/preview/keyframes.csv`。
 
 ### Admission（1.037s）
 
@@ -667,7 +667,7 @@ setInterpolator(new com.oplus.interconnect.nfc.ui.cardmodleview.b());  // 半段
 - 卡片呼吸：2s，Y 0.564↔0.555（±0.009 屏高，竖屏），阴影 Y 偏移 -0.064，插值 = 半段 AccelerateDecelerate。
 
 **版权上不能直接拿走：**
-- `.coz`、纹理、`.ogg`、`.he`、`.upk` 都是 OPPO 的资产。作为产品发布前必须获得授权，或按本文参数**重新绘制/重新作曲/重新制作触觉**。本仓库的 `_Temp/oppo_anim/` 只做研究留档，不应进入 APK。
+- `.coz`、纹理、`.ogg`、`.he`、`.upk` 都是 OPPO 的资产。作为产品发布前必须获得授权，或按本文参数**重新绘制/重新作曲/重新制作触觉**。本仓库的 `docs/oppo_anim_ref/` 只做研究留档，不应进入 APK。
 
 ### 9.2 需要自己重写的
 
@@ -744,7 +744,7 @@ setInterpolator(new com.oplus.interconnect.nfc.ui.cardmodleview.b());  // 半段
 
 ### 10.2 未入仓的预览（在 `_Temp/`，不入仓库）
 
-预览文件在 `_Temp/oppo_anim/preview/`，索引见 `_Temp/oppo_anim/README.md`。重点：
+预览文件在 `docs/oppo_anim_ref/preview/`，索引见 `docs/oppo_anim_ref/README.md`。重点：
 
 - `timelines/*.png`：逐 animator 大图；
 - `water_ripple_approx.gif`：1.0s 水波近似；
@@ -803,7 +803,7 @@ setInterpolator(new com.oplus.interconnect.nfc.ui.cardmodleview.b());  // 半段
 
 > `EasyAdmission/EasyRespire/EasyDisappears` 与 `LandEasy*` 是低端模式；`Land_*` 是横屏（rotation 1/3）。`blend.coz` 的 animator 名称/时长相同，但 particle 方向、部分 X 位置与 Card shader（无 3D 透视）不同；代码未加载它。
 
-**`blend.coz` 与 `CardRotate0424.coz` 的具体差异**（`_Temp/oppo_anim/blend/scene.json` vs `CardRotate0424/scene.json`）：
+**`blend.coz` 与 `CardRotate0424.coz` 的具体差异**（`docs/oppo_anim_ref/blend/scene.json` vs `CardRotate0424/scene.json`）：
 
 - `blend.coz` 的 Card fragment shader 只有 2356 字符，缺 `RotateX/RotateY/Perspective/PivotX/PivotY`，没有 3D 透视逆映射；`CardRotate0424` 的 Card shader 为 4580 字符，含完整 3D 透视。
 - `blend` 的 Particle-send/receive 初始 `direction=(0,1,0)`，`CardRotate0424` 为 `(-1,0,0)`；`blend` 的 `Particle-send.sdfCardSize=(0.2,0.01)`，`CardRotate0424` 为 `(0.01,0.139)`；粒子朝向/初始尺寸不同。

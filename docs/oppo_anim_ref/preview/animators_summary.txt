@@ -1,0 +1,315 @@
+========== Land_Admission duration=1.000
+  MaterialTL.black_alpha           float    0@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=) | 0.7@0.304(ease=bezier bez=[0, 0, 0.1, 1] expr=)
+  MaterialL.castProgress           float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 720@1.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.edgeProgress           float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 1169.6399999999999@1.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=Screen_Width * 1.083 * Edge_Factor)
+  MaterialL.castColorProgress      float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 330@1.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.ColorAlpha             float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 1@0.300(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.waveAlpha              float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.castCenter             Vec2     x:[{"time": 0, "value": -324, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6,  | y:[{"time": 0, "value": 1200, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "Screen_Height * 0.5", "ipol": "bezier", 
+  MaterialL.edgeCenter             Vec2     x:[{"time": 0, "value": 100, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0 | y:[{"time": 0, "value": 1200, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "Screen_Height * 0.5", "ipol": "bezier", 
+========== Land_Card appear duration=0.720
+  MaterialB.CardScale              float    0.4510659999999999@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=Card_Scale * 0.58) | 0.7777@0.736(ease=bezier bez=[0.33, 0, 0.67, 1] expr=Card_Scale)
+  MaterialB.XPosition              float    0.436@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB.YPosition              float    0.5@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  plugin._blur_dual_kawase_.radius float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  plugin._blur_dual_kawase_.blendFactor float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  plugin._blur_dual_kawase_.contrast float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  plugin._blur_dual_kawase_.brightness float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB.alpha                  float    0@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=) | 1@0.320(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB_copy.CardScale         float    0.386@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=) | 0.7@0.736(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB_copy.XPosition         float    0.47@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB_copy.YPosition         float    0.5@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB_copy.alpha             float    0@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=) | 1@0.320(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  viewPositionOffset               Vec3     y:[{"time": 0, "value": 0.5, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0 | z:[] | x:[]
+  emitterInfo                      Vec4     x:[{"time": 0, "value": -10, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0 | y:[] | z:[] | w:[]
+  sdfCardSize                      Vec2     x:[{"time": 0, "value": 0.6, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0 | y:[{"time": 0, "value": 0.1, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0
+  showRange                        Vec2     x:[{"time": 0, "value": 1, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0]} | y:[{"time": 0, "value": 1, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0]}
+========== Land_Card vanish duration=0.620
+  MaterialB.CardScale              float    0.7777@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=Card_Scale) | 0.4510659999999999@0.624(ease=bezier bez=[0.33, 0, 0.67, 1] expr=Card_Scale * 0.58)
+  MaterialB.XPosition              float    0.436@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=origin) | 0.6@0.620(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB.YPosition              float    0.5@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=)
+  plugin._blur_dual_kawase_.radius float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  plugin._blur_dual_kawase_.blendFactor float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  plugin._blur_dual_kawase_.contrast float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  plugin._blur_dual_kawase_.brightness float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB.alpha                  float    1@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=) | 0@0.620(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB_copy.CardScale         float    0.7@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=) | 0.386@0.624(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB_copy.XPosition         float    0.47@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=origin)
+  MaterialB_copy.YPosition         float    0.5@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB_copy.alpha             float    1@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=) | 0@0.320(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  viewPositionOffset               Vec3     y:[{"time": 0, "value": 0.5, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0 | z:[] | x:[]
+  emitterInfo                      Vec4     x:[{"time": 0, "value": -10, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0 | y:[] | z:[] | w:[]
+  sdfCardSize                      Vec2     x:[{"time": 0, "value": 0.6, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0 | y:[{"time": 0, "value": 0.1, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0
+  showRange                        Vec2     x:[{"time": 0, "value": 1, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0]} | y:[{"time": 0, "value": 1, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0]}
+========== Land_Card send duration=0.930
+  MaterialB.CardScale              float    0.7777@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=Card_Scale) | 0.1@0.928(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB.XPosition              float    0.6@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=origin) | -0.1@0.928(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB.YPosition              float    0.5@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=)
+  plugin._blur_dual_kawase_.radius float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 12@0.300(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 20@0.500(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  plugin._blur_dual_kawase_.blendFactor float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 1@0.150(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 1@0.500(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  plugin._blur_dual_kawase_.contrast float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 2@0.300(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 1@0.500(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  plugin._blur_dual_kawase_.brightness float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 1@0.300(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0@0.500(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  realSpeedFactor                  float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 2@0.050(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 1@0.740(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB_copy.CardScale         float    0.7@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=) | 0.1@0.928(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB_copy.XPosition         float    0.47@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=origin) | -0.1@0.928(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB_copy.YPosition         float    0.5@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB_copy.alpha             float    1@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=) | 0@0.320(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  emitterInfo                      Vec4     x:[{"time": 0, "value": 100, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0
+  sdfCardSize                      Vec2     x:[{"time": 0, "value": 0.2, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0 | y:[{"time": 0, "value": 0.64230243, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "Card_Scale * 0.8259", "ipol": "bez
+  turbulenceForce                  Vec3     x:[{"time": 0, "value": 1, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0]} | y:[{"time": 0, "value": 1, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0]}
+  speed                            Vec4     y:[{"time": 0, "value": 0.6, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0 | x:[{"time": 0, "value": 0.4, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0
+  sizeAndNoise                     Vec4     y:[{"time": 0.15, "value": 12, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6,
+  particleAlpha                    float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  direction                        Vec3     x:[{"time": 0, "value": 0, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "Particle_Send_X", "ipol": "bezier", "spring | y:[{"time": 0, "value": 1, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "Particle_Send_Y", "ipol": "bezier", "spring
+========== Land_Card receive duration=0.800
+  MaterialB.CardScale              float    0.1@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=) | 0.7777@0.736(ease=bezier bez=[0.33, 0, 0.67, 1] expr=Card_Scale)
+  MaterialB.XPosition              float    0.03@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=) | 0.436@0.736(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB.YPosition              float    0.5@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=)
+  plugin._blur_dual_kawase_.radius float    20@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 12@0.200(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0@0.500(ease=bezier bez=[0, 0, 0.1, 1] expr=) | 0.59@0.740(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  plugin._blur_dual_kawase_.blendFactor float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 1@0.300(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0@0.500(ease=bezier bez=[0, 0, 0.1, 1] expr=) | 0@0.740(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  plugin._blur_dual_kawase_.contrast float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 2@0.200(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 1@0.500(ease=bezier bez=[0, 0, 0.1, 1] expr=) | 1@0.740(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  plugin._blur_dual_kawase_.brightness float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 1@0.200(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0@0.500(ease=bezier bez=[0, 0, 0.1, 1] expr=) | 0@0.740(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB.alpha                  float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 1@0.740(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB_copy.CardScale         float    0.1@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=) | 0.7@0.736(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB_copy.XPosition         float    0@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=) | 0.47@0.736(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB_copy.YPosition         float    0.5@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB_copy.alpha             float    0@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=) | 1@0.736(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  viewPositionOffset               Vec3     y:[{"time": 0, "value": 0, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "spring", "spring": [0.3, 0.6, 0 | x:[{"time": 0, "value": -0.5, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6,  | z:[]
+  emitterInfo                      Vec4     x:[{"time": 0, "value": 10, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0] | y:[] | z:[] | w:[]
+  sdfCardSize                      Vec2     x:[{"time": 0, "value": 0.42076800000000003, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spr | y:[{"time": 0, "value": 0.6059838399999999, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "Card_Scale * 0.7792", "ipo
+  showRange                        Vec2     x:[{"time": 0, "value": 1, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0]} | y:[{"time": 0, "value": 0.1, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0
+  speed                            Vec4     y:[{"time": 0, "value": 0.6, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0 | x:[{"time": 0, "value": 0.2, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0 | z:[] | w:[]
+  turbulenceForce                  Vec3     y:[{"time": 0, "value": 1.5, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0 | x:[{"time": 0, "value": 2, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0]} | z:[]
+  particleAlpha                    float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  direction                        Vec3     x:[{"time": 0, "value": 0, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "Particle_Send_X", "ipol": "bezier", "spring | y:[{"time": 0, "value": 1, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "Particle_Send_Y", "ipol": "bezier", "spring
+========== Land_Card respire duration=2.000
+  MaterialB.CardScale              float    0.7777@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=Card_Scale)
+  MaterialB.XPosition              float    0.436@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=origin) | 0.445@1.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB.YPosition              float    0.5@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB.alpha                  float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 1@0.740(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB_copy.CardScale         float    0.7@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB_copy.XPosition         float    0.47@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0.479@1.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB_copy.YPosition         float    0.5@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  viewPositionOffset               Vec3     y:[{"time": 0, "value": 0, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "spring", "spring": [0.3, 0.6, 0 | x:[{"time": 0, "value": -0.5, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6,  | z:[]
+  emitterInfo                      Vec4     x:[{"time": 0, "value": 10, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0] | y:[] | z:[] | w:[]
+  sdfCardSize                      Vec2     x:[{"time": 0, "value": 0.42076800000000003, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spr | y:[{"time": 0, "value": 0.6059838399999999, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "Card_Scale * 0.7792", "ipo
+  showRange                        Vec2     x:[{"time": 0, "value": 1, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0]} | y:[{"time": 0, "value": 0.1, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0
+  speed                            Vec4     y:[{"time": 0, "value": 0.6, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0 | x:[{"time": 0, "value": 0.2, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0 | z:[] | w:[]
+  turbulenceForce                  Vec3     y:[{"time": 0, "value": 1.5, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0 | x:[{"time": 0, "value": 2, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0]} | z:[]
+  direction                        Vec3     x:[{"time": 0, "value": 0, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "Particle_Send_X", "ipol": "bezier", "spring | y:[{"time": 0, "value": 1, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "Particle_Send_Y", "ipol": "bezier", "spring
+========== Land_respire duration=1.000
+  MaterialTL.black_alpha           float    0.7@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.castProgress           float    720@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 648@1.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.edgeProgress           float    1169.6399999999999@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=Screen_Width * 1.083 * Edge_Factor)
+  MaterialL.castColorProgress      float    330@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 297@1.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.ColorAlpha             float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.waveAlpha              float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.castCenter             Vec2     x:[{"time": 0, "value": -324, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6,  | y:[{"time": 0, "value": 1200, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "Screen_Height * 0.5", "ipol": "bezier", 
+  MaterialL.edgeCenter             Vec2     x:[{"time": 0, "value": 100, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0 | y:[{"time": 0, "value": 1200, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "Screen_Height * 0.5", "ipol": "bezier", 
+========== Land_Top light disappears duration=0.600
+  MaterialTL.black_alpha           float    0.7@0.000(ease=bezier bez=[0.7, 0, 0.67, 1] expr=) | 0.7@0.600(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.castProgress           float    719.395@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=origin) | 0@0.600(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.edgeProgress           float    1188@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=Screen_Width * 1.1)
+  MaterialL.castColorProgress      float    329.723@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=origin) | 0@0.600(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.ColorAlpha             float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0@0.600(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.waveAlpha              float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 1@0.600(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.castCenter             Vec2     x:[{"time": 0, "value": -324, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6,  | y:[{"time": 0, "value": 1200, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "Screen_Height * 0.5", "ipol": "bezier", 
+========== Land_Edge light disappears duration=0.600
+  MaterialTL.black_alpha           float    0.7@0.000(ease=bezier bez=[0.7, 0, 0.67, 1] expr=) | 0@0.600(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.castProgress           float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0@0.600(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.edgeProgress           float    1188@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=Screen_Width * 1.1)
+  MaterialL.castColorProgress      float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0@0.600(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.ColorAlpha             float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 1@0.600(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.waveAlpha              float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0@0.600(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+========== Land_All light disappears duration=0.600
+  MaterialTL.black_alpha           float    0.7@0.000(ease=bezier bez=[0.7, 0, 0.67, 1] expr=) | 0@0.600(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.castProgress           float    720@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=origin) | 0@0.600(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.edgeProgress           float    1188@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=Screen_Width * 1.1)
+  MaterialL.castColorProgress      float    330@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=origin) | 0@0.600(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.ColorAlpha             float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0@0.600(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.waveAlpha              float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0.075@0.600(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.castCenter             Vec2     x:[{"time": 0, "value": -324, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6,  | y:[{"time": 0, "value": 1200, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "Screen_Height * 0.5", "ipol": "bezier", 
+========== Admission duration=1.037
+  MaterialTL.black_alpha           float    0@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=) | 0.7@0.300(ease=bezier bez=[0, 0, 0.1, 1] expr=)
+  MaterialL.castProgress           float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 720@1.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.edgeProgress           float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 2599.2@1.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=Screen_Height * 1.083 * Edge_Factor)
+  MaterialL.castColorProgress      float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 330@1.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.ColorAlpha             float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 1@0.300(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.waveAlpha              float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.castCenter             Vec2     x:[{"time": 0, "value": 540, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "Screen_Width * 0.5", "ipol": "bezier", "s | y:[{"time": 0, "value": 2721.6, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "Screen_Height * 1.134", "ipol": "bezie
+  MaterialL.edgeCenter             Vec2     x:[{"time": 0, "value": 540, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "Screen_Width * 0.5", "ipol": "bezier", "s | y:[{"time": 0, "value": 2299.92, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "Screen_Height * 0.9583", "ipol": "bez
+========== Card appear duration=0.744
+  MaterialB.CardScale              float    0.4510659999999999@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=Card_Scale * 0.58) | 0.7777@0.740(ease=bezier bez=[0.33, 0, 0.67, 1] expr=Card_Scale)
+  MaterialB.XPosition              float    0.5@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0.5@0.744(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB.YPosition              float    0.564@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0.564@0.744(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  plugin._blur_dual_kawase_.radius float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0@0.744(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  plugin._blur_dual_kawase_.blendFactor float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0@0.744(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  plugin._blur_dual_kawase_.contrast float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 1@0.744(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  plugin._blur_dual_kawase_.brightness float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0@0.744(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB.alpha                  float    0@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=) | 1@0.320(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 1@0.744(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB_copy.CardScale         float    0.58@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=0.58) | 1@0.736(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 1@0.744(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB_copy.XPosition         float    0.5@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0.5@0.744(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB_copy.YPosition         float    0.53@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0.53@0.744(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB_copy.alpha             float    0@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=) | 1@0.320(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 1@0.744(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  viewPositionOffset               Vec3     y:[{"time": 0, "value": 0.5, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0 | z:[{"time": 0.7441999999880791, "value": 0, "type": "z", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spri | x:[{"time": 0.7441999999880791, "value": 0, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spri
+  emitterInfo                      Vec4     x:[{"time": 0, "value": -10, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0 | y:[{"time": 0.7441999999880791, "value": 1, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spri | z:[{"time": 0.7441999999880791, "value": 1, "type": "z", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spri | w:[{"time": 0.7441999999880791, "value": 1, "type": "w", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spri
+  sdfCardSize                      Vec2     x:[{"time": 0, "value": 0.6, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0 | y:[{"time": 0, "value": 0.1, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0
+  showRange                        Vec2     x:[{"time": 0, "value": 1, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0]} | y:[{"time": 0, "value": 1, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0]}
+========== Card vanish duration=0.624
+  MaterialB.CardScale              float    0.7777@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=Card_Scale) | 0.4510659999999999@0.624(ease=bezier bez=[0.33, 0, 0.67, 1] expr=Card_Scale * 0.58)
+  MaterialB.YPosition              float    0.564@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=origin) | 0.4@0.624(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  plugin._blur_dual_kawase_.radius float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  plugin._blur_dual_kawase_.blendFactor float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  plugin._blur_dual_kawase_.contrast float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  plugin._blur_dual_kawase_.brightness float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB.alpha                  float    1@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=) | 0@0.320(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB_copy.CardScale         float    1@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=) | 0.58@0.624(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB_copy.XPosition         float    0.5@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=origin)
+  MaterialB_copy.YPosition         float    0.53@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=origin)
+  MaterialB_copy.alpha             float    1@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=) | 0@0.320(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  viewPositionOffset               Vec3     y:[{"time": 0, "value": 0.5, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0 | z:[] | x:[]
+  emitterInfo                      Vec4     x:[{"time": 0, "value": -10, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0 | y:[] | z:[] | w:[]
+  sdfCardSize                      Vec2     x:[{"time": 0, "value": 0.6, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0 | y:[{"time": 0, "value": 0.1, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0
+  showRange                        Vec2     x:[{"time": 0, "value": 1, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0]} | y:[{"time": 0, "value": 1, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0]}
+========== Card send duration=0.920
+  MaterialB.CardScale              float    0.7777@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=Card_Scale) | 0.1@0.928(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB.XPosition              float    0.5@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB.YPosition              float    0.564@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=origin) | 1.05@0.928(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  plugin._blur_dual_kawase_.radius float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 12@0.300(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 20@0.500(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  plugin._blur_dual_kawase_.blendFactor float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 1@0.150(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 1@0.500(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  plugin._blur_dual_kawase_.contrast float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 2@0.300(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 1@0.500(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  plugin._blur_dual_kawase_.brightness float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 1@0.300(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0@0.500(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  realSpeedFactor                  float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 2@0.050(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 1@0.740(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  particleAlpha                    float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  particleAlpha                    float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB_copy.CardScale         float    1@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=) | 0.1@0.928(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB_copy.XPosition         float    0.5@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB_copy.YPosition         float    0.53@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=origin) | 1.03@0.928(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB_copy.alpha             float    1@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=) | 0@0.320(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  emitterInfo                      Vec4     x:[{"time": 0, "value": 100, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0
+  sdfCardSize                      Vec2     x:[{"time": 0, "value": 0.56453243, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "Card_Scale * 0.7259", "ipol": "bez | y:[{"time": 0, "value": 0.2, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0
+  turbulenceForce                  Vec3     x:[{"time": 0, "value": 1, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0]} | y:[{"time": 0, "value": 1, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0]}
+  speed                            Vec4     y:[{"time": 0, "value": 0.6, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0 | x:[{"time": 0, "value": 0.4, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0
+  sizeAndNoise                     Vec4     y:[{"time": 0.15, "value": 12, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6,
+  direction                        Vec3     x:[{"time": 0, "value": 0, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "Particle_Send_X", "ipol": "bezier", "spring | y:[{"time": 0, "value": 1, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "Particle_Send_Y", "ipol": "bezier", "spring
+========== Card receive duration=1.130
+  MaterialB.CardScale              float    0.1@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=) | 0.7777@0.736(ease=bezier bez=[0.33, 0, 0.67, 1] expr=Card_Scale)
+  MaterialB.XPosition              float    0.5@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=) | 0.5@0.736(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB.YPosition              float    1.05@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=) | 0.564@0.736(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  plugin._blur_dual_kawase_.radius float    20@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 12@0.200(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  plugin._blur_dual_kawase_.blendFactor float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 1@0.300(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0@0.500(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  plugin._blur_dual_kawase_.contrast float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 2@0.200(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 1@0.500(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  plugin._blur_dual_kawase_.brightness float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 1@0.200(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0@0.500(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB.alpha                  float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  particleAlpha                    float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  particleAlpha                    float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB_copy.CardScale         float    0.1@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=) | 1@0.736(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB_copy.XPosition         float    0.5@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB_copy.YPosition         float    1.03@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=) | 0.53@0.736(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB_copy.alpha             float    0@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=) | 1@0.736(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  emitterInfo                      Vec4     x:[{"time": 0, "value": 10, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0]
+  viewPositionOffset               Vec3     y:[{"time": 0, "value": 1.03, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "spring", "spring": [0.3, 0.6 | x:[{"time": 0, "value": 0, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0]}
+  sdfCardSize                      Vec2     x:[{"time": 0, "value": 0.6059838399999999, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "Card_Scale * 0.7792", "ipo | y:[{"time": 0, "value": 0.1, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0
+  showRange                        Vec2     x:[{"time": 0, "value": 0.1, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0 | y:[{"time": 0, "value": 0.1, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0
+  speed                            Vec4     y:[{"time": 0, "value": 0.6, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0 | x:[{"time": 0, "value": 0.2, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0
+  turbulenceForce                  Vec3     y:[{"time": 0, "value": 1.5, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0 | x:[{"time": 0, "value": 2, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0]}
+  direction                        Vec3     x:[{"time": 0, "value": 0, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "Particle_Send_X", "ipol": "bezier", "spring | y:[{"time": 0, "value": 1, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "Particle_Send_Y", "ipol": "bezier", "spring
+========== Card respire duration=2.000
+  MaterialB.CardScale              float    0.7777@0.000(ease=spring bez=[0.33, 0, 0.67, 1] expr=Card_Scale)
+  MaterialB.XPosition              float    0.5@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB.YPosition              float    0.564@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=origin) | 0.555@1.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB_copy.CardScale         float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB_copy.XPosition         float    0.5@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialB_copy.YPosition         float    0.53@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0.521@1.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  emitterInfo                      Vec4     x:[{"time": 0, "value": 100, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0
+  sdfCardSize                      Vec2     x:[{"time": 0, "value": 0.56453243, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "Card_Scale * 0.7259", "ipol": "bez | y:[{"time": 0, "value": 0.2, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0
+  turbulenceForce                  Vec3     x:[{"time": 0, "value": 1, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0]} | y:[{"time": 0, "value": 1, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0]}
+  speed                            Vec4     y:[{"time": 0, "value": 0.6, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0 | x:[{"time": 0, "value": 0.4, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6, 0
+  sizeAndNoise                     Vec4     y:[{"time": 0.15, "value": 12, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "", "ipol": "bezier", "spring": [0, 0.6,
+  direction                        Vec3     x:[{"time": 0, "value": 0, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "Particle_Send_X", "ipol": "bezier", "spring | y:[{"time": 0, "value": 1, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "Particle_Send_Y", "ipol": "bezier", "spring
+========== respire duration=2.000
+  MaterialTL.black_alpha           float    0.7@0.000(ease=bezier bez=[0, 0, 0.1, 1] expr=)
+  MaterialL.castProgress           float    720@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 648@1.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.edgeProgress           float    2599.2@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=Screen_Height * 1.083 * Edge_Factor)
+  MaterialL.castColorProgress      float    330@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 297@1.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.ColorAlpha             float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.waveAlpha              float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.castCenter             Vec2     x:[{"time": 0, "value": 540, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "Screen_Width * 0.5", "ipol": "bezier", "s | y:[{"time": 0, "value": 2721.6, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "Screen_Height * 1.134", "ipol": "bezie
+  MaterialL.edgeCenter             Vec2     x:[{"time": 0, "value": 540, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "Screen_Width * 0.5", "ipol": "bezier", "s | y:[{"time": 0, "value": 2299.92, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "Screen_Height * 0.9583", "ipol": "bez
+========== Top light disappears duration=0.600
+  MaterialTL.black_alpha           float    0.7@0.000(ease=bezier bez=[0.7, 0, 0.67, 1] expr=)
+  MaterialL.castProgress           float    719.421@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=origin) | 0@0.600(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.edgeProgress           float    2599.2@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=Screen_Height * 1.083 * Edge_Factor)
+  MaterialL.castColorProgress      float    329.735@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=origin) | 0@0.600(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.ColorAlpha             float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.waveAlpha              float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.castCenter             Vec2     x:[{"time": 0, "value": 540, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "Screen_Width * 0.5", "ipol": "bezier", "s | y:[{"time": 0, "value": 2722.0800000000004, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "Screen_Height * 1.1342", "
+========== Edge light disappears duration=0.600
+  MaterialTL.black_alpha           float    0.7@0.000(ease=bezier bez=[0.7, 0, 0.67, 1] expr=) | 0@0.600(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.castProgress           float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0@0.600(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.edgeProgress           float    2640@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=Screen_Height * 1.1)
+  MaterialL.castColorProgress      float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0@0.600(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.ColorAlpha             float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 1@0.600(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.waveAlpha              float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0.001@0.600(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+========== All light disappears duration=0.600
+  MaterialTL.black_alpha           float    0.7@0.000(ease=bezier bez=[0.7, 0, 0.67, 1] expr=) | 0@0.600(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.castProgress           float    719.988@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=origin) | 0@0.600(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.edgeProgress           float    2599.2@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=Screen_Height * 1.083 * Edge_Factor)
+  MaterialL.castColorProgress      float    329.995@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=origin) | 0@0.600(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.ColorAlpha             float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0@0.600(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.waveAlpha              float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0.001@0.600(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  MaterialL.castCenter             Vec2     x:[{"time": 0, "value": 540, "type": "x", "bezier": [0.33, 0, 0.67, 1], "expr": "Screen_Width * 0.5", "ipol": "bezier", "s | y:[{"time": 0, "value": 2722.0800000000004, "type": "y", "bezier": [0.33, 0, 0.67, 1], "expr": "Screen_Height * 1.1342", "
+========== EasyAdmission duration=1.000
+  MaterialTL.black_alpha           float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0.7@0.300(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyWave.CardScale               float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 3@1.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyWave.XPosition               float    0.5@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyWave.YPosition               float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyWave.waveAlpha               float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0@0.200(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 1@0.500(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0@1.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyTopLight.CardScale           float    0.5@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0.5@0.200(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 1.25@0.800(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyTopLight.XPosition           float    0.5@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyTopLight.YPosition           float    1.09@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+========== EasyRespire duration=1.000
+  MaterialTL.black_alpha           float    0.7@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyWave.CardScale               float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyWave.waveAlpha               float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyWave.XPosition               float    0.5@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyWave.YPosition               float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyTopLight.CardScale           float    1.25@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 1@1.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyTopLight.XPosition           float    0.5@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyTopLight.YPosition           float    1.09@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+========== EasyDisappears duration=1.000
+  MaterialTL.black_alpha           float    0.695@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0@0.600(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyWave.CardScale               float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyWave.waveAlpha               float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyWave.XPosition               float    0.5@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyWave.YPosition               float    1@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyTopLight.CardScale           float    1.25@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=origin) | 0@1.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyTopLight.XPosition           float    0.5@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyTopLight.YPosition           float    1.09@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+========== LandEasyAdmission duration=1.000
+  MaterialTL.black_alpha           float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0.698@0.300(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyWave.CardScale               float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 3@1.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyWave.waveAlpha               float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0@0.200(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 1@0.500(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0@1.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyWave.XPosition               float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyWave.YPosition               float    0.5@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyTopLight.CardScale           float    0.22@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0.22@0.200(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0.5@0.800(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyTopLight.XPosition           float    -0.09@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyTopLight.YPosition           float    0.5@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+========== LandEasyRespire duration=1.000
+  MaterialTL.black_alpha           float    0.7@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyWave.CardScale               float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyWave.waveAlpha               float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyWave.XPosition               float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyWave.YPosition               float    0.5@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyTopLight.CardScale           float    0.42@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=origin) | 0.42@1.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyTopLight.XPosition           float    -0.09@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyTopLight.YPosition           float    0.5@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+========== LandEasyDisappears duration=1.000
+  MaterialTL.black_alpha           float    0.7@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=) | 0@0.600(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyWave.CardScale               float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyWave.waveAlpha               float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyWave.XPosition               float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyWave.YPosition               float    0.5@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyTopLight.CardScale           float    0@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=origin) | 0@1.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyTopLight.XPosition           float    -0.09@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)
+  EasyTopLight.YPosition           float    0.5@0.000(ease=bezier bez=[0.33, 0, 0.67, 1] expr=)

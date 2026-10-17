@@ -1,0 +1,49 @@
+{
+	"identifier": {
+		"url": "com.heytap.accessory.seedling",
+		"id": "268451913",
+		"type": "seedling",
+		"name": "PTCConnectSeedling",
+		"version": "2.0.17",
+		"versionCode": 2000017
+	},
+	"intent": {
+		"action": [
+			"pantanal.intent.business.app.system.OAF_NFC_ANIMATION_END"
+		],
+		"domain": "business_app_system"
+	},
+	"runtime": {
+		"type": "interactive",
+		"permission": [],
+		"use-software": {
+			"platform-version": 3000000
+		},
+		"support-hardware": {
+			"device": [
+				{
+					"type": "PHONE",
+					"entry": [
+						"statusbar",
+						"lockscreen",
+						"notification"
+					]
+				}
+			]
+		},
+		"interactive": {
+			"seedling-type": "live",
+			"pages": [
+				"pages/index",
+				"pages/default"
+			],
+			"window": {
+				"design-width": 328,
+				"auto-design-width": false
+			}
+		}
+	},
+	"meta-data": {
+		"card-config": "assets/card-config.json"
+	}
+}

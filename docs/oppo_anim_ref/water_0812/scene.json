@@ -1,0 +1,688 @@
+{
+ "v": 1,
+ "mV": 1,
+ "name": "SampleScene",
+ "coeV": 2,
+ "animators": [
+  {
+   "id": 2130707777,
+   "name": "animator1",
+   "currentTime": 0.926,
+   "animLines": [
+    {
+     "nodeId": "54a8b248-39c1-4b7a-9feb-9a1ccbed3c2f",
+     "key": "Ripple.uAmplitude",
+     "name": "Quad.uAmplitude",
+     "type": "float",
+     "lastTime": 0.8,
+     "animKeys": {
+      "value": [
+       {
+        "time": 0,
+        "value": 0,
+        "type": "value",
+        "bezier": [
+         0.33,
+         0,
+         0.67,
+         1
+        ],
+        "expr": "",
+        "ipol": "bezier",
+        "spring": [
+         0,
+         0.6,
+         0
+        ]
+       },
+       {
+        "time": 0.5,
+        "value": 260,
+        "type": "value",
+        "bezier": [
+         0.33,
+         0,
+         0.67,
+         1
+        ],
+        "expr": "",
+        "ipol": "bezier",
+        "spring": [
+         0,
+         0.6,
+         0
+        ]
+       },
+       {
+        "time": 1,
+        "value": 0,
+        "type": "value",
+        "bezier": [
+         0,
+         0,
+         0.1,
+         1
+        ],
+        "expr": "",
+        "ipol": "bezier",
+        "spring": [
+         0,
+         0.6,
+         0
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "nodeId": "54a8b248-39c1-4b7a-9feb-9a1ccbed3c2f",
+     "key": "Ripple.uRipples",
+     "name": "Quad.uRipples",
+     "type": "float",
+     "lastTime": 1,
+     "animKeys": {
+      "value": [
+       {
+        "time": 0,
+        "value": 12,
+        "type": "value",
+        "bezier": [
+         0.33,
+         0,
+         0.67,
+         1
+        ],
+        "expr": "",
+        "ipol": "bezier",
+        "spring": [
+         0,
+         0.6,
+         0
+        ]
+       },
+       {
+        "time": 0.5,
+        "value": 14,
+        "type": "value",
+        "bezier": [
+         0.33,
+         0,
+         0.67,
+         1
+        ],
+        "expr": "",
+        "ipol": "bezier",
+        "spring": [
+         0,
+         0.6,
+         0
+        ]
+       },
+       {
+        "time": 1,
+        "value": 23.35,
+        "type": "value",
+        "bezier": [
+         0,
+         0,
+         0.1,
+         1
+        ],
+        "expr": "",
+        "ipol": "bezier",
+        "spring": [
+         0,
+         0.6,
+         0
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "nodeId": "54a8b248-39c1-4b7a-9feb-9a1ccbed3c2f",
+     "key": "Ripple.uRadius",
+     "name": "Quad.uRadius",
+     "type": "float",
+     "lastTime": 0.8,
+     "animKeys": {
+      "value": [
+       {
+        "time": 0,
+        "value": 0,
+        "type": "value",
+        "bezier": [
+         0.33,
+         0,
+         0.67,
+         1
+        ],
+        "expr": "",
+        "ipol": "bezier",
+        "spring": [
+         0,
+         0.6,
+         0
+        ]
+       },
+       {
+        "time": 1,
+        "value": 360,
+        "type": "value",
+        "bezier": [
+         0,
+         0,
+         0.1,
+         1
+        ],
+        "expr": "",
+        "ipol": "bezier",
+        "spring": [
+         0,
+         0.6,
+         0
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "nodeId": "54a8b248-39c1-4b7a-9feb-9a1ccbed3c2f",
+     "key": "Ripple.uMinRadius",
+     "name": "Quad.uMinRadius",
+     "type": "float",
+     "lastTime": 0.8,
+     "animKeys": {
+      "value": [
+       {
+        "time": 0,
+        "value": 0,
+        "type": "value",
+        "bezier": [
+         0.33,
+         0,
+         0.67,
+         1
+        ],
+        "expr": "",
+        "ipol": "bezier",
+        "spring": [
+         0,
+         0.6,
+         0
+        ]
+       },
+       {
+        "time": 1,
+        "value": 10,
+        "type": "value",
+        "bezier": [
+         0,
+         0,
+         0.1,
+         1
+        ],
+        "expr": "",
+        "ipol": "bezier",
+        "spring": [
+         0,
+         0.6,
+         0
+        ]
+       }
+      ]
+     }
+    },
+    {
+     "nodeId": "54a8b248-39c1-4b7a-9feb-9a1ccbed3c2f",
+     "key": "Ripple.uFadingFactor",
+     "name": "Quad.uFadingFactor",
+     "type": "float",
+     "lastTime": 0.6,
+     "animKeys": {
+      "value": [
+       {
+        "time": 0,
+        "value": 0,
+        "type": "value",
+        "bezier": [
+         0.33,
+         0,
+         0.67,
+         1
+        ],
+        "expr": "",
+        "ipol": "bezier",
+        "spring": [
+         0,
+         0.6,
+         0
+        ]
+       },
+       {
+        "time": 0.6,
+        "value": 4,
+        "type": "value",
+        "bezier": [
+         0.33,
+         0,
+         0.67,
+         1
+        ],
+        "expr": "",
+        "ipol": "bezier",
+        "spring": [
+         0,
+         0.6,
+         0
+        ]
+       }
+      ]
+     }
+    }
+   ],
+   "eventLine": {
+    "nodeId": "216579fe-2338-47c7-b302-22e0de55c29d",
+    "key": "animator1.event",
+    "name": "event",
+    "type": "event",
+    "lastTime": 0.4,
+    "animKeys": {
+     "event": []
+    }
+   }
+  }
+ ],
+ "cT": 1755001323689,
+ "layers": [
+  {
+   "layout": [
+    0,
+    0,
+    1080,
+    2400
+   ],
+   "layout_expr": [
+    "",
+    "",
+    "",
+    ""
+   ],
+   "scale": [
+    1,
+    1,
+    1
+   ],
+   "rotate": [
+    0,
+    0,
+    0
+   ],
+   "margin": [
+    0,
+    0,
+    0,
+    0
+   ],
+   "padding": [
+    0,
+    0,
+    0,
+    0
+   ],
+   "positionType": "static",
+   "valign": "top",
+   "halign": "left",
+   "postProcessor": [],
+   "render": [
+    {
+     "vs": "#version 300 es\nin vec4 a_position;\nin vec2 a_texCoord;\nout vec2 v_texCoord;\nuniform mat4 u_projectionView;\nuniform mat4 u_view;\nuniform mat4 u_model;\nvoid main() {\n    // gl_Position = u_projectionView * u_view  * u_model *  a_position;\n    gl_Position = a_position;\n    v_texCoord = a_texCoord;\n}\n\n",
+     "fs": "#version 300 es\nprecision highp float;\n\n#define RIPPLES_TIME 3.\n// Pi constant\n#define PI 3.1415926538\n//standar deviation of gaussian\n#define STD 75.0\n//offset scaling factor\n#define OFFSET_SCALE 200.0\n//refraction coefficient\n#define REFRACTION_COEFFICIENT 1.0/1.333\n\n// @Range(sys_effect,0,1080,1)=105\nuniform float sys_effect;\n// @Range(sys_parameter_id,0,1,1)=0\nuniform float sys_parameter_id;\n// @Range(sys_action,0,1080,1)=16\nuniform float sys_action;\n// @Range(sys_parameter,0,1080,1)=0\nuniform float sys_parameter;\n\n// @Texture(background, ignore)=[1,1,0,0]\nuniform sampler2D u_input;                                                      \n// @Range(iTime,ignore,0,100,0.01)=0.1\nuniform float u_time;\n// @Vec2(u_resolution,ignore,0.1)=[100,100]\nuniform vec2 u_resolution;\n// @Range(u_density,1,10,0.1)=1.0\nuniform float u_density;\n// @Vec2(uRippleSource,0.1)=[0.5,0.5]\nuniform vec2 uRippleSource;\n// @Range(uMinRadius,0,1080,2)=200\nuniform float uMinRadius;\n// @Range(uRadius,0,1080,2)=400\nuniform float uRadius;\n// @Range(uAmplitude,0,1080,2)=50\nuniform float uAmplitude;\n// @Range(uRipples,0,64,2)=5\nuniform float uRipples;\n// @Range(uFadingFactor,0,128,2)=75\nuniform float uFadingFactor;\n// @Range(uFadingFactor2,0,0.1,0.00001)=0.03\nuniform float uFadingFactor2;\n// @Range(uOffset,0,32, 2)=2\nuniform float uOffset;\n// @Range(uColorFullAlpha,0,1, 0.01)=1.0\nuniform float uColorFullAlpha;\n// @Range(uRotateSpeed,0,100, 2)=60\nuniform float uRotateSpeed;\n// @Range(uAngleS,0,90, 0.01)=20\nuniform float uAngleS;\n// @Range(uAngleE,0,90, 0.01)=40\nuniform float uAngleE;\n\nfloat square(float value) {\n    return value * value;\n}\n\nfloat rippleGradient(float x) {\n    float amplitude = uAmplitude * u_density;\n    float ripples = uRipples * u_density;\n    float fadingFactor = uFadingFactor * u_density;\n    return (amplitude / ripples * exp(-square(x / ripples) / fadingFactor) * (sin(x / ripples)\n    - 2.0 * x / square(ripples * STD) * cos(x / ripples)) / ripples);\n}\n\nmat2 rotate2d(float angle) {\n    float radian = 3.14 * angle / 180.0;\n    return mat2(cos(radian), -sin(radian),\n                sin(radian), cos(radian));\n}\n\nin vec2 v_texCoord;\nout vec4 fragColor;\n\nvoid main() {\n    float time = mod(u_time, RIPPLES_TIME);\n    //derivative of the surface\n    vec2 partial_derivative = vec2(0.0);\n\n    //pixel position of droplet in the screen\n    //手机上Y方向和编辑器上的相反，反转下\n    vec2 source = vec2(uRippleSource.x, 1.0 - uRippleSource.y) * u_resolution;\n\n    //uMinRadius of ripple\n    // float r = mix(0.0, uMaxRadius, uProgress);\n\n    float r = uRadius * u_density;\n\n    //conversion derivative to normal angle\n    vec2 radial_direction = gl_FragCoord.xy - source;\n    //distance from droplet center\n    float dist = length(radial_direction);\n    float minRadius = uMinRadius * u_density;\n    float appear = smoothstep(minRadius - 50.0, minRadius, dist);\n    //proportions\n    vec2 p = normalize(radial_direction);\n\n    //function value;\n    float x = dist - r;\n    float offset = uOffset * u_density;\n    vec3 col = vec3(rippleGradient(x - offset), rippleGradient(x), rippleGradient(x + offset)) * appear;\n\n    // height of the water being uAmplitude*cos(x/SCALE)*exp(-pow(x/SCALE,2.0)/S) this is the derivative.\n    // THe function is a product between a cosine function and a gaussian times a fading factor.\n    partial_derivative = appear * p * rippleGradient(x) / (square(r * uFadingFactor2) + 1.0);\n\n    vec3 normal = vec3(-partial_derivative.x, 1.0, -partial_derivative.y);\n    vec3 eye = vec3(0.0, -1.0, 0.0);\n\n    float c1 = dot(normal, eye);\n    float c2 = sqrt(1.0 - square(REFRACTION_COEFFICIENT) * (1.0 - square(c1)));\n\n    vec2 buv = gl_FragCoord.xy - u_resolution.xy * 0.5;\n    buv = abs(buv * rotate2d(u_time * uRotateSpeed));\n    float angle = degrees(atan(buv.y/buv.x));\n    float mask = smoothstep(uAngleS, uAngleE, angle);\n    //computing the refraction\n    vec3 refracted = REFRACTION_COEFFICIENT * eye + (REFRACTION_COEFFICIENT * c1 - c2) * normal;\n    vec2 originalUV = gl_FragCoord.xy / u_resolution;\n    vec2 uv = originalUV + refracted.xz * mask;\n    fragColor = texture(u_input, uv) + vec4(col * uColorFullAlpha, 1.0) * mask;\n}\n",
+     "uniforms": [
+      {
+       "id": 2130707709,
+       "uniformName": "sys_effect",
+       "type": "float",
+       "value": 105
+      },
+      {
+       "id": 2130707710,
+       "uniformName": "sys_parameter_id",
+       "type": "float",
+       "value": 0
+      },
+      {
+       "id": 2130707711,
+       "uniformName": "sys_action",
+       "type": "float",
+       "value": 16
+      },
+      {
+       "id": 2130707712,
+       "uniformName": "sys_parameter",
+       "type": "float",
+       "value": 0
+      },
+      {
+       "id": 2130707716,
+       "uniformName": "u_density",
+       "type": "float",
+       "value": 3
+      },
+      {
+       "id": 2130707717,
+       "uniformName": "uRippleSource",
+       "type": "Vec2",
+       "x": 0.5,
+       "y": 0
+      },
+      {
+       "id": 2130707718,
+       "uniformName": "uMinRadius",
+       "type": "float",
+       "value": 9.841
+      },
+      {
+       "id": 2130707719,
+       "uniformName": "uRadius",
+       "type": "float",
+       "value": 354.29
+      },
+      {
+       "id": 2130707720,
+       "uniformName": "uAmplitude",
+       "type": "float",
+       "value": 15.575
+      },
+      {
+       "id": 2130707721,
+       "uniformName": "uRipples",
+       "type": "float",
+       "value": 22.79
+      },
+      {
+       "id": 2130707722,
+       "uniformName": "uFadingFactor",
+       "type": "float",
+       "value": 4
+      },
+      {
+       "id": 2130707723,
+       "uniformName": "uFadingFactor2",
+       "type": "float",
+       "value": 0.006
+      },
+      {
+       "id": 2130707724,
+       "uniformName": "uOffset",
+       "type": "float",
+       "value": 10
+      },
+      {
+       "id": 2130707725,
+       "uniformName": "uColorFullAlpha",
+       "type": "float",
+       "value": 0.6
+      },
+      {
+       "id": 2130707726,
+       "uniformName": "uRotateSpeed",
+       "type": "float",
+       "value": 0
+      },
+      {
+       "id": 2130707727,
+       "uniformName": "uAngleS",
+       "type": "float",
+       "value": 0
+      },
+      {
+       "id": 2130707728,
+       "uniformName": "uAngleE",
+       "type": "float",
+       "value": 0
+      }
+     ]
+    }
+   ],
+   "id": "54a8b248-39c1-4b7a-9feb-9a1ccbed3c2f",
+   "type": "Node",
+   "name": "Quad",
+   "animators": [
+    {
+     "id": 2130706630,
+     "name": "animator1",
+     "currentTime": 0,
+     "animLines": [
+      {
+       "nodeId": "54a8b248-39c1-4b7a-9feb-9a1ccbed3c2f",
+       "key": "Ripple.uAmplitude",
+       "name": "uAmplitude",
+       "type": "float",
+       "lastTime": 0.8,
+       "animKeys": {
+        "value": [
+         {
+          "time": 0,
+          "value": 0,
+          "type": "value",
+          "bezier": [
+           0,
+           0,
+           0.1,
+           1
+          ],
+          "expr": "",
+          "ipol": "bezier",
+          "spring": [
+           0,
+           0.6,
+           0
+          ]
+         },
+         {
+          "time": 0.4,
+          "value": 360,
+          "type": "value",
+          "bezier": [
+           0.33,
+           0,
+           0.67,
+           1
+          ],
+          "expr": "",
+          "ipol": "bezier",
+          "spring": [
+           0,
+           0.6,
+           0
+          ]
+         },
+         {
+          "time": 0.8,
+          "value": 0,
+          "type": "value",
+          "bezier": [
+           0,
+           0,
+           0.1,
+           1
+          ],
+          "expr": "",
+          "ipol": "bezier",
+          "spring": [
+           0,
+           0.6,
+           0
+          ]
+         }
+        ]
+       }
+      },
+      {
+       "nodeId": "54a8b248-39c1-4b7a-9feb-9a1ccbed3c2f",
+       "key": "Ripple.uRipples",
+       "name": "uRipples",
+       "type": "float",
+       "lastTime": 1.19,
+       "animKeys": {
+        "value": [
+         {
+          "time": 0,
+          "value": 14,
+          "type": "value",
+          "bezier": [
+           0.33,
+           0,
+           0.67,
+           1
+          ],
+          "expr": "",
+          "ipol": "bezier",
+          "spring": [
+           0,
+           0.6,
+           0
+          ]
+         },
+         {
+          "time": 0.8,
+          "value": 14.7,
+          "type": "value",
+          "bezier": [
+           0,
+           0,
+           0.1,
+           1
+          ],
+          "expr": "",
+          "ipol": "bezier",
+          "spring": [
+           0,
+           0.6,
+           0
+          ]
+         }
+        ]
+       }
+      },
+      {
+       "nodeId": "54a8b248-39c1-4b7a-9feb-9a1ccbed3c2f",
+       "key": "Ripple.uRadius",
+       "name": "uRadius",
+       "type": "float",
+       "lastTime": 1.3,
+       "animKeys": {
+        "value": [
+         {
+          "time": 0,
+          "value": 0,
+          "type": "value",
+          "bezier": [
+           0,
+           0,
+           0.1,
+           1
+          ],
+          "expr": "",
+          "ipol": "bezier",
+          "spring": [
+           0,
+           0.6,
+           0
+          ]
+         },
+         {
+          "time": 0.8,
+          "value": 360,
+          "type": "value",
+          "bezier": [
+           0,
+           0,
+           0.1,
+           1
+          ],
+          "expr": "",
+          "ipol": "bezier",
+          "spring": [
+           0,
+           0.6,
+           0
+          ]
+         }
+        ]
+       }
+      },
+      {
+       "nodeId": "54a8b248-39c1-4b7a-9feb-9a1ccbed3c2f",
+       "key": "Ripple.uMinRadius",
+       "name": "uMinRadius",
+       "type": "float",
+       "lastTime": 0.8,
+       "animKeys": {
+        "value": [
+         {
+          "time": 0,
+          "value": 0,
+          "type": "value",
+          "bezier": [
+           0.33,
+           0,
+           0.67,
+           1
+          ],
+          "expr": "",
+          "ipol": "bezier",
+          "spring": [
+           0,
+           0.6,
+           0
+          ]
+         },
+         {
+          "time": 0.8,
+          "value": 10,
+          "type": "value",
+          "bezier": [
+           0,
+           0,
+           0.1,
+           1
+          ],
+          "expr": "",
+          "ipol": "bezier",
+          "spring": [
+           0,
+           0.6,
+           0
+          ]
+         }
+        ]
+       }
+      }
+     ],
+     "eventLine": {
+      "nodeId": "54a8b248-39c1-4b7a-9feb-9a1ccbed3c2f",
+      "key": "animator1.event",
+      "name": "event",
+      "type": "event",
+      "lastTime": 1,
+      "animKeys": {
+       "event": []
+      }
+     }
+    }
+   ],
+   "params": {},
+   "enableBlend": false,
+   "enable": true,
+   "blendSfactor": 770,
+   "blendDfactor": 771,
+   "enableBlendA": false,
+   "blendSfactorA": 770,
+   "blendDfactorA": 771
+  }
+ ],
+ "rts": [],
+ "exprRecord": []
+}

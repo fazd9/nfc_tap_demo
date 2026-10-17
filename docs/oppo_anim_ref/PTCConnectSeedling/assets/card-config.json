@@ -1,0 +1,10 @@
+{
+	"card": {
+		"support": "notification_sm|notification_md|notification_lg"
+	},
+	"host": {
+		"packageName": "com.heytap.accessory",
+		"componentName": "com.oplus.interconnect.nfc.ui.seedling.NfcConnectedSeedlingCardProvider",
+		"minHostVersion": 1
+	}
+}
