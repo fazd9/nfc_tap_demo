@@ -89,6 +89,13 @@ public class Xfer {
     private static final int HS_HIDDEN_UNAVAILABLE = 0;
     private static final int HS_HIDDEN_OK = 1;
     private static final int HS_HIDDEN_FAILED = 2;
+    //pri added by zhuyang,Tap-time preconnect: quick association attempts with backoff, hard-capped at 8s from the tap,20261019,start
+    private static final long HS_EARLY_BUDGET_MS = 8000L;
+    private static final long HS_EARLY_ATTEMPT_MS = 4000L;
+    private static final long HS_EARLY_RETRY_MS = 400L;
+    private static final long HS_EARLY_START_DELAY_MS = 350L;
+    private static final long HS_EARLY_HANDOFF_WAIT_MS = 5000L;
+    //pri added by zhuyang,Tap-time preconnect: quick association attempts with backoff, hard-capped at 8s from the tap,20261019,end
     //pri added by zhuyang,Hotspot bearer: silent hidden join first, specifier fallback with a dialog-sized budget,20261019,end
     private static final int VERDICT_WAIT_MS = 20000;  //pri modify by zhuyang,Shorten the verdict wait from 60s to 20s,20261017
     //pri added by zhuyang,Liveness limits: read cap, PING idle, dead peer, write stall and round total,20261017,start
@@ -342,6 +349,12 @@ public class Xfer {
     private volatile int mPrevWifiNetId = -1;
     private volatile int mWifiGen;
     //pri added by zhuyang,Silent hotspot join bookkeeping: the joined netId and the network to restore,20261019,end
+    //pri added by zhuyang,Tap-time preconnect: one Wi-Fi churn owner at a time; a swipe-time join stops the early loop,20261019,start
+    private final Object mHotspotJoinLock = new Object();
+    private volatile boolean mEarlyJoinAbort;
+    private volatile boolean mEarlyJoinInAttempt;
+    private volatile boolean mEarlyJoinHandoff;
+    //pri added by zhuyang,Tap-time preconnect: one Wi-Fi churn owner at a time; a swipe-time join stops the early loop,20261019,end
     private volatile android.net.ConnectivityManager.NetworkCallback mWifiNetCb;
     private int mIdRetry;
 
@@ -464,6 +477,8 @@ public class Xfer {
         //pri added by zhuyang,Forget the previous round's joined AP and restore the user's network,20261019,start
         restoreWifiAfterJoin();
         //pri added by zhuyang,Forget the previous round's joined AP and restore the user's network,20261019,end
+        mEarlyJoinAbort = false; //pri added by zhuyang,A new round has not been preempted by a swipe yet,20261019
+        mEarlyJoinHandoff = false; //pri added by zhuyang,A new round has no swipe-time handoff in flight,20261019
         mDerivedSsid = null;
         mDerivedPass = null;
         //pri added by zhuyang,Batch 6: a new round derives new credentials, so any AP left from the previous round is stale,20261019,end
@@ -575,17 +590,113 @@ public class Xfer {
             Bus.log("热点: 非 owner,加入前关闭本机残留热点");
             closeHotspot();
         }
+        mEarlyJoinAbort = false; //pri added by zhuyang,This round's early loop runs until a swipe-time join preempts it,20261019
+        mEarlyJoinHandoff = false; //pri added by zhuyang,No swipe-time handoff yet in this round,20261019
         new Thread(new Runnable() {
             @Override public void run() {
                 if (!mRunning) return;
-                Bus.log("传输: 非 AP owner 主动接入对方热点(接收方向)");
-                if (joinHotspot(ssid, pass, derived)) {
-                    Bus.log("传输: 非 AP owner 接入流程结束(热点已接入或已有活动连接)");
-                }
+                //pri modify by zhuyang,Tap-time preconnect: build the link while the user is still looking at the page; bounded to 8s,20261019,start
+                Bus.log("传输: 非 AP owner 碰触即接入对方热点(上滑前建链)");
+                joinHotspotEarly(ssid, pass, derived);
+                //pri modify by zhuyang,Tap-time preconnect: build the link while the user is still looking at the page; bounded to 8s,20261019,end
             }
         }, "ap-client").start();
     }
     //pri added by zhuyang,Batch 6: a non-owner receiver joins the owner AP so it can accept the owner's send,20261017,end
+
+    //pri added by zhuyang,Tap-time preconnect: quick attempts with backoff, hard-capped at 8s from the tap,20261019,start
+    /**
+     * Join the owner AP while the user is still looking at the page. The owner's AP is up only
+     * ~300ms after the tap, so the first addNetwork/enableNetwork may find nothing: each attempt
+     * therefore fails fast (HS_EARLY_ATTEMPT_MS) and is retried after a short backoff instead of
+     * burning a full swipe-time association window. The whole loop is bounded by
+     * HS_EARLY_BUDGET_MS from the tap; a swipe-time join preempts it via mEarlyJoinAbort.
+     */
+    private void joinHotspotEarly(String ssid, String pass, boolean derived) {
+        final long startedAt = SystemClock.elapsedRealtime();
+        final long deadline = startedAt + HS_EARLY_BUDGET_MS;
+        if (Build.VERSION.SDK_INT < 29) {
+            Bus.log("热点: API<29 不支持热点接入");
+            return;
+        }
+        final WifiManager wm = (WifiManager) mCtx.getSystemService(Context.WIFI_SERVICE);
+        if (wm == null) return;
+        final int gen = mWifiGen;
+        //pri added by zhuyang,The owner AP is up ~300ms after the tap: a short delay avoids a doomed enableNetwork that cannot re-scan,20261019
+        try { Thread.sleep(HS_EARLY_START_DELAY_MS); } catch (InterruptedException ignored) {}
+        if (mEarlyJoinAbort || !mRunning || gen != mWifiGen
+                || SystemClock.elapsedRealtime() >= deadline) return;
+        if (!ensureWifiEnabled(wm, gen)) return;
+        if (gen != mWifiGen) return;
+        int attempt = 0;
+        boolean joined = false;
+        try {
+            while (mRunning && gen == mWifiGen && !mEarlyJoinAbort
+                    && SystemClock.elapsedRealtime() < deadline) {
+                if (isAlive(mSendSocket) || isAlive(mStashedSocket)) {
+                    Bus.log("热点: 碰触提前接入结束,链路已由其他路径建立");
+                    joined = true;
+                    return;
+                }
+                attempt++;
+                long left = deadline - SystemClock.elapsedRealtime();
+                final int hr;
+                //pri added by zhuyang,A swipe-time join waits for this attempt instead of aborting it half way,20261019,start
+                mEarlyJoinInAttempt = true;
+                try {
+                    synchronized (mHotspotJoinLock) {
+                        if (mEarlyJoinAbort || gen != mWifiGen) return;
+                        if (isAlive(mSendSocket) || isAlive(mStashedSocket)) {
+                            joined = true;
+                            return;
+                        }
+                        long attemptMs = Math.max(500L, Math.min(HS_EARLY_ATTEMPT_MS, left));
+                        Bus.log("热点: 碰触提前接入尝试 " + attempt + "(剩余 " + left
+                                + "ms,单次 " + attemptMs + "ms)");
+                        hr = joinHotspotHidden(wm, ssid, pass, gen, 1, attemptMs, HS_EARLY_BUDGET_MS);
+                    }
+                    if (hr == HS_HIDDEN_OK) {
+                        if (mEarlyJoinAbort || gen != mWifiGen) return;
+                        long gwLeft = Math.max(1000L, deadline - SystemClock.elapsedRealtime());
+                        String gw = waitForWifiGateway(wm, Math.min(3000L, gwLeft));
+                        if (mEarlyJoinAbort || gen != mWifiGen) return;
+                        if (gw != null && connectViaGateway(gw, 2, 1500)) {
+                            Bus.log("热点: 碰触提前接入成功,耗时 "
+                                    + (SystemClock.elapsedRealtime() - startedAt) + "ms");
+                            joined = true;
+                            return;
+                        }
+                        Bus.log("热点: 热点已接入但对方服务未就绪,提前接入放弃");
+                        return;
+                    }
+                    if (hr == HS_HIDDEN_UNAVAILABLE) {
+                        Bus.log("传输: 隐藏 Wi-Fi 接口不可用,提前接入改用 WifiNetworkSpecifier");
+                        long specLeft = Math.max(1000L, deadline - SystemClock.elapsedRealtime());
+                        synchronized (mHotspotJoinLock) {
+                            joined = joinHotspotOnce(ssid, pass, !derived, specLeft);
+                        }
+                        return;
+                    }
+                } finally {
+                    mEarlyJoinInAttempt = false;
+                }
+                //pri added by zhuyang,A swipe-time join waits for this attempt instead of aborting it half way,20261019,end
+                long sleep = Math.min(HS_EARLY_RETRY_MS,
+                        Math.max(0L, deadline - SystemClock.elapsedRealtime()));
+                if (sleep > 0) {
+                    try { Thread.sleep(sleep); } catch (InterruptedException ignored) {}
+                }
+            }
+            Bus.log("热点: 碰触提前接入未在 " + HS_EARLY_BUDGET_MS + "ms 内完成(尝试 "
+                    + attempt + " 次)");
+        } finally {
+            if (!joined && !mEarlyJoinAbort && !mEarlyJoinHandoff && gen == mWifiGen
+                    && !isAlive(mSendSocket) && !isAlive(mStashedSocket)) {
+                restoreWifiAfterJoin();
+            }
+        }
+    }
+    //pri added by zhuyang,Tap-time preconnect: quick attempts with backoff, hard-capped at 8s from the tap,20261019,end
 
     //pri added by zhuyang,Lucky same-subnet peers skip joining; only treat equal /24 as likely same LAN,20261019,start
     private boolean likelySameLan() {
@@ -608,6 +719,14 @@ public class Xfer {
             return null;
         }
     }
+
+    //pri added by zhuyang,Compare only the first three IPv4 octets (the hotspot DHCP subnet),20261019,start
+    private static boolean sameSubnet24(String a, String b) {
+        int[] x = parseIpv4(a);
+        int[] y = parseIpv4(b);
+        return x != null && y != null && x[0] == y[0] && x[1] == y[1] && x[2] == y[2];
+    }
+    //pri added by zhuyang,Compare only the first three IPv4 octets (the hotspot DHCP subnet),20261019,end
     //pri added by zhuyang,Lucky same-subnet peers skip joining; only treat equal /24 as likely same LAN,20261019,end
 
     //pri added by zhuyang,An AP owner can drop its hotspot once the peer reaches it over the same LAN,20261019,start
@@ -1238,6 +1357,9 @@ public class Xfer {
                     Bus.log("传输: 发送通道已就绪,跳过重新加入/直连");
                     return;
                 }
+                //pri added by zhuyang,Tap-time preconnect: promote the link built while the user was deciding instead of joining the hotspot again,20261019,start
+                if (adoptTapTimeSendLink()) return;
+                //pri added by zhuyang,Tap-time preconnect: promote the link built while the user was deciding instead of joining the hotspot again,20261019,end
                 //pri added by zhuyang,LAN first: a lucky same-subnet peer is the cheapest bearer,20261019,start
                 if (mPeerLanIp != null) {
                     Bus.log("承载: ① 同 LAN 直连 " + mPeerLanIp + "(1 次,"
@@ -1299,7 +1421,11 @@ public class Xfer {
                     return;
                 }
                 Bus.log("承载: ② 非 owner,用" + (derived ? "会话派生" : "对方") + "凭据加入热点 SSID=" + hsSsid);
-                if (joinHotspot(hsSsid, hsPass, derived)) return;
+                if (joinHotspot(hsSsid, hsPass, derived)) {
+                    //pri added by zhuyang,A link that finished during the handoff wait is stashed; promote it before returning,20261019
+                    adoptTapTimeSendLink();
+                    return;
+                }
                 if (!mSenderWaiting) return;
                 Bus.log("承载: ①同 LAN 与 ②热点均失败,无 P2P 兜底,报告 CONNECT_TIMEOUT");
                 fail(new XferError(XferError.Stage.CONNECT, XferError.CONNECT_TIMEOUT,
@@ -1439,36 +1565,66 @@ public class Xfer {
             return true;
         }
         Bus.log("传输: 接入对方热点 SSID=" + ssid + "(" + (derived ? "会话派生" : "对方凭据") + ")…");
-        final int hr = joinHotspotHidden(wm, ssid, pass, gen);
-        if (hr == HS_HIDDEN_OK) {
-            String gw = waitForWifiGateway(wm, 5000L);
-            if (connectViaGateway(gw)) return true;
-            Bus.log("传输: 热点已接入但连不上网关,恢复原 Wi-Fi");
-            restoreWifiAfterJoin();
-            return false;
-        }
-        if (hr == HS_HIDDEN_UNAVAILABLE) {
-            Bus.log("传输: 隐藏 Wi-Fi 接口不可用,回退 WifiNetworkSpecifier(预算 "
-                    + (HS_SPEC_BUDGET_MS / 1000) + "s,系统弹窗时需用户点「连接」)");
-            boolean ok = joinHotspotOnce(ssid, pass, !derived,
-                    derived ? HS_SPEC_BUDGET_MS : (HS_SPEC_BUDGET_MS * 3 / 5));
-            if (!ok && !derived && gen == mWifiGen) {
-                Bus.log("传输: WPA3 请求未成功,再用 WPA2 试一次(剩余预算)");
-                ok = joinHotspotOnce(ssid, pass, false, HS_SPEC_BUDGET_MS * 2 / 5);
+        //pri added by zhuyang,Tap-time preconnect: a swipe during an early attempt waits for that attempt (a live link is reusable) instead of restarting the join,20261019,start
+        mEarlyJoinHandoff = true;
+        try {
+            final long handoffUntil = SystemClock.elapsedRealtime() + HS_EARLY_HANDOFF_WAIT_MS;
+            while (mEarlyJoinInAttempt && SystemClock.elapsedRealtime() < handoffUntil) {
+                if (isAlive(mSendSocket) || isAlive(mStashedSocket)) {
+                    Bus.log("传输: 碰触提前接入已完成,直接复用链路");
+                    return true;
+                }
+                try { Thread.sleep(50); } catch (InterruptedException ignored) {}
             }
-            if (!ok) {
-                releaseNetworkRequest();
+            if (isAlive(mSendSocket) || isAlive(mStashedSocket)) {
+                Bus.log("传输: 碰触提前接入已完成,直接复用链路");
+                return true;
+            }
+            //pri added by zhuyang,Tap-time preconnect: a swipe during an early attempt waits for that attempt (a live link is reusable) instead of restarting the join,20261019,end
+            //pri added by zhuyang,A swipe-time join preempts the tap-time loop and owns the Wi-Fi churn from here,20261019,start
+            mEarlyJoinAbort = true;
+            synchronized (mHotspotJoinLock) {
+                if (isAlive(mSendSocket) || isAlive(mStashedSocket)) {
+                    Bus.log("传输: 碰触提前接入已完成,跳过热点接入");
+                    return true;
+                }
+                //pri added by zhuyang,A swipe-time join preempts the tap-time loop and owns the Wi-Fi churn from here,20261019,end
+                final int hr = joinHotspotHidden(wm, ssid, pass, gen,
+                        HS_HIDDEN_ATTEMPTS, WIFI_ASSOC_POLL_MS, HS_HIDDEN_BUDGET_MS);
+                if (hr == HS_HIDDEN_OK) {
+                    String gw = waitForWifiGateway(wm, 5000L);
+                    if (connectViaGateway(gw)) return true;
+                    Bus.log("传输: 热点已接入但连不上网关,恢复原 Wi-Fi");
+                    restoreWifiAfterJoin();
+                    return false;
+                }
+                if (hr == HS_HIDDEN_UNAVAILABLE) {
+                    Bus.log("传输: 隐藏 Wi-Fi 接口不可用,回退 WifiNetworkSpecifier(预算 "
+                            + (HS_SPEC_BUDGET_MS / 1000) + "s,系统弹窗时需用户点「连接」)");
+                    boolean ok = joinHotspotOnce(ssid, pass, !derived,
+                            derived ? HS_SPEC_BUDGET_MS : (HS_SPEC_BUDGET_MS * 3 / 5));
+                    if (!ok && !derived && gen == mWifiGen) {
+                        Bus.log("传输: WPA3 请求未成功,再用 WPA2 试一次(剩余预算)");
+                        ok = joinHotspotOnce(ssid, pass, false, HS_SPEC_BUDGET_MS * 2 / 5);
+                    }
+                    if (!ok) {
+                        releaseNetworkRequest();
+                        restoreWifiAfterJoin();
+                    }
+                    return ok;
+                }
+                Bus.log("传输: 隐藏接口接入热点失败,恢复原 Wi-Fi");
                 restoreWifiAfterJoin();
+                return false;
             }
-            return ok;
+        } finally {
+            mEarlyJoinHandoff = false;
         }
-        Bus.log("传输: 隐藏接口接入热点失败,恢复原 Wi-Fi");
-        restoreWifiAfterJoin();
-        return false;
     }
 
     //pri added by zhuyang,Silent join via the hidden addNetwork + enableNetwork (deterministic netId for cleanup),20261019,start
-    private int joinHotspotHidden(WifiManager wm, String ssid, String pass, int gen) {
+    private int joinHotspotHidden(WifiManager wm, String ssid, String pass, int gen,
+                                  int attempts, long attemptMs, long budgetMs) {
         try {
             Class<?> cfgCls = Class.forName("android.net.wifi.WifiConfiguration");
             final Object cfg = cfgCls.getConstructor().newInstance();
@@ -1493,8 +1649,8 @@ public class Xfer {
             }
             mJoinedNetId = netId;
             Method enableM = WifiManager.class.getMethod("enableNetwork", int.class, boolean.class);
-            final long deadline = SystemClock.elapsedRealtime() + HS_HIDDEN_BUDGET_MS;
-            for (int attempt = 1; attempt <= HS_HIDDEN_ATTEMPTS && mRunning; attempt++) {
+            final long deadline = SystemClock.elapsedRealtime() + budgetMs;
+            for (int attempt = 1; attempt <= attempts && mRunning; attempt++) {
                 if (gen != mWifiGen) return HS_HIDDEN_FAILED;
                 if (isAlive(mSendSocket) || (mReceiverRole && isAlive(mStashedSocket))) {
                     return HS_HIDDEN_OK;
@@ -1507,13 +1663,16 @@ public class Xfer {
                     cleanupHiddenJoin(wm, ssid);
                     return HS_HIDDEN_UNAVAILABLE;
                 }
-                Bus.log("传输: 隐藏接口静默接入尝试 " + attempt + "/" + HS_HIDDEN_ATTEMPTS
+                Bus.log("传输: 隐藏接口静默接入尝试 " + attempt + "/" + attempts
                         + ",SSID=" + ssid + ",netId=" + netId + ",enable=" + enabled);
-                long assocLeft = Math.max(1000L,
-                        Math.min(WIFI_ASSOC_POLL_MS, deadline - SystemClock.elapsedRealtime()));
+                long assocLeft = Math.max(300L,
+                        Math.min(attemptMs, deadline - SystemClock.elapsedRealtime()));
                 if (waitForAssociation(wm, ssid, assocLeft, gen)) return HS_HIDDEN_OK;
-                if (attempt < HS_HIDDEN_ATTEMPTS) {
-                    try { Thread.sleep(800); } catch (InterruptedException ignored) {}
+                if (attempt < attempts) {
+                    long gap = Math.min(800L, deadline - SystemClock.elapsedRealtime());
+                    if (gap > 0) {
+                        try { Thread.sleep(gap); } catch (InterruptedException ignored) {}
+                    }
                 }
             }
             Bus.log("传输: 隐藏接口接入热点超时/失败");
@@ -1602,9 +1761,18 @@ public class Xfer {
     private String waitForWifiGateway(WifiManager wm, long timeoutMs) {
         final long deadline = SystemClock.elapsedRealtime() + timeoutMs;
         while (mRunning && mJoinedSsid != null && SystemClock.elapsedRealtime() < deadline) {
-            String gw = wifiGateway(wm);
-            if (gw != null) return gw;
-            try { Thread.sleep(300); } catch (InterruptedException ignored) {}
+            //pri added by zhuyang,Immediately after association the old network's DHCP data is still readable: require an IPv4 address on the joined SSID,20261019,start
+            android.net.wifi.WifiInfo wi = null;
+            try { wi = wm.getConnectionInfo(); } catch (Throwable ignored) {}
+            String cur = wi == null ? null : unquote(wi.getSSID());
+            if (cur != null && cur.equals(mJoinedSsid) && wi.getIpAddress() != 0) {
+                String gw = wifiGateway(wm);
+                //pri added by zhuyang,The pre-join DHCP lease can still be cached under the new SSID: require a lease in the gateway subnet,20261019,start
+                if (gw != null && sameSubnet24(intToIp(wi.getIpAddress()), gw)) return gw;
+                //pri added by zhuyang,The pre-join DHCP lease can still be cached under the new SSID: require a lease in the gateway subnet,20261019,end
+            }
+            //pri added by zhuyang,Immediately after association the old network's DHCP data is still readable: require an IPv4 address on the joined SSID,20261019,end
+            try { Thread.sleep(200); } catch (InterruptedException ignored) {}
         }
         return null;
     }
@@ -1635,18 +1803,23 @@ public class Xfer {
     }
 
     private boolean connectViaGateway(String gw) {
+        return connectViaGateway(gw, 3, 2000);
+    }
+
+    //pri added by zhuyang,Tap-time preconnect needs a shorter gateway probe so it stays inside the 8s budget,20261019,start
+    private boolean connectViaGateway(String gw, int attempts, int connectTimeoutMs) {
         if (gw == null) {
             Bus.log("传输: 热点网关未知(DHCP 未就绪)");
             return false;
         }
-        for (int i = 0; i < 3 && mRunning; i++) {
+        for (int i = 0; i < attempts && mRunning; i++) {
             if (isAlive(mSendSocket) || (mReceiverRole && isAlive(mStashedSocket))) {
                 Bus.log("传输: 已有活动连接,停止热点网关连接");
                 return true;
             }
             try {
                 Socket s = new Socket();
-                s.connect(new InetSocketAddress(gw, PORT), 2000);
+                s.connect(new InetSocketAddress(gw, PORT), connectTimeoutMs);
                 Link link = clientHello(s);
                 if (link == null) {
                     try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
@@ -1669,6 +1842,7 @@ public class Xfer {
         }
         return false;
     }
+    //pri added by zhuyang,Tap-time preconnect needs a shorter gateway probe so it stays inside the 8s budget,20261019,end
 
     private void restoreWifiAfterJoin() {
         releaseNetworkRequest();
@@ -2328,10 +2502,11 @@ public class Xfer {
                 // This link is the channel we opened; the yielding peer receives on it.
                 if (link == mStashedSocket) mStashedSocket = null;
                 setSendLink(link);
-            } else if (link == mStashedSocket) {
+            } else {
+                //pri modify by zhuyang,Tap-time preconnect can deliver the peer's first ROLE(S) on a link that was never stashed: the winner must adopt it rather than close it,20261019,start
                 // The peer is the loser and turns receiver on this same link, so keep it as a send
                 // channel when there is none yet; hand it to sendImages via onP2pReady.
-                mStashedSocket = null;
+                if (link == mStashedSocket) mStashedSocket = null;
                 if (mSendSocket == null) {
                     mSendSocket = link;
                     try { link.s.setSoTimeout(0); } catch (Exception ignored) {}
@@ -2339,11 +2514,10 @@ public class Xfer {
                     mMain.post(new Runnable() {
                         @Override public void run() { mListener.onP2pReady(false, null); }
                     });
-                } else {
+                } else if (link != mSendSocket) {
                     closeQuietly(link);
                 }
-            } else if (link != mSendSocket) {
-                closeQuietly(link);
+                //pri modify by zhuyang,Tap-time preconnect can deliver the peer's first ROLE(S) on a link that was never stashed: the winner must adopt it rather than close it,20261019,end
             }
             return;
         }
@@ -3215,6 +3389,20 @@ public class Xfer {
         return l;
     }
     //pri added by zhuyang,Promote the peer-initiated stashed link to the send channel (P2P owner case),20261017,end
+
+    //pri added by zhuyang,Tap-time preconnect: turn an early-built stashed link into the send channel and let TapService start the offer,20261019,start
+    private boolean adoptTapTimeSendLink() {
+        Link stashed = mStashedSocket;
+        if (!isAlive(stashed) || mPeerSocket == stashed) return false;
+        Link promoted = promoteStashedToSend();
+        if (promoted == null) return false;
+        Bus.log("承载: 复用碰触时已建立的热点链路,跳过重新加入");
+        mMain.post(new Runnable() {
+            @Override public void run() { mListener.onP2pReady(false, null); }
+        });
+        return true;
+    }
+    //pri added by zhuyang,Tap-time preconnect: turn an early-built stashed link into the send channel and let TapService start the offer,20261019,end
 
     /** 发送方:把选中的图片(可多张)推给对方(组主用发送通道,组员连组主)。 */
     //pri modify by zhuyang,Role convergence: send on the Link, wait out the 300ms role window, and abort when yielding,20261017,start

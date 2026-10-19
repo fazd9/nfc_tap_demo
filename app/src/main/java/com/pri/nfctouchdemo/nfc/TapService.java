@@ -371,9 +371,10 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         x.setApOwner(apOwner);
         if (apOwner) {
             x.startHotspot();
-        } else if (!hasPending()) {
-            // Receiver side: join the owner's AP now so the owner can reach us when it swipes.
+        } else {
+            //pri modify by zhuyang,Tap-time preconnect: a non-owner joins the owner AP even when it holds photos, so the link is ready before the swipe,20261019,start
             x.startHotspotClient();
+            //pri modify by zhuyang,Tap-time preconnect: a non-owner joins the owner AP even when it holds photos, so the link is ready before the swipe,20261019,end
         }
         //pri added by zhuyang,Batch 6: NFC card side is the single AP owner; reader never opens an AP,20261017,end
         if (hasPending()) {
