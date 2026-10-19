@@ -987,11 +987,48 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
     //pri added by zhuyang,D5: open this round's saved photos in our own viewer,20261014,start
     //pri added by zhuyang,Uris come from the MediaStore records Xfer made while saving; nothing saved = log only,20261014
     //pri added by zhuyang,Uris (not bitmaps) cross the Intent boundary: the saved list is already there and stays small,20261014
+    //pri modify by chenpengqi,Hand the saved public MediaStore item to Google Photos first (private/cache URIs are unreadable to another process), fall back to our own viewer,20261019,start
+    private static final String PHOTOS_PACKAGE = "com.google.android.apps.photos";
+
     private void openViewer() {
         Uri first = (sXfer != null) ? sXfer.firstSavedUri() : null;
         if (first == null) { Bus.log("接收完成:本轮没有落盘 Uri,不打开查看器"); return; }
-        ArrayList<Uri> uris = sXfer.savedUris();
+        final ArrayList<Uri> uris = sXfer.savedUris();
         if (uris.isEmpty()) uris.add(first); //pri added by zhuyang,Defensive: never open the viewer with an empty list,20261014
+        if (uris.size() > 1) Bus.log("接收完成:本轮共 " + uris.size() + " 张,相册只展示第一张");
+        //pri added by chenpengqi,Wait for the dissolve animation to finish so the gallery is not covered by the still-fading window,20261019
+        final Uri target = uris.get(0);
+        mMain.postDelayed(new Runnable() { @Override public void run() {
+            if (openInGooglePhotos(target)) return;
+            openOwnViewer(uris);
+        }}, OverlayService.DISSOLVE_MS + 80L);
+    }
+
+    /** 把媒体库里的公共 content:// 交给 Google 相册;拉起失败返回 false,由调用方回退到应用内查看器。 */
+    private boolean openInGooglePhotos(Uri media) {
+        final Intent view = new Intent(Intent.ACTION_VIEW)
+                .setDataAndType(media, "image/*")
+                .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {
+            startActivity(new Intent(view).setPackage(PHOTOS_PACKAGE));
+            Bus.log("接收完成:已用 Google 相册打开 " + media);
+            return true;
+        } catch (Throwable t) {
+            Bus.log("接收完成:显式拉起 Google 相册失败(" + t + "),回退系统图片查看器");
+        }
+        try {
+            startActivity(Intent.createChooser(view, "查看图片").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            Bus.log("接收完成:已交给系统图片查看器 " + media);
+            return true;
+        } catch (Throwable t) {
+            Bus.log("接收完成:系统查看器也失败: " + t);
+            return false;
+        }
+    }
+
+    /** 回退:应用内查看器(可翻页看本轮全部照片)。 */
+    private void openOwnViewer(ArrayList<Uri> uris) {
         try {
             //pri added by zhuyang,D5: the target is our own Activity, so the transition is ours to kill: the viewer
             //pri added by zhuyang,theme sets windowAnimationStyle=@null (the load-bearing part - a Service cannot call
@@ -1007,6 +1044,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
             Bus.log("打开应用内查看器失败: " + t);
         }
     }
+    //pri modify by chenpengqi,Hand the saved public MediaStore item to Google Photos first, fall back to our own viewer,20261019,end
     //pri added by zhuyang,D5: open this round's saved photos in our own viewer,20261014,end
 
     private static String field(String payload, String key) {
