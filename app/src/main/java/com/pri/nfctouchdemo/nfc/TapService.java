@@ -706,7 +706,13 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         Bus.log("服务: 对端先上滑(ROLE=S),本机准备接收");
         mMain.post(new Runnable() { @Override public void run() {
             if (mRejected) return;
+            //pri added by zhuyang,The peer swiped, so an empty-state raise still in flight must not arm the wait again,20261019,start
+            mPeerOffered = true;
+            //pri added by zhuyang,The peer swiped, so an empty-state raise still in flight must not arm the wait again,20261019,end
             if (mReceiveShown) {
+                //pri modify by zhuyang,Release the waiting receive page (empty state or an already raised card): ACTION_PEER is the only thing that clears waitingForPeer,20261019,start
+                startService(OverlayService.peerIntent(TapService.this, mPeerLabel, Math.max(1, mTotalCount)));
+                //pri modify by zhuyang,Release the waiting receive page (empty state or an already raised card): ACTION_PEER is the only thing that clears waitingForPeer,20261019,end
                 startService(OverlayService.statusIntent(TapService.this, "对方正在发送,等待预览…"));
                 return;
             }
@@ -725,7 +731,13 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
             mRoleYielded = true;
             mUserWantsSend = false;
             if (mRejected) return;
-            if (!mReceiveShown) switchSendPageToReceive(); // 让出后用户只应看到接收卡
+            if (mReceiveShown) {
+                //pri added by zhuyang,Same release as onPeerSwipedFirst: a page raised for the empty state is still waiting for ACTION_PEER,20261019,start
+                startService(OverlayService.peerIntent(TapService.this, mPeerLabel, Math.max(1, mTotalCount)));
+                //pri added by zhuyang,Same release as onPeerSwipedFirst: a page raised for the empty state is still waiting for ACTION_PEER,20261019,end
+            } else {
+                switchSendPageToReceive(); // 让出后用户只应看到接收卡
+            }
             startService(OverlayService.statusIntent(TapService.this, "对方先上滑,本机准备接收…"));
             // Bus.lockRole stays held: this round continues as the receiver, released on accept/reject/failure.
         }});
