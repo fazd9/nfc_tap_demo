@@ -59,6 +59,9 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
     /** 相册推送过来的"当前选中照片"。 */
     private static final ArrayList<Uri> PENDING = new ArrayList<Uri>();
 
+    //pri added by zhuyang,How many photos the gallery currently has selected; survives PENDING.clear() after a send,20261019
+    private static volatile int sGalleryCount;
+
     //pri added by zhuyang,Gallery -> tap-to-share interface (the contract our own gallery implements; the debug gallery,20261016,start
     //pri added by zhuyang,in Temp/debuggallery is the reference implementation). Two intents, both sent with an explicit,20261016
     //pri added by zhuyang,component so no <intent-filter> and no chooser is involved:,20261016
@@ -125,9 +128,9 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         return !PENDING.isEmpty();
     }
 
-    //pri added by zhuyang,Keep the NFC payload's ph flag in sync with PENDING,20261019
-    private void syncHasPhotos() {
-        Bus.setHasPhotos(!PENDING.isEmpty());
+    //pri modify by zhuyang,Keep the NFC payload's photo count in sync with the gallery's current selection,20261019
+    private void syncPhotoCount() {
+        Bus.setPhotoCount(sGalleryCount);
     }
 
     /** 全局唯一的传输器(Activity 与服务共用,避免重复建链)。 */
@@ -210,7 +213,8 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
                 sPreviewOverride = (preview == null || preview.isEmpty()) ? null : Uri.parse(preview);
                 sPublished = !PENDING.isEmpty(); //pri added by zhuyang,A gallery published this selection: it now outranks the screen-reading fallback,20261016
                 savePending();
-                syncHasPhotos(); //pri added by zhuyang,Selection changed: refresh the ph flag,20261019
+                sGalleryCount = PENDING.size(); //pri added by zhuyang,The gallery's on-screen selection drives ph, not the send queue,20261019
+                syncPhotoCount(); //pri added by zhuyang,Selection changed: refresh the photo count,20261019
                 Bus.log("服务: 收到相册当前选中 " + PENDING.size() + " 张照片(等碰一碰)");
             }
             signalSelectionReply(); //pri added by zhuyang,Answer to the tap-time pull: release it early,20261019
@@ -224,7 +228,8 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
             sPublished = false;
             sPreviewOverride = null; //pri added by zhuyang,Cleared with the selection: no stale opened-photo hint,20261019
             savePending();
-            syncHasPhotos(); //pri added by zhuyang,Selection cleared: refresh the ph flag,20261019
+            sGalleryCount = 0; //pri added by zhuyang,The gallery cleared its selection: ph goes to 0,20261019
+            syncPhotoCount(); //pri added by zhuyang,Selection cleared: refresh the photo count,20261019
             signalSelectionReply(); //pri added by zhuyang,Answer to the tap-time pull: release it early,20261019
         }
         // ---- 以下三个分支:动效层(OverlayService)的"用户操作回执",等价于旧 SendPage/ReceivePage 的 Listener ----
@@ -249,11 +254,8 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
                     mSendStarted = true;
                     sXfer.sendImages(new ArrayList<Uri>(PENDING));
                 }
-                //pri added by zhuyang,Batch 2: show the offer/verdict wait in the status line,20261017
-                startService(OverlayService.statusIntent(this, getString(R.string.status_waiting_accept)));
                 return START_STICKY;
             }
-            startService(OverlayService.statusIntent(this, "正在连接对方,请稍候…"));
             sXfer.startAsSender();
             //pri modify by zhuyang,Swipe now declares the sender role and triggers the link negotiation,20261014,end
         }
@@ -312,14 +314,15 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
     }
 
     private void loadPending() {
-        if (!PENDING.isEmpty()) { syncHasPhotos(); return; }
+        if (!PENDING.isEmpty()) { syncPhotoCount(); return; }
         String s = getSharedPreferences("tapdemo", 0).getString("pending", "");
-        if (s == null || s.isEmpty()) { syncHasPhotos(); return; }
+        if (s == null || s.isEmpty()) { syncPhotoCount(); return; }
         for (String p : s.split("\\|")) {
             if (!p.isEmpty()) PENDING.add(Uri.parse(p));
         }
         if (!PENDING.isEmpty()) Bus.log("服务: 恢复上次选中的 " + PENDING.size() + " 张照片");
-        syncHasPhotos(); //pri added by zhuyang,Restored selection: refresh the ph flag,20261019
+        //pri added by zhuyang,A restored PENDING is last round's send queue, not what the gallery shows now: sGalleryCount stays as is,20261019
+        syncPhotoCount(); //pri added by zhuyang,Refresh the photo count without treating the restored queue as a gallery selection,20261019
     }
 
     // ---------- 碰一碰:发送方(卡方)收到读取 → 拉起动效层发送页 ----------
@@ -370,11 +373,11 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
     private void onPeerAfterSelection(final String payload, final String role) {
         //pri added by zhuyang,Both sides have no photos: product does nothing at all this round (no page/AP/link),20261019,start
         final String peerPh = field(payload, "ph");
-        final boolean localHas = hasPending();
-        final boolean peerHas = "1".equals(peerPh);          // missing field / old version => false
-        final boolean peerKnown = peerPh != null;             // missing field = unknown
-        if (!localHas && peerKnown && !peerHas) {
-            Bus.log("碰触: 双方都没有照片,本轮不做任何事");
+        final int localCount = sGalleryCount;                 //pri added by zhuyang,The gallery selection, never the send queue,20261019
+        int peerCount = -1;                                   //pri added by zhuyang,-1 = unknown (old version / debug path without ph),20261019
+        try { if (peerPh != null) peerCount = Integer.parseInt(peerPh); } catch (Throwable ignored) {}
+        if (localCount <= 0 && peerCount == 0) {
+            Bus.log("碰触: 双方都没有照片(本机 " + localCount + ",对端 " + peerCount + "),本轮不做任何事");
             return;
         }
         //pri added by zhuyang,Both sides have no photos: product does nothing at all this round (no page/AP/link),20261019,end
@@ -421,7 +424,8 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
                         PENDING.addAll(picked);
                         sPublished = false; //pri added by zhuyang,Read off the screen, not published: the flag must not stay set,20261016
                         savePending();
-                        syncHasPhotos(); //pri added by zhuyang,Pickup replaced the selection: refresh the ph flag,20261019
+                        sGalleryCount = PENDING.size(); //pri added by zhuyang,The picked selection is what the gallery shows: update ph,20261019
+                        syncPhotoCount(); //pri added by zhuyang,Pickup replaced the selection: refresh the photo count,20261019
                         Bus.log("相册拾取: 拿到当前正在看/选中的 " + picked.size() + " 张照片,碰一碰直接发送");
                     } else if (GalleryPickup.canReadGallery()) {
                         //pri added by zhuyang,The gallery is on screen and readable, and the user has neither opened nor ticked,20261016,start
@@ -430,7 +434,8 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
                         PENDING.clear();
                         sPublished = false; //pri added by zhuyang,Cleared from the screen side: nothing is published any more,20261016
                         savePending();
-                        syncHasPhotos(); //pri added by zhuyang,Pickup cleared the stale selection: refresh the ph flag,20261019
+                        sGalleryCount = 0; //pri added by zhuyang,The gallery shows no selection: ph goes to 0,20261019
+                        syncPhotoCount(); //pri added by zhuyang,Pickup cleared the stale selection: refresh the photo count,20261019
                         Bus.log("相册拾取: 相册在前台且可读,但用户没有打开或勾选照片,清掉上一轮留下的选择");
                     } else {
                         Bus.log("相册拾取: 读不到相册内容(无障碍未开启),沿用上一轮的选择");
@@ -520,7 +525,6 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
                 // 上滑提示是「上滑发送 N 张照片」(不给 peer 时会退回动效层自带的默认文案)。
                 startForegroundService(OverlayService.intent(
                         TapService.this, backdrop, photo, mPeerLabel, PENDING.size()));
-                startService(OverlayService.statusIntent(TapService.this, "正在连接对方…"));
             }});
         }}).start();
         //pri added by zhuyang,Screen-capture backdrop (LongShotScreen silent ScreenCaptureInternal port): the capture must complete,20261014,end
@@ -534,18 +538,12 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         mMain.post(new Runnable() { @Override public void run() { // 回到主线程再改 UI
             //pri modify by zhuyang,Role-aware guard: never paint the send page over the receive card,20261014,start
             if (mUserWantsSend && !mRoleYielded) {
-                startService(OverlayService.statusIntent(TapService.this, getString(R.string.status_waiting_accept)));
                 if (!mSendStarted) {
                     mSendStarted = true;
                     sXfer.sendImages(new ArrayList<Uri>(PENDING));
                 }
-            } else if (mRoleYielded) { //pri added by zhuyang,Lost the role race: the send page must not come back,20261017
-                startService(OverlayService.statusIntent(TapService.this, "对方先上滑,本机准备接收…"));
-            } else if (mReceiveShown || mRejected) {
-                startService(OverlayService.statusIntent(TapService.this, "已连接,等待接收…"));
-            } else if (hasPending()) {
+            } else if (!mRoleYielded && !mReceiveShown && !mRejected && hasPending()) {
                 showSendPage();
-                startService(OverlayService.statusIntent(TapService.this, "已连接,上滑发送即可"));
             }
             //pri modify by zhuyang,Role-aware guard: never paint the send page over the receive card,20261014,end
         }});
@@ -625,7 +623,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         sPublished = false; //pri added by zhuyang,Sent: the gallery's published selection is consumed, not held,20261016
         sPreviewOverride = null; //pri added by zhuyang,Consumed with the selection: the next round reports its own opened photo,20261019
         savePending();
-        syncHasPhotos(); //pri added by zhuyang,Send consumed the selection: refresh the ph flag,20261019
+        //pri added by zhuyang,PENDING.clear() consumes the send queue only: sGalleryCount still reflects the on-screen selection,20261019
         mSendShown = false; // 本轮结束,下一轮碰触重新拉起
         // 发送完成后摘掉动效窗口(动效层自己也会播"飞走"动画,这里再兜一次底;
         // 用 startService 而不是 stopIntent:服务继续常驻,只是窗口没了)
@@ -821,7 +819,6 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
                 //pri modify by zhuyang,Release the waiting receive page (empty state or an already raised card): ACTION_PEER is the only thing that clears waitingForPeer,20261019,start
                 startService(OverlayService.peerIntent(TapService.this, mPeerLabel, Math.max(1, mTotalCount)));
                 //pri modify by zhuyang,Release the waiting receive page (empty state or an already raised card): ACTION_PEER is the only thing that clears waitingForPeer,20261019,end
-                startService(OverlayService.statusIntent(TapService.this, "对方正在发送,等待预览…"));
                 return;
             }
             if (mSendShown || hasPending()) {
@@ -846,7 +843,6 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
             } else {
                 switchSendPageToReceive(); // 让出后用户只应看到接收卡
             }
-            startService(OverlayService.statusIntent(TapService.this, "对方先上滑,本机准备接收…"));
             // Bus.lockRole stays held: this round continues as the receiver, released on accept/reject/failure.
         }});
     }
@@ -895,9 +891,8 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         mReceiveShown = true;
         mAccepted = false; mPreviewCount = 0; mFullCount = 0;
         mTransferDone = false; mBmps.clear();
-        //pri modify by zhuyang,Use the real announced count and pick the status line by link state,20261014
+        //pri modify by zhuyang,Use the real announced count; the bottom status line stays empty until real transfer progress arrives,20261019
         startForegroundService(OverlayService.receiveIntent(this, label, Math.max(1, count), previewUriOrNull()));
-        startService(OverlayService.statusIntent(this, mLinkReady ? "已连接,等待接收…" : "正在连接对方…"));
     }
 
     //pri added by zhuyang,Empty state (E7): the phone with no photo selected raises the same page,20261014,start
@@ -944,7 +939,6 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         mBmps.clear(); mLastBmp = null;
         startForegroundService(OverlayService.receiveIntent(this, mPeerLabel,
                 Math.max(1, mTotalCount), previewUriOrNull()));
-        startService(OverlayService.statusIntent(this, mLinkReady ? "已连接,等待接收…" : "正在连接对方…"));
     }
     //pri added by zhuyang,Loser side of the race: the live send page becomes the receive card in place,20261014,end
 
