@@ -276,6 +276,8 @@ class OverlayService : Service() {
         // 发送侧的对端标识：NFC 层不给就退回动效层自带的默认文案
         if (intent?.hasExtra(EXTRA_PEER) == true) peerLabel = intent.getStringExtra(EXTRA_PEER)
         peerCount = countExtra(intent, peerCount)
+        //pri added by zhuyang,New round: never inherit the previous status line,20261019
+        statusText = null
         if (intent?.hasExtra(EXTRA_STATUS) == true) statusText = intent.getStringExtra(EXTRA_STATUS)
 
         val backdrop = backdropUri
@@ -318,6 +320,8 @@ class OverlayService : Service() {
     private fun startReceiveFlow(intent: Intent?) {
         hideFailBanner()
         cancelDissolve() //pri added by zhuyang,E5: the new round owns the window,20261014
+        //pri added by zhuyang,New round: the previous accept/reject and toast must not disable this round's pills,20261019
+        if (rootView != null) overlay.resetReceiveRoundState()
         //pri added by zhuyang,Live switch: capture the previous identity before `mode` is overwritten,20261014,start
         val wasSend = mode == OverlayView.Mode.SEND
         //pri added by zhuyang,Live switch: capture the previous identity before `mode` is overwritten,20261014,end
@@ -325,8 +329,12 @@ class OverlayService : Service() {
         if (intent?.hasExtra(EXTRA_PEER) == true) peerLabel = intent.getStringExtra(EXTRA_PEER)
         // 没有新的张数就沿用上一轮（重播时不该把「接收 3 张照片」缩回 1 张）
         peerCount = countExtra(intent, if (peerCount > 0) peerCount else 1)
+        //pri added by zhuyang,New round: never inherit the previous status line or the previous peer photo,20261019,start
+        statusText = null
         if (intent?.hasExtra(EXTRA_STATUS) == true) statusText = intent.getStringExtra(EXTRA_STATUS)
-        uriExtra(intent, EXTRA_PHOTO)?.let { photoUri = it }
+        //pri added by zhuyang,A missing / empty photo extra means this round has no peer photo yet,20261019
+        photoUri = uriExtra(intent, EXTRA_PHOTO)
+        //pri added by zhuyang,New round: never inherit the previous status line or the previous peer photo,20261019,end
 
         //pri added by zhuyang,Empty state (E7): page up with the captured screen as backdrop, every element held back,20261014,start
         val waiting = intent?.getBooleanExtra(EXTRA_WAITING, false) == true

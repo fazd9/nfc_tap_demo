@@ -296,6 +296,14 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         mRejected = false;
         mPeerOffered = false;
         mLastBmp = null;        //pri added by zhuyang,Preview bitmap is sticky across rounds,20261014
+        //pri added by zhuyang,Reset the receive counters and viewer list so nothing from the previous round leaks in,20261019,start
+        mAccepted = false;
+        mPreviewCount = 0;
+        mFullCount = 0;
+        mTotalCount = 0;
+        mTransferDone = false;
+        mBmps.clear();
+        //pri added by zhuyang,Reset the receive counters and viewer list so nothing from the previous round leaks in,20261019,end
         //pri added by zhuyang,New round: role flags reset,20261014,end
         //pri added by zhuyang,A gallery that publishes its own selection wins over reading the screen: while one is held, the,20261016
         //pri added by zhuyang,fallback below is not run at all (contract: see ACTION_CLEAR_SELECTION). The gallery clears when the user,20261016

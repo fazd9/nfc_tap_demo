@@ -1620,6 +1620,16 @@ class OverlayView @JvmOverloads constructor(
         invalidate()
     }
 
+    //pri added by zhuyang,New round: drop the previous round's accept/reject decision and toast, so the pills become tappable again,20261019,start
+    //pri added by zhuyang,State only - no drawing, timing or easing is touched,20261019
+    fun resetReceiveRoundState() {
+        receiverRenderer.reset()
+        receiverToast = ""
+        pressedButton = BUTTON_NONE
+        invalidate()
+    }
+    //pri added by zhuyang,New round: drop the previous round's accept/reject decision and toast, so the pills become tappable again,20261019,end
+
     // ------------------------------------------------------------------ 尺寸
 
     override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {

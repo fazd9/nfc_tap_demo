@@ -402,7 +402,10 @@ public class Xfer {
         // 已经有一条活着的连接（对方连上了、正在传/待发）就**别动它**，只更新目标信息 ——
         // 否则本轮里 setExpectedPeer 被再调一次（又碰了一下）会把正在用的 socket 和 8988
         // 监听一起关掉，那比不修还糟。
+        //pri modify by zhuyang,Round flags always reset; link state only when no live link remains,20261019,start
+        resetRoundFlags();
         if (!hasLiveLink()) resetRoundState();
+        //pri modify by zhuyang,Round flags always reset; link state only when no live link remains,20261019,end
         mPeerName = modelName;
         mPeerBt = btName;
         mPeerP2pName = p2pName;
@@ -453,11 +456,32 @@ public class Xfer {
         fail(err);
     }
 
+    //pri added by zhuyang,Round-level flags must reset on every tap even when the previous link is still alive,20261019,start
+    //pri added by zhuyang,These fields never own a socket, thread or bitmap: clearing them is safe with a live link,20261019
+    private void resetRoundFlags() {
+        mReceiverRole = false;
+        mCanSend = false;
+        mHasPhotos = false;
+        mPeerRole = "U";
+        mPeerSwipedAt = 0;
+        mLocalSwipedAt = 0;
+        mPeerWantsSend = false;
+        mYielded = false;
+        mVerdictSent = false;
+        mDoneNotified = false;
+        mExpect = 0;
+        mFirstSavedUri = null;
+        mEarlyJoinAbort = false;
+        mEarlyJoinHandoff = false;
+    }
+    //pri added by zhuyang,Round-level flags must reset on every tap even when the previous link is still alive,20261019,end
+
     private void resetRoundState() {
         if (mGoAddress != null || mSenderWaiting || mServer != null || mGotConnection) {
             Bus.log("传输: 新一轮开始,清掉上一轮状态(组主=" + mGoAddress + ", 等直连=" + mSenderWaiting
                     + ", 已连接=" + mGotConnection + ", 服务端=" + (mServer != null) + ")");
         }
+        resetRoundFlags();
         mGoAddress = null;
         mImGo = false;
         mConnecting = false;
@@ -465,9 +489,6 @@ public class Xfer {
         mGotConnection = false;
         mSenderWaiting = false;
         mP2pAttempt = 0;
-        mReceiverRole = false;
-        mCanSend = false;   //pri added by zhuyang,New round: undecided until TapService reports the photos,20261014
-        mHasPhotos = false; //pri added by zhuyang,New round: no photos reported yet,20261017
         mPeerSid = null;    //pri added by zhuyang,New round: the peer sid is set again from the new payload,20261017
         //pri added by zhuyang,Batch 6: a new round derives new credentials, so any AP left from the previous round is stale,20261019,start
         if (mHotspotReservation != null || mHotspotStarting) {
@@ -477,8 +498,6 @@ public class Xfer {
         //pri added by zhuyang,Forget the previous round's joined AP and restore the user's network,20261019,start
         restoreWifiAfterJoin();
         //pri added by zhuyang,Forget the previous round's joined AP and restore the user's network,20261019,end
-        mEarlyJoinAbort = false; //pri added by zhuyang,A new round has not been preempted by a swipe yet,20261019
-        mEarlyJoinHandoff = false; //pri added by zhuyang,A new round has no swipe-time handoff in flight,20261019
         mDerivedSsid = null;
         mDerivedPass = null;
         //pri added by zhuyang,Batch 6: a new round derives new credentials, so any AP left from the previous round is stale,20261019,end
@@ -496,17 +515,8 @@ public class Xfer {
         mSendSocket = null;
         mRoleListenerThread = null; // its socket is closed, the thread exits on its own
         mRoleListenerAbort = null;
-        mPeerRole = "U";
-        mPeerSwipedAt = 0;
-        mLocalSwipedAt = 0;
-        mPeerWantsSend = false;
-        mYielded = false;
         synchronized (mPreReadFrames) { mPreReadFrames.clear(); }
         //pri added by zhuyang,Drop every link of the previous round, including the role listener's,20261017,end
-        mVerdictSent = false;
-        mDoneNotified = false;
-        mExpect = 0;
-        mFirstSavedUri = null;
         mSavedUris.clear(); //pri added by zhuyang,New round: the viewer list of the previous round must not leak into this one,20261014
         //pri added by zhuyang,Bump the round token and drop the verdict session state of the previous round,20261014,end
         try { if (mServer != null) mServer.close(); } catch (Exception ignored) {}
@@ -2431,6 +2441,8 @@ public class Xfer {
             //pri added by zhuyang,Already yielded this round: keep receiving, never arbitrate again,20261017
             Bus.log("传输: 本机已让出,按接收方读取对端报价");
             mStashedSocket = link;
+            //pri added by zhuyang,Yielded receiver still owes the receive card its peer-intent release,20261019
+            notifyPeerSwipedFirst();
             handleIncoming(link);
             return;
         }
