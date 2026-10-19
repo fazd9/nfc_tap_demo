@@ -18,7 +18,7 @@
 
 | 外部工程 | 相对路径 | 基线提交 | 改动提交 | 目的 |
 |---|---|---|---|---|
-| `nfc_test/pri_project/android/pri_app/PriSettings` | `src/com/android/settings/wifi/NetworkRequestDialogActivity.java` | 待提交 | 见下一提交 | 热点静默连接：命中本应用 SSID 前缀时自动批准，不弹窗 |
+| `nfc_test/pri_project/android/pri_app/PriSettings` | `src/com/android/settings/wifi/NetworkRequestDialogActivity.java` | `d46a569` | `b6c6e4f` | 热点静默连接：命中本应用 SSID 前缀时自动批准，不弹窗 |
 
 ## 查看改动
 
