@@ -58,8 +58,18 @@ public final class Bus {
     private static volatile String sPayloadCache;
     private static volatile long sPayloadCacheAt;
     private static volatile String sSid; //pri added by zhuyang,Process-wide session id shared by every round,20261017
+    private static volatile boolean sHasPhotos; //pri added by zhuyang,Advertise whether this phone has photos to send,20261019
 
     private Bus() {}
+
+    //pri added by zhuyang,Update the "has photos to send" flag and invalidate the payload cache only on change,20261019,start
+    public static void setHasPhotos(boolean v) {
+        Bus.log(v ? "本机有待发照片" : "本机无待发照片");
+        if (sHasPhotos == v) return;
+        sHasPhotos = v;
+        payloadChanged();
+    }
+    //pri added by zhuyang,Update the "has photos to send" flag and invalidate the payload cache only on change,20261019,end
 
     //pri added by zhuyang,Generate the 128-bit sid once per process and keep it for all rounds,20261017,start
     public static String sid() {
@@ -215,6 +225,8 @@ public final class Bus {
         }
         // P2P 名/局域网 IP/热点信息实时拼接:IP 会随网络变化,靠上面的短缓存控制新鲜度
         StringBuilder sb = new StringBuilder(base);
+        //pri added by zhuyang,Right after ts so a tail cut can never drop it; 1 = this phone has photos,20261019
+        sb.append("|ph=").append(sHasPhotos ? '1' : '0');
         if (sP2pName != null) sb.append("|p=").append(safe(sP2pName));
         if (sP2pAddr != null) sb.append("|a=").append(safe(sP2pAddr));
         String ip = lanIpv4();
