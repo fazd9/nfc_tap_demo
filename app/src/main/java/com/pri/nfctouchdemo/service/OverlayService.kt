@@ -6,8 +6,10 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ActivityInfo
 import android.content.pm.ServiceInfo
 import android.content.res.Configuration
@@ -140,6 +142,10 @@ class OverlayService : Service() {
     //pri added by zhuyang,E5: pending "dissolve, then detach" - at most one, and never across rounds,20261014
     private var dissolveRunnable: Runnable? = null
 
+    //pri added by chenpengqi,Screen-off path: receiver belongs to the service, not to one round,20261019,start
+    private var screenReceiver: BroadcastReceiver? = null
+    //pri added by chenpengqi,Screen-off path: receiver belongs to the service, not to one round,20261019,end
+
     /** 通知里「重播」的 5 秒等待，等待期间 [replayPending] 让通知文案变一下。 */
     private var replayRunnable: Runnable? = null
     private var replayPending = false
@@ -179,6 +185,21 @@ class OverlayService : Service() {
         createChannel()
         //pri added by zhuyang,Change 2: registered once for the life of the service, as the reference's init/release pair does,20261014
         topTaskWatcher = TaskStackWatcher(::onTopTaskChanged).also { it.register() }
+        //pri added by chenpengqi,Screen-off path: this window type sits above the keyguard, so a lock must take the page down with it,20261019,start
+        val screenFilter = IntentFilter(Intent.ACTION_SCREEN_OFF)
+        val receiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action == Intent.ACTION_SCREEN_OFF) onScreenOff()
+            }
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            registerReceiver(receiver, screenFilter, Context.RECEIVER_NOT_EXPORTED)
+        } else {
+            @Suppress("UnspecifiedRegisterReceiverFlag")
+            registerReceiver(receiver, screenFilter)
+        }
+        screenReceiver = receiver
+        //pri added by chenpengqi,Screen-off path: this window type sits above the keyguard, so a lock must take the page down with it,20261019,end
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -224,6 +245,11 @@ class OverlayService : Service() {
         //pri added by zhuyang,Change 2: the listener must not outlive the service that owns it,20261014
         topTaskWatcher?.unregister()
         topTaskWatcher = null
+        //pri added by chenpengqi,Screen-off path: the receiver must not outlive the service either,20261019
+        screenReceiver?.let {
+            runCatching { unregisterReceiver(it) }.onFailure { e -> Log.w(TAG, "注销息屏接收器失败", e) }
+        }
+        screenReceiver = null
         super.onDestroy()
     }
 
@@ -613,6 +639,17 @@ class OverlayService : Service() {
         //pri added by zhuyang,Drop a live drag / fly / dissolve so the detached view tree does not carry it into the next round,20261014
         overlay.resetSendState()
     }
+
+    //pri added by chenpengqi,Screen-off path: take the page down but report nothing to the NFC layer - locking the phone is not a reject,20261019,start
+    //pri added by chenpengqi,A reject receipt here would run rejectTransfer + stopHotspot in TapService and abort a transfer that is already running,20261019
+    private fun onScreenOff() {
+        if (!attached) return
+        Log.i(TAG, "息屏：收起动效页")
+        cancelDissolve()
+        hideDemo()
+        overlay.resetSendState()
+    }
+    //pri added by chenpengqi,Screen-off path: take the page down but report nothing to the NFC layer,20261019,end
 
     //pri modify by chenpengqi,Gesture-nav Back path: keep the registration in step with "window attached and not touch-through",20261016,start
     //pri modify by chenpengqi,The callback exists from API 33 on; below that the two key paths above stay the only way in,20261016
