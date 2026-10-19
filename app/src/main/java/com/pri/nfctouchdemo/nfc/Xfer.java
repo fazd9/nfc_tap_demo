@@ -407,9 +407,9 @@ public class Xfer {
         return isAlive(mSendSocket) || isAlive(mStashedSocket) || isAlive(mPeerSocket);
     }
 
-    //pri added by zhuyang,A Link counts only while its socket is connected and open,20261017
+    //pri modify by zhuyang,A half-open socket is still connected/open locally: also require the link not marked dead,20261019
     private static boolean isAlive(Link l) {
-        return l != null && l.s.isConnected() && !l.s.isClosed();
+        return l != null && !l.linkDead.get() && l.s.isConnected() && !l.s.isClosed();
     }
 
     //pri added by zhuyang,Batch 5: a stray inbound connection must not fail an already-running round,20261017
@@ -754,10 +754,24 @@ public class Xfer {
             return;
         }
         checkWifi();
-        if (mGoAddress != null || mSenderWaiting) {
+        //pri added by zhuyang,A wait left over from a round with no live link must not block the new round,20261019,start
+        if (mSenderWaiting && !hasLiveLink()) {
+            Bus.log("P2P: 上一轮的等待已失效(没有活链路),继续发起本轮连接");
+            mSenderWaiting = false;
+        }
+        if (isAlive(mSendSocket)) {
+            Bus.log("P2P: 发送通道已就绪,忽略重复的发送请求");
+            return;
+        }
+        if (mSenderWaiting) {
             Bus.log("P2P: 已在等待对方发起直连");
             return;
         }
+        if (mGoAddress != null) {
+            Bus.log("P2P: 直连组已建立,忽略重复的发送请求");
+            return;
+        }
+        //pri added by zhuyang,A wait left over from a round with no live link must not block the new round,20261019,end
         mSenderWaiting = true;
         Bus.log("P2P: 本机为发送方:优先热点/局域网直连,失败则等 P2P…");
         startConnectStrategy();
@@ -795,14 +809,26 @@ public class Xfer {
         mHasPhotos = true;
         mLocalSwipedAt = SystemClock.elapsedRealtime();
         Link send = mSendSocket;
+        //pri added by zhuyang,Only a live send link may be reused; a dead one must be rebuilt by this round,20261019,start
+        if (!isAlive(send)) {
+            closeQuietly(send);
+            if (mSendSocket == send) mSendSocket = null;
+            send = null;
+        }
+        boolean stashedUsable = isAlive(mStashedSocket) && mPeerSocket != mStashedSocket;
         if (send != null) {
             sendRoleOnLinkAsync(send, "S");
-        } else if (mStashedSocket != null && mPeerSocket != mStashedSocket) {
+        } else if (stashedUsable) {
             // Only the peer-initiated link exists: announce our role on it now.
             sendRoleOnLinkAsync(mStashedSocket, "S");
+        } else {
+            //pri added by zhuyang,No usable link: drop a stale wait so startAsSender() really connects this round,20261019
+            mSenderWaiting = false;
         }
+        //pri added by zhuyang,Only a live send link may be reused; a dead one must be rebuilt by this round,20261019,end
         Bus.log("传输: 本机上滑,宣告 ROLE(S)"
-                + (send != null ? "(发送通道已就绪)" : "(发送通道尚未建立,连接建立后补发)"));
+                + (send != null ? "(发送通道已就绪)"
+                        : (stashedUsable ? "(发送通道尚未建立,连接建立后补发)" : "(发送通道需重建)")));
         return true;
     }
     //pri modify by zhuyang,Role convergence: swipe records the local clock and announces ROLE(S); false = peer already swiped,20261017,end
@@ -980,6 +1006,9 @@ public class Xfer {
             Bus.log("传输: 已发送 ROLE(" + role + ")");
         } catch (Exception e) {
             Bus.log("传输: 发送 ROLE(" + role + ") 失败: " + e);
+            //pri added by zhuyang,A failed ROLE write proves the link dead: close it so the next round rebuilds it,20261019
+            signalLinkDead(link, new XferError(XferError.Stage.CONNECT, XferError.CONNECT_TIMEOUT,
+                    "发送 ROLE 失败: " + e));
         }
     }
 
