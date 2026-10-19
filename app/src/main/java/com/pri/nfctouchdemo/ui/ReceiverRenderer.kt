@@ -9,6 +9,7 @@ import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.RadialGradient
+import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.Typeface
@@ -663,12 +664,15 @@ class ReceiverRenderer {
             // 卡片不模糊（原来那套"最糊 → 次糊 → 原图"三级交叠已经整段删掉），所以过曝
             // 全压在这一张清晰图上 —— 顺带省掉每帧最多三次整卡位图绘制。
             val focus = f.focus.coerceIn(0f, 1f)
+            //pri added by zhuyang,Cover-crop source rect so the photo keeps its aspect ratio in the receiver card,20261019,start
+            val src = coverSourceRect(photo, rect.width(), rect.height())
+            //pri added by zhuyang,Cover-crop source rect so the photo keeps its aspect ratio in the receiver card,20261019,end
             if (focus >= 0.995f) {
                 // 落定之后矩阵已经退化成单位矩阵（bright/饱和都是 1），再挂一次滤镜就是每帧
                 // 白扔一次 ColorMatrixColorFilter。直接裸画 —— 像素结果一样，卡片真正"回归一张图"。
                 tintPaint.colorFilter = null
                 tintPaint.alpha = (cardAlpha * 255f).toInt().coerceIn(0, 255)
-                c.drawBitmap(photo, null, rect, tintPaint)
+                c.drawBitmap(photo, src, rect, tintPaint) //pri modify by zhuyang,Center cover crop instead of stretching,20261019
             } else {
                 // 只高亮、不模糊：整段过曝全压在这一张**清晰**的图上。
                 // focus → 1 时矩阵退化成单位矩阵，于是和上面那条"落定"分支无缝接上
@@ -680,7 +684,7 @@ class ReceiverRenderer {
                 matrix.postConcat(matrixScale)
                 tintPaint.colorFilter = ColorMatrixColorFilter(matrix)
                 tintPaint.alpha = (cardAlpha * 255f).toInt().coerceIn(0, 255)
-                c.drawBitmap(photo, null, rect, tintPaint)
+                c.drawBitmap(photo, src, rect, tintPaint) //pri modify by zhuyang,Center cover crop instead of stretching,20261019
                 tintPaint.colorFilter = null
             }
             tintPaint.alpha = 255
@@ -920,6 +924,33 @@ class ReceiverRenderer {
     }
 
     // ══════════════════════════ 小工具 ══════════════════════════
+
+    /**
+     * 居中 cover 裁切对应的源矩形 —— 和发送端 `OverlayView.coverSource()` 同一套算法
+     * （那是 private，所以在这里留一份；语义必须保持一致，否则两端的裁切范围会对不上）。
+     *
+     * 源矩形必须是 **`Rect`（整数）**：`Canvas.drawBitmap` 的缩放重载不接受 `RectF` 源矩形。
+     */
+    //pri added by zhuyang,Center cover-crop source rect to match the sender's coverSource,20261019,start
+    private fun coverSourceRect(src: Bitmap, dstW: Float, dstH: Float): Rect {
+        if (dstW <= 0f || dstH <= 0f || src.width <= 0 || src.height <= 0) {
+            return Rect(0, 0, src.width.coerceAtLeast(1), src.height.coerceAtLeast(1))
+        }
+        val dstRatio = dstW / dstH
+        val srcRatio = src.width.toFloat() / src.height
+        return if (srcRatio > dstRatio) {
+            // 源更宽：左右各裁掉一条
+            val cropW = (src.height * dstRatio).toInt().coerceIn(1, src.width)
+            val left = (src.width - cropW) / 2
+            Rect(left, 0, left + cropW, src.height)
+        } else {
+            // 源更高：上下各裁掉一条
+            val cropH = (src.width / dstRatio).toInt().coerceIn(1, src.height)
+            val top = (src.height - cropH) / 2
+            Rect(0, top, src.width, top + cropH)
+        }
+    }
+    //pri added by zhuyang,Center cover-crop source rect to match the sender's coverSource,20261019,end
 
     /**
      * 把颜色自带的 alpha 再乘一个系数。Canvas 没有 alpha，淡入淡出只能乘进颜色里，
