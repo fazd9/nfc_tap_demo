@@ -94,6 +94,8 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
     //pri added by zhuyang,    context.sendBroadcast(r);,20261019
     //pri added by zhuyang,The gallery answers with PUBLISH (what is on screen) or CLEAR (nothing is),20261019
     public static final String ACTION_CLEAR_SELECTION = "com.pri.nfcdemo.CLEAR_SELECTION";
+    //pri added by zhuyang,The photo the user opened in the gallery: the card thumbnail must be that one,20261019
+    public static final String EXTRA_PREVIEW_URI = "com.pri.nfcdemo.extra.PREVIEW_URI";
 
     //pri added by zhuyang,Tap-time pull: every tap asks the gallery what it is showing right now instead of trusting the,20261019,start
     //pri added by zhuyang,selection pushed when it last changed (onImageSent clears PENDING, so an unchanged selection would,20261019
@@ -112,6 +114,8 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
     //pri added by zhuyang,from a service that was killed with the gallery still open, and a fresh screen read beats it. That keeps the,20261016
     //pri added by zhuyang,Google Photos path exactly as it was before this feature,20261016,end
     private static volatile boolean sPublished;
+    //pri added by zhuyang,Preview override published by the gallery (the opened photo); null = fall back to the first,20261019
+    private static volatile Uri sPreviewOverride;
 
     //pri modify by zhuyang,Hard cap on the silent capture: 1500ms is ~2.5x the device-measured 578ms of the old SystemUI path and stays below the framework's own 4s wait; past it the send page is raised with the photo backdrop instead,20261014
     private static final long CAPTURE_TIMEOUT_MS = 1500L;
@@ -196,6 +200,9 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
             if (uris != null) {
                 PENDING.clear();
                 PENDING.addAll(uris);
+                //pri added by zhuyang,Always take the extra as-is: an intent without it (grid multi-select) clears the previous hint,20261019
+                String preview = intent.getStringExtra(EXTRA_PREVIEW_URI); //pri added by zhuyang,The gallery publishes the Uri as a string,20261019
+                sPreviewOverride = (preview == null || preview.isEmpty()) ? null : Uri.parse(preview);
                 sPublished = !PENDING.isEmpty(); //pri added by zhuyang,A gallery published this selection: it now outranks the screen-reading fallback,20261016
                 savePending();
                 Bus.log("服务: 收到相册当前选中 " + PENDING.size() + " 张照片(等碰一碰)");
@@ -209,6 +216,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
             Bus.log("服务: 相册撤销了选择,清掉待发的 " + PENDING.size() + " 张照片");
             PENDING.clear();
             sPublished = false;
+            sPreviewOverride = null; //pri added by zhuyang,Cleared with the selection: no stale opened-photo hint,20261019
             savePending();
             signalSelectionReply(); //pri added by zhuyang,Answer to the tap-time pull: release it early,20261019
         }
@@ -472,6 +480,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         if (PENDING.isEmpty()) return; // 没有待发照片(正常不会走到这):直接返回
         if (mSendShown) return;        // 本轮已经拉起过:幂等,避免重复 start 动效层(替代原来 mSendPage != null 的判断)
         mSendShown = true;
+        xfer(this).setPreviewUri(sPreviewOverride); //pri added by zhuyang,Hand the opened photo to Xfer for this round's card preview,20261019
         //pri added by zhuyang,Screen-capture backdrop (LongShotScreen silent ScreenCaptureInternal port): the capture must complete,20261014,start
         //pri added by zhuyang,BEFORE the overlay window is attached, or the captured frame would contain our own page. Done on a,20261014
         //pri added by zhuyang,worker thread because the capture blocks on a binder round trip to system_server,20261014
@@ -594,6 +603,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         Bus.unlockRole();
         PENDING.clear();
         sPublished = false; //pri added by zhuyang,Sent: the gallery's published selection is consumed, not held,20261016
+        sPreviewOverride = null; //pri added by zhuyang,Consumed with the selection: the next round reports its own opened photo,20261019
         savePending();
         mSendShown = false; // 本轮结束,下一轮碰触重新拉起
         // 发送完成后摘掉动效窗口(动效层自己也会播"飞走"动画,这里再兜一次底;

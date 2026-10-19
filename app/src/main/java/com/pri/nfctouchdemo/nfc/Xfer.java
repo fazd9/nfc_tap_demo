@@ -6,6 +6,7 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.ImageDecoder; //pri added by zhuyang,EXIF-aware card thumbnail decode,20261019
 import android.net.Uri;
 import android.net.wifi.WifiManager;
 import android.net.wifi.p2p.WifiP2pConfig;
@@ -304,6 +305,7 @@ public class Xfer {
     private volatile int mExpect;           //pri added by zhuyang,Total image count announced by TYPE_META this round,20261014
     private volatile int mRound;            //pri added by zhuyang,Round token: a stale verdict must not leak into the next round,20261014
     private volatile Uri mFirstSavedUri;    //pri added by zhuyang,MediaStore Uri of the first image saved this round,20261014
+    private volatile Uri mPreviewUri;       //pri added by zhuyang,Card preview picked by the gallery (the photo the user opened); null = first,20261019
     //pri added by zhuyang,Every MediaStore Uri saved this round in receive order: the in-app viewer pages through them,20261014
     //pri added by zhuyang,CopyOnWriteArrayList because saveToGallery runs on the IO thread while the viewer list is read on the main thread,20261014
     private final java.util.List<Uri> mSavedUris = new java.util.concurrent.CopyOnWriteArrayList<Uri>();
@@ -471,6 +473,7 @@ public class Xfer {
         mDoneNotified = false;
         mExpect = 0;
         mFirstSavedUri = null;
+        mPreviewUri = null; //pri added by zhuyang,New round: the preview hint belongs to the previous tap,20261019
         mEarlyJoinAbort = false;
         mEarlyJoinHandoff = false;
     }
@@ -3453,6 +3456,11 @@ public class Xfer {
     }
     //pri added by zhuyang,Tap-time preconnect: turn an early-built stashed link into the send channel and let TapService start the offer,20261019,end
 
+    //pri added by zhuyang,The gallery names the photo it has open; the receive card uses it instead of the first,20261019
+    public void setPreviewUri(Uri uri) {
+        mPreviewUri = uri;
+    }
+
     /** 发送方:把选中的图片(可多张)推给对方(组主用发送通道,组员连组主)。 */
     //pri modify by zhuyang,Role convergence: send on the Link, wait out the 300ms role window, and abort when yielding,20261017,start
     public void sendImages(final java.util.List<Uri> uris) {
@@ -3545,10 +3553,16 @@ public class Xfer {
                         byte[] mi = Proto.buildMetaInfo(uris.size(), planned);
                         writeBusinessFrame(send, Proto.TYPE_META_INFO, mi.length, mi);
                         if (!uris.isEmpty()) {
-                            byte[] thumb = thumbnail(uris.get(0)); //pri added by zhuyang,Only the first preview, the receive card consumes the last one,20261014
+                            //pri added by zhuyang,Use the opened photo only when it is part of this round's selection,20261019,start
+                            final boolean picked = mPreviewUri != null && uris.contains(mPreviewUri);
+                            Uri previewUri = picked ? mPreviewUri : uris.get(0);
+                            byte[] thumb = thumbnail(previewUri);
                             if (thumb != null) {
                                 writeBusinessFrame(send, Proto.TYPE_PREVIEW, thumb.length, thumb);
+                                Bus.log("传输: 卡片预览取" + (picked ? "用户点开的那张" : "第一张")
+                                        + "," + thumb.length + " 字节");
                             }
+                            //pri added by zhuyang,Use the opened photo only when it is part of this round's selection,20261019,end
                         }
                         send.out.flush();
                     } finally {
@@ -4123,28 +4137,50 @@ public class Xfer {
         //pri added by zhuyang,1s grace so the peer can read DONE_ACK before the AP goes away; generations cancel stale runs,20261019,end
     }
 
+    //pri modify by zhuyang,Decode through ImageDecoder on API 28+ so EXIF orientation is applied; BitmapFactory stays as the API 27 fallback,20261019,start
     private byte[] thumbnail(Uri uri) {
         try {
-            java.io.InputStream in = mCtx.getContentResolver().openInputStream(uri);
-            android.graphics.BitmapFactory.Options o = new android.graphics.BitmapFactory.Options();
-            o.inJustDecodeBounds = true;
-            android.graphics.BitmapFactory.decodeStream(in, null, o);
-            try { if (in != null) in.close(); } catch (Exception ignored) {}
-            int scale = 1;
-            while (o.outWidth / scale > 900 || o.outHeight / scale > 900) scale *= 2;
-            android.graphics.BitmapFactory.Options o2 = new android.graphics.BitmapFactory.Options();
-            o2.inSampleSize = scale;
-            java.io.InputStream in2 = mCtx.getContentResolver().openInputStream(uri);
-            Bitmap bmp = android.graphics.BitmapFactory.decodeStream(in2, null, o2);
-            try { if (in2 != null) in2.close(); } catch (Exception ignored) {}
+            Bitmap bmp;
+            if (Build.VERSION.SDK_INT >= 28) {
+                ImageDecoder.Source src = ImageDecoder.createSource(mCtx.getContentResolver(), uri);
+                bmp = ImageDecoder.decodeBitmap(src, new ImageDecoder.OnHeaderDecodedListener() {
+                    @Override
+                    public void onHeaderDecoded(ImageDecoder decoder, ImageDecoder.ImageInfo info,
+                                                ImageDecoder.Source source) {
+                        int max = Math.max(info.getSize().getWidth(), info.getSize().getHeight());
+                        int sample = 1;
+                        while (max / sample > 900) sample *= 2;
+                        if (sample > 1) decoder.setTargetSampleSize(sample);
+                        //pri added by zhuyang,Software bitmap: JPEG compress does not work on hardware bitmaps,20261019
+                        decoder.setAllocator(ImageDecoder.ALLOCATOR_SOFTWARE);
+                    }
+                });
+            } else {
+                Bus.log("预览: API " + Build.VERSION.SDK_INT + " 无 ImageDecoder,回退 BitmapFactory(不处理 EXIF)");
+                InputStream in = mCtx.getContentResolver().openInputStream(uri);
+                BitmapFactory.Options o = new BitmapFactory.Options();
+                o.inJustDecodeBounds = true;
+                BitmapFactory.decodeStream(in, null, o);
+                try { if (in != null) in.close(); } catch (Exception ignored) {}
+                int scale = 1;
+                while (o.outWidth / scale > 900 || o.outHeight / scale > 900) scale *= 2;
+                BitmapFactory.Options o2 = new BitmapFactory.Options();
+                o2.inSampleSize = scale;
+                InputStream in2 = mCtx.getContentResolver().openInputStream(uri);
+                bmp = BitmapFactory.decodeStream(in2, null, o2);
+                try { if (in2 != null) in2.close(); } catch (Exception ignored) {}
+            }
             if (bmp == null) return null;
             ByteArrayOutputStream bos = new ByteArrayOutputStream();
             bmp.compress(Bitmap.CompressFormat.JPEG, 82, bos);
+            Bus.log("预览: " + bmp.getWidth() + "x" + bmp.getHeight() + ", " + bos.size() + " 字节(JPEG 82%)");
             return bos.toByteArray();
         } catch (Throwable t) {
+            Bus.log("预览: 解码失败 " + t);
             return null;
         }
     }
+    //pri modify by zhuyang,Decode through ImageDecoder on API 28+ so EXIF orientation is applied; BitmapFactory stays as the API 27 fallback,20261019,end
 
     public void destroy() {
         mRunning = false;

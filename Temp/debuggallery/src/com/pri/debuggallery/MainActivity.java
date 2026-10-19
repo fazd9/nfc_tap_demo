@@ -54,12 +54,16 @@ public class MainActivity extends Activity {
     private static final String ACTION_CLEAR_SELECTION = "com.pri.nfcdemo.CLEAR_SELECTION";
     //pri added by zhuyang,Tap-time pull: the action com.pri.nfctouchdemo broadcasts before each tap,20261019
     private static final String ACTION_REQUEST_SELECTION = "com.pri.nfcdemo.REQUEST_SELECTION";
+    //pri added by zhuyang,The photo opened in the viewer, told apart from the ticked grid set (same key as TapService),20261019
+    private static final String EXTRA_PREVIEW_URI = "com.pri.nfcdemo.extra.PREVIEW_URI";
     //pri added by zhuyang,Longest side the full-screen photo is decoded to: the file can be far bigger than the panel,20261016
     private static final int VIEW_MAX = 2048;
 
     //pri added by zhuyang,Tap-time pull: what is selected on screen right now, readable from the manifest receiver even after,20261019,start
     //pri added by zhuyang,the activity was recreated. Maintained by publishCurrent / cleared by clearPublished,20261019,end
     private static volatile ArrayList<Uri> sCurrentUris = new ArrayList<Uri>();
+    //pri added by zhuyang,Tap-time pull: the opened photo carried with the selection; null while on the grid (no extra),20261019
+    private static volatile String sPreviewUri = null;
 
     private TextView mTitle;
     private TextView mHint;
@@ -274,6 +278,9 @@ public class MainActivity extends Activity {
         Intent i = new Intent(Intent.ACTION_SEND_MULTIPLE);
         i.setType("image/*");
         i.putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris);
+        //pri added by zhuyang,Only an opened photo is reported; the grid multi-select leaves it out so the sender falls back to the first,20261019
+        String preview = sPreviewUri;
+        if (preview != null) i.putExtra(EXTRA_PREVIEW_URI, preview);
         i.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION); // 关键:把读取权限授予接收方
         return i;
     }
@@ -293,6 +300,7 @@ public class MainActivity extends Activity {
         }
         if (uris.isEmpty()) { clearPublished(); return; }
         sCurrentUris = uris; //pri added by zhuyang,Tap-time pull: the receiver answers with exactly this list,20261019
+        sPreviewUri = (mViewingId >= 0) ? mediaUri(mViewingId).toString() : null; //pri added by zhuyang,The opened photo is the card thumbnail,20261019
         try {
             Intent i = buildShareIntent(uris);
             i.setComponent(new ComponentName(SVC_PKG, SVC_CLS));
@@ -310,6 +318,7 @@ public class MainActivity extends Activity {
     //pri added by zhuyang,the background that would also be a background service start,20261016,end
     private void clearPublished() {
         sCurrentUris = new ArrayList<Uri>(); //pri added by zhuyang,Tap-time pull: nothing on screen must answer as a selection,20261019
+        sPreviewUri = null; //pri added by zhuyang,Nothing on screen: no opened photo to report either,20261019
         if (!mPublished) return;
         mPublished = false;
         try {
@@ -327,6 +336,7 @@ public class MainActivity extends Activity {
         ArrayList<Uri> uris = sCurrentUris;
         try {
             if (uris.isEmpty()) {
+                sPreviewUri = null; //pri added by zhuyang,Empty answer is a clear: drop the opened-photo hint too,20261019
                 Intent c = new Intent(ACTION_CLEAR_SELECTION);
                 c.setComponent(new ComponentName(SVC_PKG, SVC_CLS));
                 context.startService(c);
