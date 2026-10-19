@@ -1061,15 +1061,11 @@ public class Xfer {
     }
     //pri added by zhuyang,TYPE_SKIP: "this content hash is already complete, do not stream its DATA",20261019,end
 
-    //pri added by zhuyang,Post a throttled progress snapshot on the main thread; force bypasses the 250ms gate,20261017
+    //pri modify by zhuyang,Keep the TransferProgress model updated for watchdogs/logs but never post it to the UI,20261019,start
     private void postProgress(TransferProgress p, boolean force) {
-        if (p == null) return;
-        if (!force && !p.takeNotifySlot(PROGRESS_NOTIFY_MS)) return;
-        final TransferProgress snap = p.snapshot();
-        mMain.post(new Runnable() {
-            @Override public void run() { mListener.onProgress(snap); }
-        });
+        //pri modify by zhuyang,Progress text lines were removed from the UI by product decision,20261019
     }
+    //pri modify by zhuyang,Keep the TransferProgress model updated for watchdogs/logs but never post it to the UI,20261019,end
     //pri added by zhuyang,Liveness helpers: mark a written frame and write a possibly large frame with progress,20261017,end
 
     //pri modify by zhuyang,Batch 4: receive session key (the sender's sid) for .part paths only; resume uses sha256,20261019
@@ -2760,6 +2756,8 @@ public class Xfer {
         int okFiles = 0;
         int failedFiles = 0;
         int skippedFiles = 0; //pri added by zhuyang,Images already completed by sha256 and answered with TYPE_SKIP,20261019
+        //pri added by zhuyang,Verified images of this round; MediaStore inserts happen only after DONE,20261019
+        final java.util.ArrayList<PendingSave> pendingSaves = new java.util.ArrayList<PendingSave>();
         String lastFailReason = null;
         boolean metaInfoSeen = false;
         Proto.FileBegin curFile = null;
@@ -2908,7 +2906,7 @@ public class Xfer {
                     if (curFile != null) {
                         //pri modify by zhuyang,Batch 4: verify size/SHA-256 and only then insert into MediaStore,20261017
                         ChunkResult cr = closeChunk(curFile, curOut, curMd, curPart, curBytes,
-                                sid, Math.max(expect, curFile.total), all);
+                                sid, Math.max(expect, curFile.total), all, pendingSaves);
                         receivedFiles++;
                         if (cr.ok) {
                             okFiles++;
@@ -2940,22 +2938,22 @@ public class Xfer {
                             Bus.log("传输: 第 " + (fi.index + 1) + " 张命中已完成(sha256="
                                     + fi.sha256.substring(0, 12) + "),回 TYPE_SKIP,不再接收 DATA");
                             Bus.log("传输: 第 " + (fi.index + 1) + " 张为重复图:仅跳过网络传输,仍插入一份新的相册记录");
-                            submitCompletedCopy(known, fi.index + 1, Math.max(expect, fi.total), all);
+                            pendingSaves.add(new PendingSave(fi.index, known, fi.name,
+                                    resolveMime(fi.mime, fi.name), fi.sha256, true));
+                            submitChunkPreview(known, fi.index + 1, Math.max(expect, fi.total), all);
                         } else if (curPart.exists() && fi.size >= 0 && curPart.length() == fi.size) {
                             //pri added by zhuyang,Batch 4: a matching .part from an earlier connection counts as already received,20261017
                             try {
                                 if (fi.sha256.equalsIgnoreCase(TransferStore.sha256Of(curPart))) {
-                                    File stored = mStore.persistCompleted(fi.sha256, curPart);
-                                    if (stored != null) {
-                                        skip = true;
-                                        skippedFiles++;
-                                        curSkipIndex = fi.index;
-                                        sendSkip(link, fi.index);
-                                        Bus.log("传输: 第 " + (fi.index + 1)
-                                                + " 张 .part 已完整且哈希匹配,回 TYPE_SKIP;仅跳过网络传输,仍插入一份新的相册记录");
-                                        submitChunkFile(stored, fi.index + 1, Math.max(expect, fi.total),
-                                                all, true, fi.sha256);
-                                    }
+                                    skip = true;
+                                    skippedFiles++;
+                                    curSkipIndex = fi.index;
+                                    sendSkip(link, fi.index);
+                                    Bus.log("传输: 第 " + (fi.index + 1)
+                                            + " 张 .part 已完整且哈希匹配,回 TYPE_SKIP;仅跳过网络传输,仍插入一份新的相册记录");
+                                    pendingSaves.add(new PendingSave(fi.index, curPart, fi.name,
+                                            resolveMime(fi.mime, fi.name), fi.sha256, false));
+                                    submitChunkPreview(curPart, fi.index + 1, Math.max(expect, fi.total), all);
                                 }
                             } catch (Exception e) {
                                 Bus.log("传输: 检查已有 .part 失败,重新接收: " + e);
@@ -3067,7 +3065,7 @@ public class Xfer {
                     }
                     if (curFile != null) {
                         ChunkResult cr = closeChunk(curFile, curOut, curMd, curPart, curBytes,
-                                sid, Math.max(expect, curFile.total), all);
+                                sid, Math.max(expect, curFile.total), all, pendingSaves);
                         receivedFiles++;
                         if (cr.ok) {
                             okFiles++;
@@ -3126,7 +3124,8 @@ public class Xfer {
                             + failedFiles + " 张,已回 DONE_ACK(" + failedFiles + ")");
                     if (!metaInfoSeen) Bus.log("传输: 未收到 META_INFO,跳过存储预检(旧对端)");
                     mDoneNotified = true;
-                    enqueueTransferDone(all);
+                    //pri modify by zhuyang,Save the whole round in index order before the viewer is notified,20261019
+                    enqueueDeliveryAndDone(pendingSaves, all);
                     if (failedFiles > 0) {
                         //pri added by zhuyang,Batch 4: partial failure -> "成功 N 张，失败 M 张",20261017,start
                         final int ok = okTotal;
@@ -3267,10 +3266,31 @@ public class Xfer {
         }
     }
 
-    //pri modify by zhuyang,Batch 4: close one image, check size + SHA-256, keep a verified copy and queue it for MediaStore,20261019,start
+    //pri added by zhuyang,One verified image held until the whole round completes,20261019,start
+    private static final class PendingSave {
+        final int index;
+        final File file;
+        final String name;
+        final String mime;
+        final String sha256;
+        final boolean shared; // already lives in the completed store from an earlier round
+
+        PendingSave(int index, File file, String name, String mime, String sha256, boolean shared) {
+            this.index = index;
+            this.file = file;
+            this.name = name;
+            this.mime = mime;
+            this.sha256 = sha256;
+            this.shared = shared;
+        }
+    }
+    //pri added by zhuyang,One verified image held until the whole round completes,20261019,end
+
+    //pri modify by zhuyang,Batch 4: verify one image and hold it for end-of-round delivery; no MediaStore insert here,20261019,start
     private ChunkResult closeChunk(Proto.FileBegin fi, OutputStream out, MessageDigest md, File part,
                                    long bytes, String sid, int total,
-                                   java.util.ArrayList<Bitmap> all) {
+                                   java.util.ArrayList<Bitmap> all,
+                                   java.util.ArrayList<PendingSave> pending) {
         try { if (out != null) out.close(); } catch (Exception ignored) {}
         if (fi == null) return new ChunkResult(false, "缺少图片元信息");
         int human = fi.index + 1;
@@ -3293,62 +3313,79 @@ public class Xfer {
         } else {
             Bus.log("传输: 第 " + human + " 张 SHA-256 校验通过 " + got.substring(0, 12));
         }
-        File target = part;
-        boolean keep = false;
-        String markSha = null;
-        if (fi.sha256 != null) {
-            try {
-                File stored = mStore.persistCompleted(fi.sha256, part);
-                if (stored != null) {
-                    target = stored;
-                    keep = true;
-                    markSha = fi.sha256;
-                }
-            } catch (Exception e) {
-                Bus.log("传输: 第 " + human + " 张已完成校验,但保存去重副本失败(仍入库,不参与跨轮去重): " + e);
-            }
-        }
-        submitChunkFile(target, human, Math.max(fi.total, total), all, keep, markSha);
+        pending.add(new PendingSave(fi.index, part, fi.name, resolveMime(fi.mime, fi.name),
+                fi.sha256, false));
+        submitChunkPreview(part, human, Math.max(fi.total, total), all);
         return new ChunkResult(true, null);
     }
-    //pri modify by zhuyang,Batch 4: close one image, check size + SHA-256, keep a verified copy and queue it for MediaStore,20261019,end
+    //pri modify by zhuyang,Batch 4: verify one image and hold it for end-of-round delivery; no MediaStore insert here,20261019,end
 
-    //pri modify by zhuyang,Batch 4: queue one verified file; the sha256 set is updated only after the gallery insert succeeds,20261019,start
-    private void submitChunkFile(final File part, final int idx, final int exp,
-                                 final java.util.ArrayList<Bitmap> all,
-                                 final boolean keep, final String markSha) {
+    //pri added by zhuyang,Decode a verified file for the receive card; the album insert waits for DONE,20261019,start
+    private void submitChunkPreview(final File part, final int idx, final int exp,
+                                    final java.util.ArrayList<Bitmap> all) {
         final int bytes = (int) Math.min(Integer.MAX_VALUE, part.length());
         mIo.execute(new Runnable() {
             @Override public void run() {
                 final Bitmap bmp = decode(part);
-                final Uri savedUri = saveFileToGallery(part, "image/jpeg");
-                final boolean saved = savedUri != null;
-                if (saved) {
-                    mSavedUris.add(savedUri);
-                    if (mFirstSavedUri == null) mFirstSavedUri = savedUri;
-                    if (markSha != null) {
-                        mStore.markCompleted(markSha, part);
-                        Bus.log("传输: 第 " + idx + " 张已入库,按 sha256 登记供后续跨轮去重");
-                    }
-                }
                 synchronized (all) { all.add(bmp); }
-                //pri added by zhuyang,Batch 4: keep the completed copy only when it is tracked or already shared,20261019
-                if (!keep || (markSha != null && !saved)) {
-                    try { part.delete(); } catch (Throwable ignored) {}
-                }
                 mMain.post(new Runnable() {
-                    @Override public void run() { mListener.onImageReceived(idx, exp, bmp, bytes, saved); }
+                    @Override public void run() { mListener.onImageReceived(idx, exp, bmp, bytes, false); }
+                });
+            }
+        });
+    }
+    //pri added by zhuyang,Decode a verified file for the receive card; the album insert waits for DONE,20261019,end
+
+    //pri added by zhuyang,Insert every verified image of this round in index order, then notify the viewer,20261019,start
+    private void enqueueDeliveryAndDone(final java.util.ArrayList<PendingSave> pending,
+                                        final java.util.ArrayList<Bitmap> all) {
+        mIo.execute(new Runnable() {
+            @Override public void run() {
+                deliverPending(pending);
+                final java.util.List<Bitmap> list;
+                synchronized (all) { list = new java.util.ArrayList<Bitmap>(all); }
+                mMain.post(new Runnable() {
+                    @Override public void run() { mListener.onTransferDone(list); }
                 });
             }
         });
     }
 
-    //pri added by zhuyang,Batch 4: a repeat of completed content still gets a fresh MediaStore row, only its wire copy is skipped,20261019
-    private void submitCompletedCopy(final File known, final int idx, final int exp,
-                                     final java.util.ArrayList<Bitmap> all) {
-        submitChunkFile(known, idx, exp, all, true, null);
+    private void deliverPending(java.util.ArrayList<PendingSave> pending) {
+        java.util.Collections.sort(pending, new java.util.Comparator<PendingSave>() {
+            @Override public int compare(PendingSave a, PendingSave b) { return a.index - b.index; }
+        });
+        for (PendingSave p : pending) {
+            File file = p.file;
+            boolean moved = false;
+            if (!p.shared && p.sha256 != null) {
+                try {
+                    File stored = mStore.persistCompleted(p.sha256, file);
+                    if (stored != null) {
+                        file = stored;
+                        moved = true;
+                    }
+                } catch (Exception e) {
+                    Bus.log("传输: 第 " + (p.index + 1) + " 张保存去重副本失败(仍入库): " + e);
+                }
+            }
+            Uri savedUri = saveFileToGallery(file, p.name, p.mime);
+            if (savedUri != null) {
+                mSavedUris.add(savedUri);
+                if (mFirstSavedUri == null) mFirstSavedUri = savedUri;
+                if (p.sha256 != null && moved) mStore.markCompleted(p.sha256, file);
+                Bus.log("传输: 第 " + (p.index + 1) + " 张已存入相册"
+                        + (p.name == null ? "" : "(" + p.name + ")"));
+            } else {
+                Bus.log("传输: 第 " + (p.index + 1) + " 张存相册失败");
+                //pri added by zhuyang,Do not keep a completed copy that never reached the gallery,20261019
+                if (moved) {
+                    try { file.delete(); } catch (Throwable ignored) {}
+                }
+            }
+        }
     }
-    //pri modify by zhuyang,Batch 4: queue one verified file; the sha256 set is updated only after the gallery insert succeeds,20261019,end
+    //pri added by zhuyang,Insert every verified image of this round in index order, then notify the viewer,20261019,end
 
     //pri added by zhuyang,Decode + save one image off the socket thread, then report it,20261017
     private void submitImage(final byte[] data, final int idx, final int exp,
@@ -3562,6 +3599,8 @@ public class Xfer {
                         Uri uri = uris.get(i);
                         String mime = mCtx.getContentResolver().getType(uri);
                         if (mime == null) mime = "image/jpeg";
+                        //pri added by zhuyang,Send the source display name so the receiver can keep it,20261019
+                        String displayName = displayNameOf(uri);
                         //pri added by zhuyang,Batch 4: hash and stage while reading the source once, then stream the staged copy,20261017,start
                         MessageDigest md;
                         try {
@@ -3573,7 +3612,7 @@ public class Xfer {
                         long fileSize = staged.length();
                         String hash = sha256Hex(md);
                         try {
-                            byte[] meta = Proto.buildFileBegin(i, uris.size(), fileSize, mime, hash);
+                            byte[] meta = Proto.buildFileBegin(i, uris.size(), fileSize, mime, hash, displayName);
                             mWriteLock.lock();
                             try {
                                 writeBusinessFrame(send, Proto.TYPE_FILE_BEGIN, meta.length, meta);
@@ -3860,6 +3899,25 @@ public class Xfer {
         } catch (Throwable ignored) {}
         return -1;
     }
+
+    //pri added by zhuyang,Query the source display name for FILE_BEGIN name=; null when unavailable,20261019,start
+    private String displayNameOf(Uri uri) {
+        if (uri == null) return null;
+        android.database.Cursor c = null;
+        try {
+            c = mCtx.getContentResolver().query(uri,
+                    new String[]{android.provider.OpenableColumns.DISPLAY_NAME}, null, null, null);
+            if (c != null && c.moveToFirst() && !c.isNull(0)) return c.getString(0);
+        } catch (Throwable t) {
+            Bus.log("传输: 读取源文件名失败 " + t);
+        } finally {
+            if (c != null) {
+                try { c.close(); } catch (Throwable ignored) {}
+            }
+        }
+        return null;
+    }
+    //pri added by zhuyang,Query the source display name for FILE_BEGIN name=; null when unavailable,20261019,end
     //pri added by zhuyang,Wait for DONE_ACK: 0=OK, -1=protocol error, -2=timeout, -3=peer cancel, -4=link dead,20261017,end
 
     //pri added by zhuyang,Wait out the role window while reading frames: a peer ROLE(S) in the window is arbitrated by sid,20261017,start
@@ -4210,17 +4268,21 @@ public class Xfer {
         }
     }
 
-    //pri added by zhuyang,Batch 4: stream the verified .part into MediaStore; an empty row is deleted on a write failure,20261017,start
-    private Uri saveFileToGallery(File file, String mime) {
+    //pri modify by zhuyang,Use the peer's original name/MIME and dedupe inside Pictures/NfcTapDemo,20261019,start
+    private Uri saveFileToGallery(File file, String name, String mime) {
         if (Build.VERSION.SDK_INT < 29) return null;
         Uri u = null;
         try {
+            String resolvedMime = resolveMime(mime, name);
+            String base = Proto.sanitizeFileName(name);
+            if (base == null) base = "nfctap_" + System.currentTimeMillis();
+            String displayName = ensureExtension(base, resolvedMime);
+            String dir = android.os.Environment.DIRECTORY_PICTURES + "/NfcTapDemo";
+            displayName = uniqueDisplayName(displayName, dir);
             android.content.ContentValues v = new android.content.ContentValues();
-            v.put(android.provider.MediaStore.Images.Media.DISPLAY_NAME,
-                    "nfctap_" + System.currentTimeMillis() + ".jpg");
-            v.put(android.provider.MediaStore.Images.Media.MIME_TYPE, mime);
-            v.put(android.provider.MediaStore.Images.Media.RELATIVE_PATH,
-                    android.os.Environment.DIRECTORY_PICTURES + "/NfcTapDemo");
+            v.put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, displayName);
+            v.put(android.provider.MediaStore.Images.Media.MIME_TYPE, resolvedMime);
+            v.put(android.provider.MediaStore.Images.Media.RELATIVE_PATH, dir);
             u = mCtx.getContentResolver().insert(
                     android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, v);
             if (u == null) return null;
@@ -4237,6 +4299,7 @@ public class Xfer {
                 try { in.close(); } catch (Exception ignored) {}
                 try { if (os != null) os.close(); } catch (Exception ignored) {}
             }
+            Bus.log("传输: 已写入相册 " + displayName + " (" + resolvedMime + ")");
             return u;
         } catch (Throwable t) {
             Bus.log("传输: 存相册失败 " + t);
@@ -4246,5 +4309,72 @@ public class Xfer {
             return null;
         }
     }
-    //pri added by zhuyang,Batch 4: stream the verified .part into MediaStore; an empty row is deleted on a write failure,20261017,end
+
+    //pri added by zhuyang,Empty MIME falls back to the name suffix and then JPEG,20261019,start
+    private static String resolveMime(String mime, String name) {
+        if (mime != null && !mime.trim().isEmpty()) return mime;
+        String guessed = guessMime(name);
+        return guessed == null ? "image/jpeg" : guessed;
+    }
+
+    private static String guessMime(String name) {
+        String n = name == null ? "" : name.toLowerCase(Locale.US);
+        if (n.endsWith(".png")) return "image/png";
+        if (n.endsWith(".webp")) return "image/webp";
+        if (n.endsWith(".jpg") || n.endsWith(".jpeg")) return "image/jpeg";
+        return null;
+    }
+
+    private static String extensionForMime(String mime) {
+        String m = mime == null ? "" : mime.toLowerCase(Locale.US);
+        if ("image/png".equals(m)) return ".png";
+        if ("image/webp".equals(m)) return ".webp";
+        return ".jpg";
+    }
+
+    private static boolean hasExtension(String name) {
+        int dot = name.lastIndexOf('.');
+        return dot > 0 && dot < name.length() - 1;
+    }
+
+    //pri added by zhuyang,Keep the extension consistent with MIME: append one only when the name has none,20261019
+    private static String ensureExtension(String name, String mime) {
+        return hasExtension(name) ? name : name + extensionForMime(mime);
+    }
+
+    //pri added by zhuyang,Append " (n)" before the extension when the album already holds that name,20261019,start
+    private String uniqueDisplayName(String name, String dir) {
+        if (!galleryNameExists(name, dir)) return name;
+        int dot = name.lastIndexOf('.');
+        String stem = dot > 0 ? name.substring(0, dot) : name;
+        String ext = dot > 0 ? name.substring(dot) : "";
+        for (int i = 1; i <= 20; i++) {
+            String candidate = stem + " (" + i + ")" + ext;
+            if (!galleryNameExists(candidate, dir)) return candidate;
+        }
+        return stem + " (" + System.currentTimeMillis() + ")" + ext;
+    }
+
+    private boolean galleryNameExists(String name, String dir) {
+        android.database.Cursor c = null;
+        try {
+            c = mCtx.getContentResolver().query(
+                    android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                    new String[]{android.provider.MediaStore.Images.Media._ID},
+                    android.provider.MediaStore.Images.Media.DISPLAY_NAME + "=? AND ("
+                            + android.provider.MediaStore.Images.Media.RELATIVE_PATH + "=? OR "
+                            + android.provider.MediaStore.Images.Media.RELATIVE_PATH + "=?)",
+                    new String[]{name, dir, dir + "/"}, null);
+            return c != null && c.moveToFirst();
+        } catch (Throwable t) {
+            Bus.log("传输: 查询同名照片失败 " + t);
+            return false;
+        } finally {
+            if (c != null) {
+                try { c.close(); } catch (Throwable ignored) {}
+            }
+        }
+    }
+    //pri added by zhuyang,Empty MIME falls back to the name suffix and then JPEG,20261019,end
+    //pri modify by zhuyang,Use the peer's original name/MIME and dedupe inside Pictures/NfcTapDemo,20261019,end
 }

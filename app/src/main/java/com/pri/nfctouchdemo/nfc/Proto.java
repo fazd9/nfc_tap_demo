@@ -95,13 +95,16 @@ public final class Proto {
         public final long size;
         public final String mime;
         public final String sha256; //pri added by zhuyang,Batch 4: lowercase SHA-256 of the image bytes (null = old peer, skip the check),20261017
+        //pri added by zhuyang,Sanitized original display name (null = old peer without name=),20261019
+        public final String name;
 
-        FileBegin(int index, int total, long size, String mime, String sha256) {
+        FileBegin(int index, int total, long size, String mime, String sha256, String name) {
             this.index = index;
             this.total = total;
             this.size = size;
             this.mime = mime;
             this.sha256 = sha256;
+            this.name = name;
         }
     }
 
@@ -309,15 +312,41 @@ public final class Proto {
 
     //pri added by zhuyang,FILE_BEGIN / DONE / DONE_ACK / CANCEL codecs for the chunked delivery,20261017,start
     public static byte[] buildFileBegin(int index, int total, long size, String mime) {
-        return buildFileBegin(index, total, size, mime, null);
+        return buildFileBegin(index, total, size, mime, null, null);
     }
 
     //pri added by zhuyang,Batch 4: append h=<sha256hex>; omitted for an unknown hash,20261017
     public static byte[] buildFileBegin(int index, int total, long size, String mime, String sha256) {
+        return buildFileBegin(index, total, size, mime, sha256, null);
+    }
+
+    //pri added by zhuyang,Append name=<sanitized display name>; omitted for old peers or an unknown name,20261019
+    public static byte[] buildFileBegin(int index, int total, long size, String mime, String sha256, String name) {
         String s = "i=" + index + "|n=" + total + "|s=" + size + "|m=" + (mime == null ? "" : mime);
         if (isHex64(sha256)) s += "|h=" + sha256.toLowerCase(java.util.Locale.US);
+        String safe = sanitizeFileName(name);
+        if (safe != null) s += "|name=" + safe;
         return s.getBytes(StandardCharsets.UTF_8);
     }
+
+    //pri added by zhuyang,Keep only ASCII alnum plus . _ - and cap at 64 chars so name= stays delimiter-safe,20261019,start
+    public static String sanitizeFileName(String raw) {
+        if (raw == null) return null;
+        String s = raw.trim();
+        if (s.isEmpty()) return null;
+        StringBuilder sb = new StringBuilder(Math.min(s.length(), 64));
+        for (int i = 0; i < s.length() && sb.length() < 64; i++) {
+            char c = s.charAt(i);
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+                    || (c >= '0' && c <= '9') || c == '.' || c == '_' || c == '-') {
+                sb.append(c);
+            } else {
+                sb.append('_');
+            }
+        }
+        return sb.length() == 0 ? null : sb.toString();
+    }
+    //pri added by zhuyang,Keep only ASCII alnum plus . _ - and cap at 64 chars so name= stays delimiter-safe,20261019,end
 
     public static FileBegin parseFileBegin(byte[] data) {
         if (data == null) return null;
@@ -326,6 +355,7 @@ public final class Proto {
         long size = -1;
         String mime = null;
         String sha = null;
+        String name = null;
         String text = new String(data, StandardCharsets.UTF_8);
         for (String kv : text.split("\\|")) {
             int eq = kv.indexOf('=');
@@ -343,13 +373,15 @@ public final class Proto {
                     mime = v;
                 } else if ("h".equals(k)) {
                     sha = isHex64(v) ? v.toLowerCase(java.util.Locale.US) : null; //pri added by zhuyang,Batch 4: malformed hash is skipped,20261017
+                } else if ("name".equals(k)) {
+                    name = sanitizeFileName(v); //pri added by zhuyang,Defensive re-sanitize of the peer-supplied name,20261019
                 }
             } catch (NumberFormatException e) {
                 return null;
             }
         }
         if (index < 0 || total <= 0 || index >= total || size < -1) return null;
-        return new FileBegin(index, total, size, mime, sha);
+        return new FileBegin(index, total, size, mime, sha, name);
     }
 
     //pri added by zhuyang,Batch 4: META_INFO "n=<total>|b=<totalBytes>", sent right after META,20261017,start
