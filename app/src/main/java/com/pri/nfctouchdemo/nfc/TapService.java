@@ -18,6 +18,8 @@ import com.pri.nfctouchdemo.viewer.ImageViewerActivity; //pri added by zhuyang,D
 import java.io.File;
 import java.io.FileOutputStream;
 import java.util.ArrayList;
+import java.util.concurrent.CountDownLatch; //pri added by zhuyang,Tap-time gallery pull reply latch,20261019
+import java.util.concurrent.TimeUnit;     //pri added by zhuyang,Tap-time gallery pull reply wait,20261019
 
 /**
  * 常驻服务:承载"碰一碰"主流程(对齐产品视频)。
@@ -84,7 +86,25 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
     //pri added by zhuyang,Rule: what the gallery last published is what a tap sends. A published selection therefore outranks,20261016
     //pri added by zhuyang,the screen-reading fallback (GalleryPickup, Google Photos only) - see onPeer. Clearing is not optional:,20261016
     //pri added by zhuyang,a selection left behind would be sent as if it were what the user is looking at,20261016,end
+    //
+    //pri added by zhuyang,REQUEST  the reverse direction: before each tap the service asks the gallery what it shows right now,,20261019
+    //pri added by zhuyang,so an unchanged selection is still fresh after a send consumed it (see requestGallerySelection):,20261019
+    //pri added by zhuyang,    Intent r = new Intent("com.pri.nfcdemo.REQUEST_SELECTION");,20261019
+    //pri added by zhuyang,    r.setPackage("com.pri.debuggallery");,20261019
+    //pri added by zhuyang,    context.sendBroadcast(r);,20261019
+    //pri added by zhuyang,The gallery answers with PUBLISH (what is on screen) or CLEAR (nothing is),20261019
     public static final String ACTION_CLEAR_SELECTION = "com.pri.nfcdemo.CLEAR_SELECTION";
+
+    //pri added by zhuyang,Tap-time pull: every tap asks the gallery what it is showing right now instead of trusting the,20261019,start
+    //pri added by zhuyang,selection pushed when it last changed (onImageSent clears PENDING, so an unchanged selection would,20261019
+    //pri added by zhuyang,otherwise be missing on the next tap). The request is an explicit-package broadcast; the gallery answers,20261019
+    //pri added by zhuyang,with the same ACTION_SEND_MULTIPLE / ACTION_CLEAR_SELECTION it already publishes and clears with,20261019,end
+    public static final String ACTION_REQUEST_SELECTION = "com.pri.nfcdemo.REQUEST_SELECTION";
+    private static final String GALLERY_PKG = "com.pri.debuggallery";
+    private static final long GALLERY_REPLY_WAIT_MS = 300L;
+
+    //pri added by zhuyang,Released on either reply intent; the tap waits on it off the main thread for at most 300ms,20261019
+    private static volatile CountDownLatch sSelectionReply;
 
     //pri added by zhuyang,True while the selection in hand was published by a gallery (ACTION_SEND_MULTIPLE) and not cleared,20261016,start
     //pri added by zhuyang,since - i.e. while "a gallery is reporting what the user is looking at". It gates the screen-reading fallback,20261016
@@ -180,6 +200,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
                 savePending();
                 Bus.log("服务: 收到相册当前选中 " + PENDING.size() + " 张照片(等碰一碰)");
             }
+            signalSelectionReply(); //pri added by zhuyang,Answer to the tap-time pull: release it early,20261019
         }
         //pri added by zhuyang,The gallery says "nothing selected on screen any more" - see the contract above ACTION_CLEAR_SELECTION,20261016,start
         //pri added by zhuyang,Clearing is what keeps the next tap honest: without it a leftover selection would be sent while the user,20261016
@@ -189,6 +210,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
             PENDING.clear();
             sPublished = false;
             savePending();
+            signalSelectionReply(); //pri added by zhuyang,Answer to the tap-time pull: release it early,20261019
         }
         // ---- 以下三个分支:动效层(OverlayService)的"用户操作回执",等价于旧 SendPage/ReceivePage 的 Listener ----
         if (intent != null && OverlayService.ACTION_UI_SEND_CONFIRMED.equals(intent.getAction())) {
@@ -258,6 +280,12 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         return START_STICKY;
     }
 
+    //pri added by zhuyang,Tap-time pull reply arrived: wake the worker that is waiting before falling through to the round,20261019
+    private static void signalSelectionReply() {
+        CountDownLatch reply = sSelectionReply;
+        if (reply != null) reply.countDown();
+    }
+
     /** 选中照片持久化(URI 读取授权按 uid 保留,重启进程后仍可读)。 */
     private void savePending() {
         StringBuilder sb = new StringBuilder();
@@ -283,7 +311,47 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
     @Override public void onLog(String line) {}
 
     @Override
-    public void onPeer(String payload, String role) {
+    public void onPeer(final String payload, final String role) {
+        //pri added by zhuyang,Tap-time pull: ask the gallery first, then continue with the old body once it answers or times out,20261019
+        requestGallerySelection(payload, role);
+    }
+
+    //pri added by zhuyang,Explicit-package broadcast so only our gallery receives the request. The wait is on a worker thread and,20261019,start
+    //pri added by zhuyang,capped at GALLERY_REPLY_WAIT_MS: a gallery that is absent / does not know the contract simply falls through,20261019
+    //pri added by zhuyang,to onPeerAfterSelection with the old behaviour,20261019,end
+    private void requestGallerySelection(final String payload, final String role) {
+        final CountDownLatch latch = new CountDownLatch(1);
+        sSelectionReply = latch;
+        final long startedAt = android.os.SystemClock.elapsedRealtime();
+        try {
+            sendBroadcast(new Intent(ACTION_REQUEST_SELECTION).setPackage(GALLERY_PKG));
+        } catch (Throwable t) {
+            android.util.Log.d("NfcTapDemo", "gallery selection request failed: " + t);
+        }
+        new Thread(new Runnable() { @Override public void run() {
+            boolean replied = false;
+            try {
+                replied = latch.await(GALLERY_REPLY_WAIT_MS, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException ignored) {
+            }
+            if (sSelectionReply == latch) sSelectionReply = null;
+            final boolean gotReply = replied;
+            final long cost = android.os.SystemClock.elapsedRealtime() - startedAt;
+            mMain.post(new Runnable() { @Override public void run() {
+                if (gotReply) {
+                    Bus.log("碰一碰: 相册已回复当前选择 " + PENDING.size() + " 张(拉取 " + cost + "ms)");
+                } else {
+                    android.util.Log.d("NfcTapDemo", "gallery selection request timed out in " + cost + "ms");
+                }
+                onPeerAfterSelection(payload, role);
+            }});
+        }}, "gallery-selection-pull").start();
+    }
+
+    //pri added by zhuyang,Former onPeer body, unchanged: it decides this round's role from PENDING,20261019,start
+    //pri added by zhuyang,Split out only so the tap-time pull can run first without the NFC path waiting on a gallery that is,20261019
+    //pri added by zhuyang,absent or does not answer,20261019,end
+    private void onPeerAfterSelection(final String payload, final String role) {
         //pri added by zhuyang,Batch 6: NFC role decides the single AP owner,20261017
         //pri added by zhuyang,D1: drop the previous round's fail banner the moment a new round starts,20261014
         startService(OverlayService.hideFailBannerIntent(this));

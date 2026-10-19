@@ -25,5 +25,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- pri added by zhuyang,Tap-time pull: answer the tap service's explicit request with the current selection. Manifest,20261019,start -->
+        <!-- pri added by zhuyang,registration is required so the process can be started for the request even when the activity is gone,20261019,end -->
+        <receiver
+            android:name=".SelectionRequestReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="com.pri.nfcdemo.REQUEST_SELECTION" />
+            </intent-filter>
+        </receiver>
     </application>
 </manifest>

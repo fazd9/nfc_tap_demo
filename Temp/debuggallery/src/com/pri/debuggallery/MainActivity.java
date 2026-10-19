@@ -3,6 +3,7 @@ package com.pri.debuggallery;
 import android.app.Activity;
 import android.content.ComponentName;
 import android.content.ContentUris;
+import android.content.Context; //pri added by zhuyang,Tap-time pull reply helper takes a Context,20261019
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
@@ -51,8 +52,14 @@ public class MainActivity extends Activity {
     private static final String SVC_PKG = "com.pri.nfctouchdemo";
     private static final String SVC_CLS = "com.pri.nfctouchdemo.nfc.TapService";
     private static final String ACTION_CLEAR_SELECTION = "com.pri.nfcdemo.CLEAR_SELECTION";
+    //pri added by zhuyang,Tap-time pull: the action com.pri.nfctouchdemo broadcasts before each tap,20261019
+    private static final String ACTION_REQUEST_SELECTION = "com.pri.nfcdemo.REQUEST_SELECTION";
     //pri added by zhuyang,Longest side the full-screen photo is decoded to: the file can be far bigger than the panel,20261016
     private static final int VIEW_MAX = 2048;
+
+    //pri added by zhuyang,Tap-time pull: what is selected on screen right now, readable from the manifest receiver even after,20261019,start
+    //pri added by zhuyang,the activity was recreated. Maintained by publishCurrent / cleared by clearPublished,20261019,end
+    private static volatile ArrayList<Uri> sCurrentUris = new ArrayList<Uri>();
 
     private TextView mTitle;
     private TextView mHint;
@@ -263,7 +270,7 @@ public class MainActivity extends Activity {
 
     //pri modify by zhuyang,The intent is now built from a Uri list: the selection is not always the ticked set any more (an,20261016,start
     //pri modify by zhuyang,open photo is a selection of one),20261016,end
-    private Intent buildShareIntent(ArrayList<Uri> uris) {
+    private static Intent buildShareIntent(ArrayList<Uri> uris) {
         Intent i = new Intent(Intent.ACTION_SEND_MULTIPLE);
         i.setType("image/*");
         i.putParcelableArrayListExtra(Intent.EXTRA_STREAM, uris);
@@ -285,6 +292,7 @@ public class MainActivity extends Activity {
             for (Long id : mSelected) uris.add(mediaUri(id));
         }
         if (uris.isEmpty()) { clearPublished(); return; }
+        sCurrentUris = uris; //pri added by zhuyang,Tap-time pull: the receiver answers with exactly this list,20261019
         try {
             Intent i = buildShareIntent(uris);
             i.setComponent(new ComponentName(SVC_PKG, SVC_CLS));
@@ -301,6 +309,7 @@ public class MainActivity extends Activity {
     //pri added by zhuyang,something: with nothing published there is nothing to clear, and the service must not be poked awake - from,20261016
     //pri added by zhuyang,the background that would also be a background service start,20261016,end
     private void clearPublished() {
+        sCurrentUris = new ArrayList<Uri>(); //pri added by zhuyang,Tap-time pull: nothing on screen must answer as a selection,20261019
         if (!mPublished) return;
         mPublished = false;
         try {
@@ -309,6 +318,26 @@ public class MainActivity extends Activity {
             startService(i);
         } catch (Throwable t) {
             android.util.Log.e("DebugGallery", "clear fail " + t);
+        }
+    }
+
+    //pri added by zhuyang,Tap-time pull: answer the service with what is selected right now. An empty answer is a CLEAR reply,20261019,start
+    //pri added by zhuyang,so the service never falls back to a stale PENDING just because there was nothing to report,20261019,end
+    public static void republishCurrentSelection(Context context) {
+        ArrayList<Uri> uris = sCurrentUris;
+        try {
+            if (uris.isEmpty()) {
+                Intent c = new Intent(ACTION_CLEAR_SELECTION);
+                c.setComponent(new ComponentName(SVC_PKG, SVC_CLS));
+                context.startService(c);
+                return;
+            }
+            Intent i = buildShareIntent(new ArrayList<Uri>(uris));
+            i.setComponent(new ComponentName(SVC_PKG, SVC_CLS));
+            for (Uri u : uris) context.grantUriPermission(SVC_PKG, u, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            context.startService(i);
+        } catch (Throwable t) {
+            android.util.Log.e("DebugGallery", "republish fail " + t);
         }
     }
 
