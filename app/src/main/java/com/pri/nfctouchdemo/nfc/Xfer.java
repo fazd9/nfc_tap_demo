@@ -105,6 +105,8 @@ public class Xfer {
     //pri added by zhuyang,Chunked delivery: 128KB wire chunks, a 20s completion handshake and 4Hz progress posts,20261017,start
     private static final int CHUNK_SIZE = 128 * 1024;
     private static final int DONE_ACK_TIMEOUT_MS = 20000;
+    //pri added by zhuyang,Wait this long after FILE_BEGIN for the receiver's TYPE_SKIP before streaming DATA,20261019
+    private static final int SKIP_WAIT_MS = 300;
     private static final long PROGRESS_NOTIFY_MS = 250;
     //pri added by zhuyang,Chunked delivery: 128KB wire chunks, a 20s completion handshake and 4Hz progress posts,20261017,end
     //pri added by zhuyang,Batch 4: free-space headroom demanded on top of the announced payload,20261017
@@ -224,7 +226,6 @@ public class Xfer {
         //pri added by zhuyang,Per-link liveness state shared by the reader, writer and heartbeat,20261017,end
         String peerRole;        // ROLE read right after HELLO_ACK (null = old peer/timeout)
         String peerSid;         // sid carried by that ROLE
-        String peerHave;        //pri added by zhuyang,Batch 4: receiver's completed-image bitmap from HELLO/HELLO_ACK,20261017
         Proto.Frame first;      // non-ROLE first frame already read (1a compatibility)
 
         Link(Socket s, DataInputStream in, DataOutputStream out,
@@ -274,7 +275,7 @@ public class Xfer {
 
     private final WifiP2pManager mP2p;
     private final WifiP2pManager.Channel mChannel;
-    private final TransferStore mStore; //pri added by zhuyang,Batch 4: incoming .part files and the resume bitmap,20261017
+    private final TransferStore mStore; //pri modify by zhuyang,Batch 4: incoming .part files plus the sha256 completion set,20261019
     private BroadcastReceiver mRx;
     private ServerSocket mServer;
     //pri added by zhuyang,Role convergence: the send channel and the inbound/stash channel are separate handles,20261017,start
@@ -535,7 +536,7 @@ public class Xfer {
             String hex = sb.toString();
             mDerivedSsid = "TShare-" + hex.substring(0, 6);
             mDerivedPass = "ts" + hex.substring(6, 22);
-            Bus.log("热点: 会话派生凭据 SSID=" + mDerivedSsid + ",pass=" + mDerivedPass);
+            Bus.log("热点: 会话派生凭据 SSID=" + mDerivedSsid + ",pass=***");
         } catch (Throwable t) {
             Bus.log("热点: 派生凭据失败,退回固定凭据: " + t);
         }
@@ -911,6 +912,26 @@ public class Xfer {
     }
     //pri added by zhuyang,Explicit completion frames: DONE_ACK and CANCEL share the business write lock,20261017,end
 
+    //pri added by zhuyang,TYPE_SKIP: "this content hash is already complete, do not stream its DATA",20261019,start
+    private void sendSkip(Link link, int index) {
+        if (link == null || link.s.isClosed()) return;
+        try {
+            byte[] b = Proto.buildSkip(index);
+            mWriteLock.lock();
+            try {
+                Proto.writeFrame(link.out, Proto.TYPE_SKIP, b.length, b);
+                link.out.flush();
+                markTx(link);
+                Bus.log("传输: 已回 TYPE_SKIP(index=" + index + ")");
+            } finally {
+                mWriteLock.unlock();
+            }
+        } catch (Exception e) {
+            Bus.log("传输: 回 TYPE_SKIP 失败 " + e);
+        }
+    }
+    //pri added by zhuyang,TYPE_SKIP: "this content hash is already complete, do not stream its DATA",20261019,end
+
     //pri added by zhuyang,Post a throttled progress snapshot on the main thread; force bypasses the 250ms gate,20261017
     private void postProgress(TransferProgress p, boolean force) {
         if (p == null) return;
@@ -922,13 +943,9 @@ public class Xfer {
     }
     //pri added by zhuyang,Liveness helpers: mark a written frame and write a possibly large frame with progress,20261017,end
 
-    //pri added by zhuyang,Batch 4: receive session key (the sender's sid) shared by .part paths and the resume bitmap,20261017
+    //pri modify by zhuyang,Batch 4: receive session key (the sender's sid) for .part paths only; resume uses sha256,20261019
     private String storeSid() {
         return TransferStore.sanitizeSid(mPeerSid != null ? mPeerSid : Bus.sid());
-    }
-
-    private String haveHex() {
-        return mStore.haveHex(storeSid());
     }
 
     private static String sha256Hex(MessageDigest md) {
@@ -1308,8 +1325,8 @@ public class Xfer {
             if (mPeerSid == null) {
                 Bus.log("传输: [未认证] 本轮无对方 sid,跳过 HELLO/ROLE 握手(调试路径)");
             } else {
-                //pri modify by zhuyang,Batch 4: advertise the completed-image bitmap so the sender can resume,20261017
-                byte[] hello = Proto.buildHello(Bus.sid(), localRole(), mHasPhotos, haveHex());
+                //pri modify by zhuyang,Batch 4: do not emit have= any more; resume is decided per FILE_BEGIN sha256,20261019
+                byte[] hello = Proto.buildHello(Bus.sid(), localRole(), mHasPhotos);
                 Proto.writeFrame(out, Proto.TYPE_HELLO, hello.length, hello);
                 out.flush();
                 Proto.Frame f = Proto.readFrame(in, Proto.HELLO_TIMEOUT_MS, Proto.MAX_HELLO_LEN);
@@ -1334,8 +1351,8 @@ public class Xfer {
                 Bus.log("传输: [认证] HELLO_ACK 校验通过,对方角色=" + ack.role
                         + ",本机角色=" + localRole());
                 Link link = new Link(s, in, out, rxAt, txAt);
-                link.peerHave = ack.have; //pri added by zhuyang,Batch 4: resume bitmap of the peer receiver,20261017
-                if (ack.have != null) Bus.log("传输: [认证] 对端已有图片位图 have=" + ack.have);
+                //pri modify by zhuyang,Batch 4: have= is format compatibility only; skip decisions use FILE_BEGIN sha256,20261019
+                Bus.log("传输: [认证] 续传按 sha256 判定,have= 位图仅保留格式兼容,不再用于判定");
                 //pri added by zhuyang,Read the peer's ROLE now so a simultaneous swipe can be arbitrated before we offer,20261017,start
                 try {
                     Proto.Frame pf = Proto.readFrame(in, ROLE_READ_TIMEOUT_MS, Proto.MAX_ROLE_LEN);
@@ -2114,8 +2131,8 @@ public class Xfer {
                 failInbound(new XferError(XferError.Stage.CONNECT, XferError.AUTH_FAILED, "HELLO 的 sid/版本不匹配"));
                 return;
             }
-            //pri modify by zhuyang,Batch 4: answer with our own completed bitmap; keep the peer's on the Link,20261017,start
-            byte[] ack = Proto.buildHelloAck(Bus.sid(), localRole(), haveHex());
+            //pri modify by zhuyang,Batch 4: do not emit have= any more; resume is decided per FILE_BEGIN sha256,20261019
+            byte[] ack = Proto.buildHelloAck(Bus.sid(), localRole());
             Proto.writeFrame(out, Proto.TYPE_HELLO_ACK, ack.length, ack);
             byte[] role = Proto.buildRole(localRole(), Bus.sid());
             Proto.writeFrame(out, Proto.TYPE_ROLE, role.length, role);
@@ -2124,9 +2141,9 @@ public class Xfer {
                     + ",对方角色=" + hello.role + ",本机角色=" + localRole());
             maybeCloseHotspotForLan(s);
             Link link = new Link(s, in, out, rxAt, txAt);
-            link.peerHave = hello.have;
-            if (hello.have != null) Bus.log("传输: [认证] 对端已有图片位图 have=" + hello.have);
-            //pri modify by zhuyang,Batch 4: answer with our own completed bitmap; keep the peer's on the Link,20261017,end
+            //pri modify by zhuyang,Batch 4: have= is format compatibility only; skip decisions use FILE_BEGIN sha256,20261019
+            Bus.log("传输: [认证] 续传按 sha256 判定,have= 位图仅保留格式兼容,不再用于判定");
+            //pri modify by zhuyang,Batch 4: have= is format compatibility only; skip decisions use FILE_BEGIN sha256,20261019,end
             mUnauthCount.decrementAndGet();
             released = true;
             s.setSoTimeout(ROLE_READ_TIMEOUT_MS);
@@ -2556,16 +2573,16 @@ public class Xfer {
         int receivedFiles = 0;
         int okFiles = 0;
         int failedFiles = 0;
+        int skippedFiles = 0; //pri added by zhuyang,Images already completed by sha256 and answered with TYPE_SKIP,20261019
         String lastFailReason = null;
         boolean metaInfoSeen = false;
         Proto.FileBegin curFile = null;
         OutputStream curOut = null;
         MessageDigest curMd = null;
         File curPart = null;
-        boolean curReuse = false;
+        int curSkipIndex = -1; //pri added by zhuyang,Index answered with TYPE_SKIP; late DATA is discarded without writing,20261019
         long curBytes = 0;
-        final String sid = storeSid(); //pri added by zhuyang,Batch 4: .part paths and resume bitmap are bound to this session,20261017
-        final String advertisedHave = mStore.haveHex(sid); //pri added by zhuyang,Batch 4: the bitmap this connection advertised in HELLO,20261017
+        final String sid = storeSid(); //pri modify by zhuyang,Batch 4: .part paths are still scoped to this session,20261019
         //pri added by zhuyang,Batch 5: a live peer that keeps PINGing must not extend the offer wait forever,20261017
         final long offerDeadline = SystemClock.elapsedRealtime() + OFFER_WAIT_MS;
         try {
@@ -2576,11 +2593,6 @@ public class Xfer {
             mDoneNotified = false;
             //pri added by zhuyang,Reset the per-connection verdict/done flags,20261014,end
             startHeartbeat(link, true);   //pri added by zhuyang,Heartbeat covers the offer/verdict wait and the receive loop,20261017
-            //pri added by zhuyang,Batch 4: completed indices are advertised so the peer can resume at image level,20261017,start
-            if (!"0000000000000000".equals(advertisedHave)) {
-                Bus.log("传输: 本轮已在 HELLO 告知对端已有图片位图 have=" + advertisedHave);
-            }
-            //pri added by zhuyang,Batch 4: completed indices are advertised so the peer can resume at image level,20261017,end
             //pri added by zhuyang,Replay frames buffered on the send link before the role loss,20261017,start
             final java.util.ArrayDeque<Proto.Frame> replay = new java.util.ArrayDeque<Proto.Frame>();
             if (preRead != null) replay.add(preRead);
@@ -2709,7 +2721,7 @@ public class Xfer {
                     }
                     if (curFile != null) {
                         //pri modify by zhuyang,Batch 4: verify size/SHA-256 and only then insert into MediaStore,20261017
-                        ChunkResult cr = closeChunk(curFile, curOut, curMd, curPart, curReuse, curBytes,
+                        ChunkResult cr = closeChunk(curFile, curOut, curMd, curPart, curBytes,
                                 sid, Math.max(expect, curFile.total), all);
                         receivedFiles++;
                         if (cr.ok) {
@@ -2722,29 +2734,50 @@ public class Xfer {
                         }
                         //pri modify by zhuyang,Batch 4: verify size/SHA-256 and only then insert into MediaStore,20261017
                     }
-                    curFile = fi;
+                    curFile = null;
                     curOut = null;
                     curMd = null;
                     curPart = mStore.partFile(sid, fi.index);
-                    curReuse = false;
+                    curSkipIndex = -1;
                     curBytes = 0;
                     expectedSeq = 0;
                     chunkedStarted = true;
-                    //pri added by zhuyang,Batch 4: a matching .part from an earlier connection counts as already received,20261017,start
-                    if (fi.sha256 != null && curPart.exists() && fi.size >= 0
-                            && curPart.length() == fi.size) {
-                        try {
-                            if (fi.sha256.equalsIgnoreCase(TransferStore.sha256Of(curPart))) {
-                                curReuse = true;
-                                mStore.commit(sid, fi.index);
-                                submitChunkFile(curPart, fi.index + 1, Math.max(expect, fi.total), all);
-                                Bus.log("传输: 第 " + (fi.index + 1) + " 张 .part 已完整且哈希匹配,直接视为已完成");
+                    //pri modify by zhuyang,Batch 4: decide by content hash, never by the index bitmap,20261019,start
+                    boolean skip = false;
+                    if (fi.sha256 != null) {
+                        File known = mStore.completedFile(fi.sha256);
+                        if (known != null) {
+                            skip = true;
+                            skippedFiles++;
+                            curSkipIndex = fi.index;
+                            sendSkip(link, fi.index);
+                            Bus.log("传输: 第 " + (fi.index + 1) + " 张命中已完成(sha256="
+                                    + fi.sha256.substring(0, 12) + "),回 TYPE_SKIP,不再接收 DATA");
+                            Bus.log("传输: 第 " + (fi.index + 1) + " 张为重复图:仅跳过网络传输,仍插入一份新的相册记录");
+                            submitCompletedCopy(known, fi.index + 1, Math.max(expect, fi.total), all);
+                        } else if (curPart.exists() && fi.size >= 0 && curPart.length() == fi.size) {
+                            //pri added by zhuyang,Batch 4: a matching .part from an earlier connection counts as already received,20261017
+                            try {
+                                if (fi.sha256.equalsIgnoreCase(TransferStore.sha256Of(curPart))) {
+                                    File stored = mStore.persistCompleted(fi.sha256, curPart);
+                                    if (stored != null) {
+                                        skip = true;
+                                        skippedFiles++;
+                                        curSkipIndex = fi.index;
+                                        sendSkip(link, fi.index);
+                                        Bus.log("传输: 第 " + (fi.index + 1)
+                                                + " 张 .part 已完整且哈希匹配,回 TYPE_SKIP;仅跳过网络传输,仍插入一份新的相册记录");
+                                        submitChunkFile(stored, fi.index + 1, Math.max(expect, fi.total),
+                                                all, true, fi.sha256);
+                                    }
+                                }
+                            } catch (Exception e) {
+                                Bus.log("传输: 检查已有 .part 失败,重新接收: " + e);
                             }
-                        } catch (Exception e) {
-                            Bus.log("传输: 检查已有 .part 失败,重新接收: " + e);
                         }
                     }
-                    if (!curReuse) {
+                    if (!skip) {
+                        curFile = fi;
                         try {
                             curOut = mStore.open(sid, fi.index);
                         } catch (Exception e) {
@@ -2764,16 +2797,43 @@ public class Xfer {
                             break;
                         }
                     }
-                    //pri added by zhuyang,Batch 4: a matching .part from an earlier connection counts as already received,20261017,end
+                    //pri modify by zhuyang,Batch 4: decide by content hash, never by the index bitmap,20261019,end
                     if (fi.sha256 == null) Bus.log("传输: 第 " + (fi.index + 1) + " 张未携带 h=,跳过哈希校验(旧对端)");
                     progress.beginFile(fi.index + 1, fi.total, fi.size);
                     postProgress(progress, false);
-                    Bus.log("传输: 开始接收第 " + (fi.index + 1) + "/" + fi.total + " 张 " + fi.size + " 字节 " + fi.mime
-                            + (curReuse ? "(复用 .part)" : ""));
+                    if (skip) {
+                        Bus.log("传输: 跳过第 " + (fi.index + 1) + "/" + fi.total + " 张(内容已完成,不发 DATA)");
+                    } else {
+                        Bus.log("传输: 开始接收第 " + (fi.index + 1) + "/" + fi.total + " 张 " + fi.size + " 字节 " + fi.mime);
+                    }
                     continue;
                 }
                 if (type == Proto.TYPE_DATA) {
-                    if (curFile == null || (!curReuse && curOut == null)) {
+                    if (curFile == null) {
+                        if (curSkipIndex >= 0) {
+                            //pri added by zhuyang,Batch 4: tolerate a DATA race after TYPE_SKIP: discard it but count wire bytes,20261019
+                            if (frame.length < 4) {
+                                readError = "DATA 帧缺少序号";
+                                error = new XferError(XferError.Stage.TRANSFER, XferError.PROTOCOL_ERROR, readError);
+                                sendCancel(link, readError);
+                                break;
+                            }
+                            int seq = Proto.readSeq(frame.data);
+                            if (seq != expectedSeq) {
+                                readError = "数据块序号不连续(期望 " + expectedSeq + ",收到 " + seq + ")";
+                                error = new XferError(XferError.Stage.TRANSFER, XferError.PROTOCOL_ERROR, readError);
+                                Bus.log("传输: " + readError);
+                                sendCancel(link, readError);
+                                break;
+                            }
+                            expectedSeq++;
+                            rxBytes += frame.length - 4L;
+                            if (seq == 0) {
+                                Bus.log("传输: 第 " + (curSkipIndex + 1)
+                                        + " 张已回 TYPE_SKIP,对端仍在竞态发送,丢弃后续 DATA");
+                            }
+                            continue;
+                        }
                         readError = "未收到 FILE_BEGIN 就收到数据块";
                         error = new XferError(XferError.Stage.TRANSFER, XferError.PROTOCOL_ERROR, readError);
                         sendCancel(link, readError);
@@ -2793,20 +2853,18 @@ public class Xfer {
                         sendCancel(link, readError);
                         break;
                     }
-                    if (!curReuse) {
-                        try {
-                            curOut.write(frame.data, 4, frame.length - 4);
-                            curMd.update(frame.data, 4, frame.length - 4);
-                        } catch (Exception e) {
-                            readError = "写入临时文件失败: " + e;
-                            error = new XferError(XferError.Stage.TRANSFER,
-                                    String.valueOf(e).toLowerCase(java.util.Locale.US).contains("space")
-                                            ? XferError.NO_SPACE : XferError.PROTOCOL_ERROR, readError);
-                            sendCancel(link, readError);
-                            break;
-                        }
-                        curBytes += frame.length - 4L;
+                    try {
+                        curOut.write(frame.data, 4, frame.length - 4);
+                        curMd.update(frame.data, 4, frame.length - 4);
+                    } catch (Exception e) {
+                        readError = "写入临时文件失败: " + e;
+                        error = new XferError(XferError.Stage.TRANSFER,
+                                String.valueOf(e).toLowerCase(java.util.Locale.US).contains("space")
+                                        ? XferError.NO_SPACE : XferError.PROTOCOL_ERROR, readError);
+                        sendCancel(link, readError);
+                        break;
                     }
+                    curBytes += frame.length - 4L;
                     rxBytes += frame.length - 4L;
                     expectedSeq++;
                     progress.addBytes(frame.length - 4);
@@ -2822,7 +2880,7 @@ public class Xfer {
                         break;
                     }
                     if (curFile != null) {
-                        ChunkResult cr = closeChunk(curFile, curOut, curMd, curPart, curReuse, curBytes,
+                        ChunkResult cr = closeChunk(curFile, curOut, curMd, curPart, curBytes,
                                 sid, Math.max(expect, curFile.total), all);
                         receivedFiles++;
                         if (cr.ok) {
@@ -2837,26 +2895,29 @@ public class Xfer {
                         curOut = null;
                         curMd = null;
                         curPart = null;
-                        curReuse = false;
                         curBytes = 0;
                     }
-                    //pri modify by zhuyang,Batch 4: count check tolerates indices the sender skipped via have,20261017
-                    int announced = expect > 0 ? expect : receivedFiles;
-                    int skipped = Proto.bitmapCount(advertisedHave, announced);
-                    boolean countOk = done.count == receivedFiles
-                            && (receivedFiles == announced || receivedFiles == announced - skipped);
-                    if (!chunkedStarted || !countOk || done.totalBytes != rxBytes) {
+                    curSkipIndex = -1;
+                    //pri modify by zhuyang,Batch 4: TYPE_SKIP images count as completed; all-skipped needs no DATA,20261019
+                    int announced = expect > 0 ? expect : receivedFiles + skippedFiles;
+                    boolean allSkipped = announced > 0 && skippedFiles == announced;
+                    boolean countOk = done.count == announced;
+                    if ((!chunkedStarted && !allSkipped) || !countOk || done.totalBytes != rxBytes) {
                         readError = "完成校验失败(完成帧 " + done.count + " 张/" + done.totalBytes
-                                + "B,实收 " + receivedFiles + " 张/" + rxBytes + "B,预告 " + expect
-                                + " 张,跳过 " + skipped + " 张)";
+                                + "B,实收 " + receivedFiles + " 张/" + rxBytes + "B,预告 " + announced
+                                + " 张,跳过 " + skippedFiles + " 张)";
                         error = new XferError(XferError.Stage.TRANSFER, XferError.PROTOCOL_ERROR, readError);
                         Bus.log("传输: " + readError);
                         sendCancel(link, "完成校验失败");
                         break;
                     }
-                    //pri modify by zhuyang,Batch 4: count check tolerates indices the sender skipped via have,20261017
+                    //pri modify by zhuyang,Batch 4: TYPE_SKIP images count as completed; all-skipped needs no DATA,20261019
                     doneReceived = true;
-                    if (failedFiles > 0 && okFiles == 0) {
+                    if (allSkipped) {
+                        Bus.log("传输: 本轮 " + announced + " 张全部命中已完成(按 sha256),无数据传输");
+                    }
+                    final int okTotal = okFiles + skippedFiles;
+                    if (failedFiles > 0 && okTotal == 0) {
                         //pri added by zhuyang,Batch 4: every image failed -> report a transfer failure, with the frame counts acknowledged,20261017,start
                         failedNotified = true;
                         sendDoneAck(link, failedFiles);
@@ -2875,14 +2936,14 @@ public class Xfer {
                     progress.done();
                     postProgress(progress, true);
                     Bus.log("传输: 完成帧校验通过,共 " + done.count + " 张 " + done.totalBytes
-                            + " 字节,成功 " + okFiles + " 张,失败 " + failedFiles + " 张,已回 DONE_ACK("
-                            + failedFiles + ")");
+                            + " 字节,成功 " + okTotal + " 张(其中跳过 " + skippedFiles + " 张),失败 "
+                            + failedFiles + " 张,已回 DONE_ACK(" + failedFiles + ")");
                     if (!metaInfoSeen) Bus.log("传输: 未收到 META_INFO,跳过存储预检(旧对端)");
                     mDoneNotified = true;
                     enqueueTransferDone(all);
                     if (failedFiles > 0) {
                         //pri added by zhuyang,Batch 4: partial failure -> "成功 N 张，失败 M 张",20261017,start
-                        final int ok = okFiles;
+                        final int ok = okTotal;
                         final int bad = failedFiles;
                         mMain.post(new Runnable() {
                             @Override public void run() { mListener.onTransferSummary(ok, bad); }
@@ -2926,7 +2987,8 @@ public class Xfer {
             //pri modify by zhuyang,Only DONE (or the legacy FULL count) completes; EOF alone is never success,20261017,start
             if (mRunning && !failedNotified && !storageRejected) {
                 Bus.log("传输: 接收结束,共 " + count + " 张(分块 " + receivedFiles + " 张/" + rxBytes
-                        + "B,FULL " + total + "B),成功 " + okFiles + " 失败 " + failedFiles
+                        + "B,FULL " + total + "B),成功 " + (okFiles + skippedFiles) + " 张(其中跳过 "
+                        + skippedFiles + " 张) 失败 " + failedFiles
                         + ",预告 " + expect + " 张,分块=" + chunkedStarted + ",完成帧=" + doneReceived);
                 boolean complete = doneReceived || legacyComplete
                         || (!chunkedStarted && expect > 0 && count >= expect);
@@ -3019,16 +3081,13 @@ public class Xfer {
         }
     }
 
-    //pri added by zhuyang,Batch 4: close one image, check size + SHA-256, and queue it for MediaStore only on success,20261017,start
+    //pri modify by zhuyang,Batch 4: close one image, check size + SHA-256, keep a verified copy and queue it for MediaStore,20261019,start
     private ChunkResult closeChunk(Proto.FileBegin fi, OutputStream out, MessageDigest md, File part,
-                                   boolean reuse, long bytes, String sid, int total,
+                                   long bytes, String sid, int total,
                                    java.util.ArrayList<Bitmap> all) {
         try { if (out != null) out.close(); } catch (Exception ignored) {}
         if (fi == null) return new ChunkResult(false, "缺少图片元信息");
         int human = fi.index + 1;
-        if (reuse) {
-            return new ChunkResult(true, null); // already verified and queued at FILE_BEGIN time
-        }
         if (fi.size >= 0 && fi.size != bytes) {
             mStore.discard(sid, fi.index);
             return new ChunkResult(false, "第 " + human + " 张大小不符(announced=" + fi.size + ", got=" + bytes + ")");
@@ -3048,34 +3107,62 @@ public class Xfer {
         } else {
             Bus.log("传输: 第 " + human + " 张 SHA-256 校验通过 " + got.substring(0, 12));
         }
-        File committed = mStore.commit(sid, fi.index);
-        submitChunkFile(committed, human, Math.max(fi.total, total), all);
+        File target = part;
+        boolean keep = false;
+        String markSha = null;
+        if (fi.sha256 != null) {
+            try {
+                File stored = mStore.persistCompleted(fi.sha256, part);
+                if (stored != null) {
+                    target = stored;
+                    keep = true;
+                    markSha = fi.sha256;
+                }
+            } catch (Exception e) {
+                Bus.log("传输: 第 " + human + " 张已完成校验,但保存去重副本失败(仍入库,不参与跨轮去重): " + e);
+            }
+        }
+        submitChunkFile(target, human, Math.max(fi.total, total), all, keep, markSha);
         return new ChunkResult(true, null);
     }
-    //pri added by zhuyang,Batch 4: close one image, check size + SHA-256, and queue it for MediaStore only on success,20261017,end
+    //pri modify by zhuyang,Batch 4: close one image, check size + SHA-256, keep a verified copy and queue it for MediaStore,20261019,end
 
-    //pri added by zhuyang,Batch 4: queue one verified .part; it is inserted into MediaStore and deleted on the IO thread,20261017,start
+    //pri modify by zhuyang,Batch 4: queue one verified file; the sha256 set is updated only after the gallery insert succeeds,20261019,start
     private void submitChunkFile(final File part, final int idx, final int exp,
-                                 final java.util.ArrayList<Bitmap> all) {
+                                 final java.util.ArrayList<Bitmap> all,
+                                 final boolean keep, final String markSha) {
         final int bytes = (int) Math.min(Integer.MAX_VALUE, part.length());
         mIo.execute(new Runnable() {
             @Override public void run() {
                 final Bitmap bmp = decode(part);
                 final Uri savedUri = saveFileToGallery(part, "image/jpeg");
-                if (savedUri != null) {
+                final boolean saved = savedUri != null;
+                if (saved) {
                     mSavedUris.add(savedUri);
                     if (mFirstSavedUri == null) mFirstSavedUri = savedUri;
+                    if (markSha != null) {
+                        mStore.markCompleted(markSha, part);
+                        Bus.log("传输: 第 " + idx + " 张已入库,按 sha256 登记供后续跨轮去重");
+                    }
                 }
-                final boolean saved = savedUri != null;
                 synchronized (all) { all.add(bmp); }
-                try { part.delete(); } catch (Throwable ignored) {} //pri added by zhuyang,Batch 4: success or failure, the temp copy goes,20261017
+                //pri added by zhuyang,Batch 4: keep the completed copy only when it is tracked or already shared,20261019
+                if (!keep || (markSha != null && !saved)) {
+                    try { part.delete(); } catch (Throwable ignored) {}
+                }
                 mMain.post(new Runnable() {
                     @Override public void run() { mListener.onImageReceived(idx, exp, bmp, bytes, saved); }
                 });
             }
         });
     }
-    //pri added by zhuyang,Batch 4: queue one verified .part; it is inserted into MediaStore and deleted on the IO thread,20261017,end
+
+    //pri added by zhuyang,Batch 4: a repeat of completed content still gets a fresh MediaStore row, only its wire copy is skipped,20261019
+    private void submitCompletedCopy(final File known, final int idx, final int exp,
+                                     final java.util.ArrayList<Bitmap> all) {
+        submitChunkFile(known, idx, exp, all, true, null);
+    }
+    //pri modify by zhuyang,Batch 4: queue one verified file; the sha256 set is updated only after the gallery insert succeeds,20261019,end
 
     //pri added by zhuyang,Decode + save one image off the socket thread, then report it,20261017
     private void submitImage(final byte[] data, final int idx, final int exp,
@@ -3204,25 +3291,13 @@ public class Xfer {
                     startHeartbeat(send, false);
                     //pri added by zhuyang,Heartbeat starts before the offer (keep the receiver alive) but rx-dead is armed only for the verdict wait,20261017,end
                     final int round = mRound; //pri added by zhuyang,Round token: a stale verdict is discarded by readVerdict,20261014
-                    //pri added by zhuyang,Batch 4: plan the resume subset before the offer so META_INFO matches what is sent,20261017,start
-                    final String peerHave = send.peerHave;
-                    boolean[] skip = new boolean[uris.size()];
+                    //pri modify by zhuyang,Batch 4: resume is negotiated per FILE_BEGIN via sha256; the sender no longer skips by have=,20261019,start
                     long planned = 0;
-                    int skipCount = 0;
                     for (int i = 0; i < uris.size(); i++) {
                         long size = imageSize(uris.get(i));
-                        if (Proto.bitmapHas(peerHave, i)) {
-                            skip[i] = true;
-                            skipCount++;
-                            continue;
-                        }
                         if (size > 0) planned += size;
                     }
-                    if (peerHave != null) {
-                        Bus.log("传输: 续传 — 对端位图 have=" + peerHave + ",跳过 " + skipCount
-                                + "/" + uris.size() + " 张");
-                    }
-                    //pri added by zhuyang,Batch 4: plan the resume subset before the offer so META_INFO matches what is sent,20261017,end
+                    //pri modify by zhuyang,Batch 4: resume is negotiated per FILE_BEGIN via sha256; the sender no longer skips by have=,20261019,end
                     //pri added by zhuyang,Offer stage: META(total) + one preview, then wait for the verdict,20261014,start
                     mWriteLock.lock();
                     try {
@@ -3242,8 +3317,8 @@ public class Xfer {
                     } finally {
                         mWriteLock.unlock();
                     }
-                    Bus.log("传输: 已报价(" + uris.size() + " 张,其中跳过 " + skipCount + " 张,计划 "
-                            + planned + " 字节 + 预览),等对方「接收/拒绝」…("
+                    Bus.log("传输: 已报价(" + uris.size() + " 张,计划 " + planned
+                            + " 字节 + 预览),等对方「接收/拒绝」…("
                             + (VERDICT_WAIT_MS / 1000) + "s 上限)");
                     //pri added by zhuyang,Arm the dead-peer check now that we are reading for the verdict,20261017
                     send.lastRx.set(SystemClock.elapsedRealtime());
@@ -3284,10 +3359,6 @@ public class Xfer {
                     byte[] buf = new byte[CHUNK_SIZE];
                     for (int i = 0; i < uris.size(); i++) {
                         if (mYielded || send.linkDead.get() || !mRunning) break;
-                        if (skip[i]) {
-                            Bus.log("传输: 续传跳过第 " + (i + 1) + " 张(对端已校验通过)");
-                            continue;
-                        }
                         Uri uri = uris.get(i);
                         String mime = mCtx.getContentResolver().getType(uri);
                         if (mime == null) mime = "image/jpeg";
@@ -3314,6 +3385,14 @@ public class Xfer {
                             postProgress(progress, false);
                             Bus.log("传输: 正在发送第 " + (i + 1) + "/" + uris.size() + " 张 " + fileSize
                                     + " 字节 " + mime + " sha256=" + hash);
+                            //pri added by zhuyang,Batch 4: the receiver answers TYPE_SKIP for content it already has,20261019
+                            if (waitSkip(send, i)) {
+                                sentCount++;
+                                Bus.log("传输: 第 " + (i + 1) + "/" + uris.size()
+                                        + " 张命中对端已完成(sha256=" + hash.substring(0, 12)
+                                        + "),跳过 DATA,计入 DONE 张数");
+                                continue;
+                            }
                             InputStream in = new FileInputStream(staged);
                             int seq = 0;
                             long fileBytes = 0;
@@ -3463,6 +3542,46 @@ public class Xfer {
         }).start();
     }
     //pri modify by zhuyang,Role convergence: send on the Link, wait out the 300ms role window, and abort when yielding,20261017,end
+
+    //pri added by zhuyang,Batch 4: after FILE_BEGIN, wait briefly for TYPE_SKIP before streaming DATA,20261019,start
+    private boolean waitSkip(Link link, int index) throws java.io.IOException {
+        long deadline = SystemClock.elapsedRealtime() + SKIP_WAIT_MS;
+        try {
+            while (SystemClock.elapsedRealtime() < deadline) {
+                int remaining = (int) (deadline - SystemClock.elapsedRealtime());
+                if (remaining <= 0) break;
+                link.s.setSoTimeout(remaining);
+                Proto.Frame f;
+                try {
+                    f = Proto.readFrame(link.in, remaining, Proto.MAX_FRAME_LEN);
+                } catch (java.net.SocketTimeoutException te) {
+                    return false;
+                }
+                if (f == null) throw new java.io.EOFException("connection closed while waiting TYPE_SKIP");
+                if (f.type == Proto.TYPE_SKIP) {
+                    int idx = Proto.parseSkip(f.data);
+                    if (idx == index) return true;
+                    Bus.log("传输: 收到非当前索引的 TYPE_SKIP(" + idx + "),忽略");
+                    continue;
+                }
+                if (f.type == Proto.TYPE_PING) {
+                    replyPong(link);
+                    continue;
+                }
+                if (f.type == Proto.TYPE_PONG) continue;
+                if (f.type == Proto.TYPE_CANCEL) {
+                    String reason = new String(f.data, java.nio.charset.StandardCharsets.UTF_8);
+                    throw new FatalXferException(new XferError(XferError.Stage.TRANSFER,
+                            XferError.CANCELLED, "对方取消: " + reason));
+                }
+                Bus.log("传输: 等待 TYPE_SKIP 时忽略帧类型 " + f.type);
+            }
+            return false;
+        } finally {
+            try { link.s.setSoTimeout(0); } catch (Exception ignored) {}
+        }
+    }
+    //pri added by zhuyang,Batch 4: after FILE_BEGIN, wait briefly for TYPE_SKIP before streaming DATA,20261019,end
 
     //pri added by zhuyang,Wait for DONE_ACK: 0=OK, -1=protocol error, -2=timeout, -3=peer cancel, -4=link dead,20261017,start
     private int readDoneAck(Link link) {

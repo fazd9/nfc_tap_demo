@@ -13,21 +13,37 @@ import java.security.MessageDigest;
 import java.util.Locale;
 import java.util.concurrent.ConcurrentHashMap;
 
-//pri added by zhuyang,Batch 4: per-session incoming temp files plus the image-level resume bitmap,20261017,start
+//pri modify by zhuyang,Batch 4: per-session incoming temp files plus a content-hash completion set,20261019,start
 /**
  * Receive-side scratch space. Every image is written to getCacheDir()/incoming/<sid>/<index>.part
- * and only inserted into MediaStore after its size and SHA-256 were verified. The completed bitmap
- * (bit i = image i verified) is kept in memory per sid and advertised in HELLO so the sender can
- * skip those indices on the next connection. Only the current sid's directory is ever touched.
+ * and only inserted into MediaStore after its size and SHA-256 were verified. Verified content is
+ * kept in getCacheDir()/incoming/completed/<sha256> and recorded in an in-memory sha256 -> file map,
+ * so a later round can skip the network transfer of identical content regardless of its index.
  */
 public final class TransferStore {
 
     private final File mRoot;
-    // sid -> 64-bit completion bitmap (index >= 64 cannot be represented, as agreed for batch 4)
-    private final ConcurrentHashMap<String, Long> mCompleted = new ConcurrentHashMap<String, Long>();
+    private final File mCompletedDir;
+    //pri modify by zhuyang,Resume is decided by content hash (cross-round), never by sid/index,20261019
+    private final ConcurrentHashMap<String, File> mCompletedHashes =
+            new ConcurrentHashMap<String, File>();
 
     public TransferStore(Context ctx) {
         mRoot = new File(ctx.getCacheDir(), "incoming");
+        mCompletedDir = new File(mRoot, "completed");
+        loadCompleted();
+    }
+
+    //pri added by zhuyang,Batch 4: restore the sha256 set from cache/incoming/completed so dedupe survives a process restart,20261019
+    private void loadCompleted() {
+        File[] files = mCompletedDir.listFiles();
+        if (files == null) return;
+        for (File f : files) {
+            String name = f.getName();
+            if (f.isFile() && isHex64(name)) {
+                mCompletedHashes.put(name.toLowerCase(Locale.US), f);
+            }
+        }
     }
 
     //pri added by zhuyang,Keep the sid out of path traversal: only hex characters survive,20261017
@@ -59,17 +75,12 @@ public final class TransferStore {
         return new BufferedOutputStream(new FileOutputStream(f, false), 64 * 1024);
     }
 
-    /** Verification passed: the bitmap is updated and the staged file is handed to the caller. */
-    public File commit(String sid, int index) {
-        markComplete(sid, index);
-        return partFile(sid, index);
-    }
-
     public void discard(String sid, int index) {
         try { partFile(sid, index).delete(); } catch (Throwable ignored) {}
     }
 
-    /** Delete every .part of this sid only; completed indices stay in the in-memory bitmap. */
+    //pri modify by zhuyang,Completed content lives outside the sid dir so discardAll never removes it,20261019
+    /** Delete every .part of this sid only; completed content files are kept for cross-round dedupe. */
     public void discardAll(String sid) {
         File dir = new File(mRoot, sanitizeSid(sid));
         File[] files = dir.listFiles();
@@ -81,22 +92,69 @@ public final class TransferStore {
         try { dir.delete(); } catch (Throwable ignored) {}
     }
 
-    //pri added by zhuyang,Image-level resume bitmap shared with the sender through HELLO have=,20261017,start
-    public void markComplete(String sid, int index) {
-        if (index < 0 || index >= 64) return;
-        String key = sanitizeSid(sid);
-        long bit = 1L << index;
-        synchronized (mCompleted) {
-            Long old = mCompleted.get(key);
-            mCompleted.put(key, (old == null ? 0L : old) | bit);
+    //pri added by zhuyang,Content-hash completion set: only verified files that reached MediaStore are added,20261019,start
+    public File completedFile(String sha256) {
+        if (sha256 == null) return null;
+        String key = sha256.toLowerCase(Locale.US);
+        File f = mCompletedHashes.get(key);
+        if (f == null) return null;
+        if (!f.exists()) {
+            mCompletedHashes.remove(key, f);
+            return null;
+        }
+        return f;
+    }
+
+    public void markCompleted(String sha256, File file) {
+        if (sha256 == null || file == null) return;
+        mCompletedHashes.put(sha256.toLowerCase(Locale.US), file);
+    }
+
+    /** Move a verified .part into the persistent completed store; the caller then saves it to MediaStore. */
+    public File persistCompleted(String sha256, File source) throws IOException {
+        if (sha256 == null || !isHex64(sha256)) return null;
+        if (!mCompletedDir.exists() && !mCompletedDir.mkdirs() && !mCompletedDir.exists()) {
+            throw new IOException("cannot create completed dir");
+        }
+        File dst = new File(mCompletedDir, sha256.toLowerCase(Locale.US));
+        if (dst.getAbsoluteFile().equals(source.getAbsoluteFile())) return dst;
+        if (dst.exists() && dst.length() == source.length()) {
+            try { source.delete(); } catch (Throwable ignored) {}
+            return dst;
+        }
+        if (dst.exists()) {
+            try { dst.delete(); } catch (Throwable ignored) {}
+        }
+        if (!source.renameTo(dst)) {
+            copyFile(source, dst);
+            try { source.delete(); } catch (Throwable ignored) {}
+        }
+        return dst;
+    }
+
+    private static void copyFile(File src, File dst) throws IOException {
+        InputStream in = new FileInputStream(src);
+        OutputStream out = null;
+        try {
+            out = new BufferedOutputStream(new FileOutputStream(dst, false), 64 * 1024);
+            byte[] buf = new byte[64 * 1024];
+            int n;
+            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            out.flush();
+        } finally {
+            try { in.close(); } catch (Exception ignored) {}
+            try { if (out != null) out.close(); } catch (Exception ignored) {}
         }
     }
 
-    public String haveHex(String sid) {
-        Long v = mCompleted.get(sanitizeSid(sid));
-        return String.format(Locale.US, "%016x", v == null ? 0L : v);
+    private static boolean isHex64(String s) {
+        if (s == null || s.length() != 64) return false;
+        for (int i = 0; i < s.length(); i++) {
+            if (Character.digit(s.charAt(i), 16) < 0) return false;
+        }
+        return true;
     }
-    //pri added by zhuyang,Image-level resume bitmap shared with the sender through HELLO have=,20261017,end
+    //pri added by zhuyang,Content-hash completion set: only verified files that reached MediaStore are added,20261019,end
 
     //pri added by zhuyang,One local read to check a pre-existing .part against FILE_BEGIN h=,20261017
     public static String sha256Of(File f) throws IOException {
@@ -123,4 +181,4 @@ public final class TransferStore {
         return sb.toString();
     }
 }
-//pri added by zhuyang,Batch 4: per-session incoming temp files plus the image-level resume bitmap,20261017,end
+//pri modify by zhuyang,Batch 4: per-session incoming temp files plus a content-hash completion set,20261019,end

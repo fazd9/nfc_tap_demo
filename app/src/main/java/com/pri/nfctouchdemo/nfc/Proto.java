@@ -30,6 +30,7 @@ public final class Proto {
     public static final int TYPE_DONE_ACK = 14;
     public static final int TYPE_CANCEL = 15;
     public static final int TYPE_META_INFO = 16; //pri added by zhuyang,Batch 4: total byte count sent right after META for the storage precheck,20261017
+    public static final int TYPE_SKIP = 17; //pri added by zhuyang,Receiver already has this content hash: payload [4B index], no DATA follows,20261019
     //pri added by zhuyang,Chunked delivery: per-file metadata, sequenced data chunks and an explicit completion handshake,20261017,end
 
     public static final int MAX_FRAME_LEN = 64 * 1024 * 1024;
@@ -43,6 +44,7 @@ public final class Proto {
     public static final int MAX_DONE_LEN = 64;
     public static final int MAX_CANCEL_LEN = 1024;
     public static final int MAX_META_INFO_LEN = 128; //pri added by zhuyang,Batch 4: "n=<total>|b=<totalBytes>" fits easily,20261017
+    public static final int MAX_SKIP_LEN = 4; //pri added by zhuyang,TYPE_SKIP carries one big-endian image index,20261019
     //pri added by zhuyang,Per-type frame caps: an oversized LEN is rejected before any array is allocated,20261017,end
 
     public static final class Frame {
@@ -62,7 +64,7 @@ public final class Proto {
         public final String sid;
         public final String role;
         public final boolean hasPhotos;
-        //pri added by zhuyang,Batch 4: 16-hex bitmap of the image indices already verified by the receiver,20261017
+        //pri modify by zhuyang,Kept for HELLO format compatibility only: the sender no longer uses it to skip,20261019
         public final String have;
 
         Hello(int version, String sid, String role, boolean hasPhotos, String have) {
@@ -141,6 +143,7 @@ public final class Proto {
             case TYPE_DONE_ACK: return MAX_DONE_LEN;
             case TYPE_CANCEL: return MAX_CANCEL_LEN;
             case TYPE_META_INFO: return MAX_META_INFO_LEN; //pri added by zhuyang,Batch 4: small text payload,20261017
+            case TYPE_SKIP: return MAX_SKIP_LEN; //pri added by zhuyang,TYPE_SKIP is exactly one index,20261019
             case TYPE_ROLE: return MAX_ROLE_LEN;
             case TYPE_HELLO:
             case TYPE_HELLO_ACK: return MAX_HELLO_LEN;
@@ -191,7 +194,7 @@ public final class Proto {
         return buildHello(sid, role, hasPhotos, null);
     }
 
-    //pri added by zhuyang,Batch 4: optional have= bitmap, omitted when empty so old peers parse the same frame,20261017
+    //pri modify by zhuyang,Batch 4: optional have= is still encoded/decoded for old peers but is no longer advisory,20261019
     public static byte[] buildHello(String sid, String role, boolean hasPhotos, String have) {
         String s = "v=" + HELLO_VERSION + "|sid=" + sid + "|r=" + role
                 + "|hp=" + (hasPhotos ? "1" : "0");
@@ -203,7 +206,7 @@ public final class Proto {
         return buildHelloAck(sid, role, null);
     }
 
-    //pri added by zhuyang,Batch 4: the accepting side advertises its completed bitmap too,20261017
+    //pri modify by zhuyang,Batch 4: optional have= is still encoded/decoded for old peers but is no longer advisory,20261019
     public static byte[] buildHelloAck(String sid, String role, String have) {
         String s = "v=" + HELLO_VERSION + "|sid=" + sid + "|r=" + role;
         if (have != null && !have.isEmpty()) s += "|have=" + have;
@@ -263,7 +266,7 @@ public final class Proto {
             } else if ("hp".equals(k)) {
                 hp = "1".equals(v);
             } else if ("have".equals(k)) {
-                //pri added by zhuyang,Batch 4: a malformed bitmap is treated as absent, never as an auth failure,20261017
+                //pri modify by zhuyang,Batch 4: parse-only compatibility; the receiver no longer emits it and the sender ignores it,20261019
                 have = normalizeBitmap(v);
                 if (have == null) Bus.log("传输: HELLO have= 位图解析失败,按空处理");
             }
@@ -272,7 +275,7 @@ public final class Proto {
         return new Hello(version, sid, role, hp, have);
     }
 
-    //pri added by zhuyang,Batch 4: image-index bitmap helpers (bit 0 = index 0, 16 hex chars max),20261017,start
+    //pri added by zhuyang,Batch 4: image-index bitmap codec kept only for HELLO format compatibility; resume now uses sha256,20261019,start
     public static String normalizeBitmap(String raw) {
         if (raw == null) return null;
         String s = raw.trim();
@@ -302,7 +305,7 @@ public final class Proto {
         for (int i = 0; i < max; i++) if (bitmapHas(have, i)) n++;
         return n;
     }
-    //pri added by zhuyang,Batch 4: image-index bitmap helpers (bit 0 = index 0, 16 hex chars max),20261017,end
+    //pri added by zhuyang,Batch 4: image-index bitmap codec kept only for HELLO format compatibility; resume now uses sha256,20261019,end
 
     //pri added by zhuyang,FILE_BEGIN / DONE / DONE_ACK / CANCEL codecs for the chunked delivery,20261017,start
     public static byte[] buildFileBegin(int index, int total, long size, String mime) {
@@ -384,6 +387,22 @@ public final class Proto {
         return ((data[0] & 0xFF) << 24) | ((data[1] & 0xFF) << 16)
                 | ((data[2] & 0xFF) << 8) | (data[3] & 0xFF);
     }
+
+    //pri added by zhuyang,TYPE_SKIP: receiver already completed this sha256, so the sender must not stream DATA,20261019,start
+    public static byte[] buildSkip(int index) {
+        byte[] b = new byte[4];
+        b[0] = (byte) (index >>> 24);
+        b[1] = (byte) (index >>> 16);
+        b[2] = (byte) (index >>> 8);
+        b[3] = (byte) index;
+        return b;
+    }
+
+    public static int parseSkip(byte[] data) {
+        if (data == null || data.length != 4) return -1;
+        return readSeq(data);
+    }
+    //pri added by zhuyang,TYPE_SKIP: receiver already completed this sha256, so the sender must not stream DATA,20261019,end
 
     public static byte[] buildDone(int count, long totalBytes) {
         byte[] b = new byte[12];
