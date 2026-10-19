@@ -96,8 +96,10 @@
     <!--pri added by zhuyang,Batch 5: stable failure text per stage/code; status line and banner share one mapping,20261017,start-->
     <string name="fail_title_nfc">碰触失败</string>
     <string name="err_nfc">贴紧 1 秒再试</string>
-    <string name="err_connect_timeout">连接超时，请重碰一次</string>
-    <string name="err_connect_refused">无法连接对方，请重碰一次</string>
+    <!--pri modify by zhuyang,Hotspot bearer: tell the user to check distance and Wi-Fi state,20261019,start-->
+    <string name="err_connect_timeout">连接超时，请确认两台手机的距离与 Wi-Fi 状态后重碰一次</string>
+    <string name="err_connect_refused">无法连接对方，请确认两台手机的距离与 Wi-Fi 状态</string>
+    <!--pri modify by zhuyang,Hotspot bearer: tell the user to check distance and Wi-Fi state,20261019,end-->
     <string name="err_auth_failed">连接校验失败，请重碰一次</string>
     <string name="err_offer_timeout_send">对方未确认接收</string>
     <string name="err_offer_timeout_receive">对方未开始发送</string>

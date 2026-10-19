@@ -1,6 +1,5 @@
 package com.pri.nfctouchdemo.nfc;
 
-import android.bluetooth.BluetoothAdapter;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
@@ -22,7 +21,7 @@ import java.util.UUID;
  *   card   -> reader: 90 00
  *   reader -> card : 80 10 00 00 <Lc> <readerPayload> 00            (EXCHANGE, INS=0x10)
  *   card   -> reader: <cardPayload> 90 00
- * Payload format: "n=<model>|b=<btName>|t=<token>|sid=<32hex>|ts=<time>|p=<p2pName>|ip=<lanIpv4>"
+ * Payload format: "n=<model>|t=<token>|sid=<32hex>|ts=<time>|ip=<lanIpv4>"
  */
 public final class Bus {
 
@@ -43,7 +42,7 @@ public final class Bus {
 
     /**
      * payload 短缓存时长：见 [selfPayload] 的注释 —— 碰触时这个方法是在 NFC 会话**中间**被调用的，
-     * 每次现算就要枚举网卡 + （首次）初始化蓝牙，几百毫秒正好把链路拖断。
+     * 每次现算就要枚举网卡，几百毫秒正好把链路拖断。
      */
     private static final long PAYLOAD_TTL_MS = 1200L;
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
@@ -207,13 +206,8 @@ public final class Bus {
     private static String buildPayload() {
         String base = sSelfPayload;
         if (base == null) {
-            String btName = "?";
-            try {
-                BluetoothAdapter ba = BluetoothAdapter.getDefaultAdapter();
-                if (ba != null && ba.getName() != null) btName = ba.getName();
-            } catch (Throwable ignored) {}
+            //pri modify by zhuyang,Bluetooth is no longer used for matching: drop the BT name from the payload,20261019
             base = "n=" + safe(Build.MODEL)
-                    + "|b=" + safe(btName)
                     + "|t=" + UUID.randomUUID().toString().substring(0, 8)
                     + "|sid=" + sid() //pri added by zhuyang,Keep sid right after t so a tail cut can never drop it,20261017
                     + "|ts=" + new SimpleDateFormat("HH:mm:ss", Locale.US).format(new Date());

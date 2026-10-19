@@ -26,12 +26,15 @@ import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.lang.reflect.Method;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.security.MessageDigest;
+import java.util.BitSet;
 import java.util.Collection;
+import java.util.List;
 import java.util.Locale;
 
 /**
@@ -74,12 +77,19 @@ public class Xfer {
     //pri modify by zhuyang,Heartbeat and business frames share this lock so the wire never interleaves,20261017,end
     public static final String HS_SSID = "TapShare-Transfer";
     public static final String HS_PASS = "tapshare2026";
-    //pri added by zhuyang,Batch 6: derived hotspot credentials and a bounded join budget,20261017,start
-    private static final int HS_JOIN_MAX_ATTEMPTS = 5;
-    private static final long HS_JOIN_ATTEMPT_MS = 1200L;
-    private static final long HS_JOIN_GAP_MS = 1000L;
-    private static final long HS_JOIN_BUDGET_MS = 10000L;
-    //pri added by zhuyang,Batch 6: derived hotspot credentials and a bounded join budget,20261017,end
+    //pri added by zhuyang,Hotspot bearer: silent hidden join first, specifier fallback with a dialog-sized budget,20261019,start
+    private static final boolean P2P_ENABLED = false; //pri added by zhuyang,P2P bearer disabled (product decision: same LAN -> hotspot),20261019
+    private static final long HS_HIDDEN_BUDGET_MS = 16000L;
+    private static final long HS_SPEC_BUDGET_MS = 25000L;
+    private static final long WIFI_ENABLE_WAIT_MS = 5000L;
+    private static final long WIFI_ASSOC_POLL_MS = 6000L;
+    private static final long OWNER_WAIT_MS = 18000L;
+    private static final long HS_RELEASE_GRACE_MS = 1000L;
+    private static final int HS_HIDDEN_ATTEMPTS = 2;
+    private static final int HS_HIDDEN_UNAVAILABLE = 0;
+    private static final int HS_HIDDEN_OK = 1;
+    private static final int HS_HIDDEN_FAILED = 2;
+    //pri added by zhuyang,Hotspot bearer: silent hidden join first, specifier fallback with a dialog-sized budget,20261019,end
     private static final int VERDICT_WAIT_MS = 20000;  //pri modify by zhuyang,Shorten the verdict wait from 60s to 20s,20261017
     //pri added by zhuyang,Liveness limits: read cap, PING idle, dead peer, write stall and round total,20261017,start
     private static final int RX_TIMEOUT_MS = 30000;      // control/role paths still allow a slow first frame
@@ -292,7 +302,6 @@ public class Xfer {
 
     private boolean mReceiverRole;
     private volatile boolean mCanSend;   //pri added by zhuyang,Holds photos and has not swiped: may still become the sender,20261014
-    private volatile boolean mDriveP2p;  //pri added by zhuyang,Sender whose hotspot/LAN attempts failed: only this phone drives the P2P fallback,20261014
     private volatile boolean mRunning = true;
     private volatile String mGoAddress;
     private volatile boolean mImGo;
@@ -324,7 +333,14 @@ public class Xfer {
     private volatile String mDerivedPass;
     private volatile int mHotspotGen;
     //pri added by zhuyang,Batch 6: one AP owner per round and credentials derived from both sids,20261017,end
-    private volatile boolean mPauseWarm;   // P2P 搜索与热点互斥(部分芯片不支持同时进行)
+    //pri added by zhuyang,Silent hotspot join bookkeeping: the joined netId and the network to restore,20261019,start
+    private volatile int mJoinedNetId = -1;
+    private volatile String mJoinedSsid;
+    private volatile boolean mHiddenJoinTried;
+    private volatile String mPrevWifiSsid;
+    private volatile int mPrevWifiNetId = -1;
+    private volatile int mWifiGen;
+    //pri added by zhuyang,Silent hotspot join bookkeeping: the joined netId and the network to restore,20261019,end
     private volatile android.net.ConnectivityManager.NetworkCallback mWifiNetCb;
     private int mIdRetry;
 
@@ -332,13 +348,15 @@ public class Xfer {
         mCtx = ctx.getApplicationContext();
         mStore = new TransferStore(mCtx); //pri added by zhuyang,Batch 4: temp files live under cache/incoming/<sid>,20261017
         addListener(listener);
-        mP2p = (WifiP2pManager) mCtx.getSystemService(Context.WIFI_P2P_SERVICE);
-        mChannel = (mP2p == null) ? null : mP2p.initialize(mCtx, Looper.getMainLooper(), null);
-        fetchSelfIdentity();
+        //pri added by zhuyang,P2P is no longer initialized at all (product decision: same LAN -> hotspot),20261019
+        mP2p = null;
+        mChannel = null;
     }
 
     /** 读取本机在 Wi-Fi Direct 里的名字/地址(Android_xxxx 这种),供对方精确匹配。 */
     private void fetchSelfIdentity() {
+        //pri added by zhuyang,P2P bearer disabled (product decision: same LAN -> hotspot),20261019
+        if (!P2P_ENABLED) return;
         if (mP2p == null || mChannel == null || Build.VERSION.SDK_INT < 29) return;
         try {
             mP2p.requestDeviceInfo(mChannel, new WifiP2pManager.DeviceInfoListener() {
@@ -388,7 +406,7 @@ public class Xfer {
             Bus.log("传输: [认证] 本轮将在每条 TCP 连接首帧校验对方 sid");
         }
         //pri added by zhuyang,The debug path has no sid: both ends must skip HELLO and say so in the log,20261017,end
-        Bus.log("P2P: 目标设备 = " + modelName + "/" + btName
+        Bus.log("承载: 目标设备 = " + modelName + (btName == null ? "" : "/" + btName)
                 + (p2pName != null ? ", P2P名=" + p2pName : "")
                 + (p2pAddr != null ? ", P2P地址=" + p2pAddr : "")
                 + (lanIp != null ? ", 局域网IP=" + lanIp : "")
@@ -433,20 +451,21 @@ public class Xfer {
         mGotConnection = false;
         mSenderWaiting = false;
         mP2pAttempt = 0;
-        mPauseWarm = false;
         mReceiverRole = false;
         mCanSend = false;   //pri added by zhuyang,New round: undecided until TapService reports the photos,20261014
         mHasPhotos = false; //pri added by zhuyang,New round: no photos reported yet,20261017
         mPeerSid = null;    //pri added by zhuyang,New round: the peer sid is set again from the new payload,20261017
-        //pri added by zhuyang,Batch 6: a new round derives new credentials, so any AP left from the previous round is stale,20261017
+        //pri added by zhuyang,Batch 6: a new round derives new credentials, so any AP left from the previous round is stale,20261019,start
         if (mHotspotReservation != null || mHotspotStarting) {
             Bus.log("热点: 新一轮开始,关闭上一轮残留热点");
             closeHotspot();
         }
-        releaseNetworkRequest(); //pri added by zhuyang,Batch 6: drop the previous round's AP binding before deriving a new one,20261017
+        //pri added by zhuyang,Forget the previous round's joined AP and restore the user's network,20261019,start
+        restoreWifiAfterJoin();
+        //pri added by zhuyang,Forget the previous round's joined AP and restore the user's network,20261019,end
         mDerivedSsid = null;
         mDerivedPass = null;
-        mDriveP2p = false;  //pri added by zhuyang,New round: the P2P fallback needs a fresh decision,20261014
+        //pri added by zhuyang,Batch 6: a new round derives new credentials, so any AP left from the previous round is stale,20261019,end
         //pri added by zhuyang,Bump the round token and drop the verdict session state of the previous round,20261014,start
         mRound++;
         //pri added by zhuyang,Drop every link of the previous round, including the role listener's,20261017,start
@@ -526,6 +545,12 @@ public class Xfer {
     //pri added by zhuyang,Batch 6: a non-owner receiver joins the owner AP so it can accept the owner's send,20261017,start
     public void startHotspotClient() {
         if (mApOwner) return;
+        //pri added by zhuyang,LAN first: same subnet means the peer can reach us directly, so never join a hotspot,20261019,start
+        if (likelySameLan()) {
+            Bus.log("承载: 对方与本机同处一个 LAN(对方 IP=" + mPeerLanIp + "),跳过热点接入,走同网直连");
+            return;
+        }
+        //pri added by zhuyang,LAN first: same subnet means the peer can reach us directly, so never join a hotspot,20261019,end
         final String ssid;
         final String pass;
         final boolean derived;
@@ -542,7 +567,7 @@ public class Xfer {
             pass = HS_PASS;
             derived = false;
         } else {
-            Bus.log("传输: 非 AP owner 且本轮没有热点凭据,等待局域网/P2P");
+            Bus.log("传输: 非 AP owner 且本轮没有热点凭据,等待局域网直连");
             return;
         }
         if (mHotspotReservation != null || mHotspotActive || mHotspotStarting) {
@@ -561,6 +586,42 @@ public class Xfer {
     }
     //pri added by zhuyang,Batch 6: a non-owner receiver joins the owner AP so it can accept the owner's send,20261017,end
 
+    //pri added by zhuyang,Lucky same-subnet peers skip joining; only treat equal /24 as likely same LAN,20261019,start
+    private boolean likelySameLan() {
+        String local = Bus.lanIpv4();
+        String peer = mPeerLanIp;
+        if (local == null || peer == null) return false;
+        int[] a = parseIpv4(local);
+        int[] b = parseIpv4(peer);
+        return a != null && b != null && a[0] == b[0] && a[1] == b[1] && a[2] == b[2];
+    }
+
+    private static int[] parseIpv4(String ip) {
+        try {
+            String[] p = ip.split("\\.");
+            if (p.length != 4) return null;
+            int[] out = new int[4];
+            for (int i = 0; i < 4; i++) out[i] = Integer.parseInt(p[i]);
+            return out;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+    //pri added by zhuyang,Lucky same-subnet peers skip joining; only treat equal /24 as likely same LAN,20261019,end
+
+    //pri added by zhuyang,An AP owner can drop its hotspot once the peer reaches it over the same LAN,20261019,start
+    private void maybeCloseHotspotForLan(Socket s) {
+        if (!mApOwner) return;
+        if (!(mHotspotActive || mHotspotStarting || mHotspotReservation != null)) return;
+        if (s == null || s.getInetAddress() == null || mPeerLanIp == null) return;
+        String remote = s.getInetAddress().getHostAddress();
+        if (mPeerLanIp.equals(remote)) {
+            Bus.log("热点: 对方经同 LAN 直连(" + remote + "),关闭热点(省电/恢复射频)");
+            closeHotspot();
+        }
+    }
+    //pri added by zhuyang,An AP owner can drop its hotspot once the peer reaches it over the same LAN,20261019,end
+
     /** 接收方按下按钮时即开启本地热点,把 SSID/密码写进 payload,让对方免搜索直连。 */
     public void startHotspot() {
         if (!mApOwner) {
@@ -571,17 +632,12 @@ public class Xfer {
         try {
             final WifiManager wm = (WifiManager) mCtx.getSystemService(Context.WIFI_SERVICE);
             if (wm == null) return;
-            // 本机型热点与 Wi-Fi 互斥(无 bridged-AP 能力):Wi-Fi 开着时必然失败,直接跳过走同网/P2P
-            if (wm.isWifiEnabled()) {
-                Bus.log("热点: Wi-Fi 正开着,本机型热点与 Wi-Fi 互斥 — 跳过热点(走同网直连/P2P)");
-                return;
-            }
+            //pri added by zhuyang,STA+AP concurrency is supported: try the hotspot even when Wi-Fi is on,20261019,start
+            //pri added by zhuyang,No need to turn Wi-Fi off first; LOHS also works when Wi-Fi is off,20261019
+            //pri added by zhuyang,STA+AP concurrency is supported: try the hotspot even when Wi-Fi is on,20261019,end
             final int gen = ++mHotspotGen;
             mHotspotStarting = true;
-            mReceiverRole = true;
             startServer(); // 提前监听 8988:消除"对方连过来时服务端还没起"的竞态
-            mPauseWarm = true; // 先停 P2P 搜索:部分芯片不支持"搜索+热点"同时进行
-            try { mP2p.stopPeerDiscovery(mChannel, null); } catch (Throwable ignored) {}
             Bus.log("热点: 正在开启本地热点(给对方免搜索直连用)…");
             WifiManager.LocalOnlyHotspotCallback cb = new WifiManager.LocalOnlyHotspotCallback() {
                 @Override public void onStarted(WifiManager.LocalOnlyHotspotReservation reservation) {
@@ -616,14 +672,12 @@ public class Xfer {
                             r = "GENERIC";
                     }
                     mHotspotStarting = false;
-                    Bus.log("热点: 开启失败 " + r + ",恢复 P2P 参与,走局域网/P2P 兜底");
+                    Bus.log("热点: 开启失败 " + r + "(无 P2P 兜底,等待同 LAN/热点接入)");
                     mHotspotActive = false;
-                    mPauseWarm = false;
                 }
                 @Override public void onStopped() {
                     if (gen != mHotspotGen) return;
                     mHotspotActive = false;
-                    mPauseWarm = false;
                     mHotspotStarting = false;
                     mHotspotReservation = null;
                     Bus.log("热点: 已停止");
@@ -653,7 +707,6 @@ public class Xfer {
                 try { wm.startLocalOnlyHotspot(cb, mMain); } catch (Throwable ignored) {}
             }
         } catch (Throwable t) {
-            mPauseWarm = false;
             Bus.log("热点: 开启异常 " + t);
         }
     }
@@ -664,124 +717,80 @@ public class Xfer {
         try { if (mHotspotReservation != null) mHotspotReservation.close(); } catch (Throwable ignored) {}
         mHotspotReservation = null;
         mHotspotActive = false;
-        mPauseWarm = false;
     }
 
-    /** 关闭热点(调试用)。 */
+    /** 关闭热点(调试/收尾用),同时把客户端从热点网络恢复到原 Wi-Fi。 */
     public void stopHotspot() {
+        restoreWifiAfterJoin();
         closeHotspot();
     }
 
-    /** 应用打开即预热搜索:碰完之后只剩连接协商,大幅缩短等待。 */
+    /** 应用打开即预热: P2P 承载已停用,保留入口不做搜索。 */
     public void warmUp() {
-        register();
-        if (mP2p == null || mChannel == null) return;
-        checkWifi();
-        warmDiscoverLoop();
+        //pri added by zhuyang,P2P search is disabled (product decision: same LAN -> hotspot),20261019
+        Bus.log("承载: 预热跳过 P2P 搜索(产品决策: 同 LAN→热点)");
     }
 
     private void warmDiscoverLoop() {
-        if (!mRunning || mGoAddress != null || mPauseWarm || mGotConnection) return;
-        if (!mPauseWarm) {
-            try {
-                mP2p.discoverPeers(mChannel, new WifiP2pManager.ActionListener() {
-                    @Override public void onSuccess() {}
-                    @Override public void onFailure(int reason) {}
-                });
-            } catch (Throwable ignored) {}
-        }
+        //pri added by zhuyang,P2P bearer disabled (product decision: same LAN -> hotspot),20261019
+        if (!P2P_ENABLED) return;
+        if (!mRunning || mGoAddress != null || mGotConnection) return;
+        try {
+            mP2p.discoverPeers(mChannel, new WifiP2pManager.ActionListener() {
+                @Override public void onSuccess() {}
+                @Override public void onFailure(int reason) {}
+            });
+        } catch (Throwable ignored) {}
         mMain.postDelayed(new Runnable() {
             @Override public void run() {
                 if (mRunning && mGoAddress == null) warmDiscoverLoop();
             }
-        }, mPauseWarm ? 3000 : 8000);
+        }, 8000);
     }
 
-    private boolean checkWifi() {
-        try {
-            WifiManager wm = (WifiManager) mCtx.getSystemService(Context.WIFI_SERVICE);
-            if (wm != null && !wm.isWifiEnabled()) {
-                Bus.log("提示: Wi-Fi 未开启,Wi-Fi Direct 传输需要打开 Wi-Fi");
-                return false;
-            }
-        } catch (Throwable ignored) {}
-        return true;
-    }
-
-    /** 接收方入口:先起服务端(同网对方可秒连),5 秒内没连上再走 P2P 搜索兜底。 */
+    /** 接收方入口: 起服务端(同网对方可秒连/对方加入本机热点),P2P 已停用。 */
     public void startAsReceiver() {
+        //pri added by zhuyang,P2P bearer disabled (product decision: same LAN -> hotspot),20261019,start
         mReceiverRole = true;
-        register();
-        if (mP2p == null || mChannel == null) {
-            fail(new XferError(XferError.Stage.CONNECT, XferError.CONNECT_REFUSED, "本机不支持 Wi-Fi Direct"));
-            return;
-        }
-        checkWifi();
-        if (mGoAddress != null) {
-            Bus.log("P2P: 直连已建立,忽略重复的接收请求");
-            return;
-        }
-        if (mDiscovering) {
-            Bus.log("P2P: 正在搜索/协商中,忽略重复请求");
-            return;
-        }
-        startServer(); // 局域网直连:对方拿到本机 IP 可直接连过来
+        startServer();
         if (mGotConnection) {
-            Bus.log("P2P: 对方已直连(局域网),无需 P2P 搜索");
+            Bus.log("传输: 对方已连接,无需重复等待");
             return;
         }
-        mDiscovering = true;
-        mP2pAttempt = 0;
-        Bus.log("P2P: 等待热点/局域网直连,20 秒后仍未连上则 P2P 搜索兜底…");
-        try {
-            mP2p.removeGroup(mChannel, null); // 清掉可能残留的分组,失败无妨
-        } catch (Throwable ignored) {}
+        Bus.log("传输: 等待对方连接(同 LAN 直连,或对方接入本机热点)…");
         mMain.postDelayed(new Runnable() {
-            @Override public void run() {
+            @Override
+            public void run() {
                 if (mRunning && !mGotConnection) {
-                    Bus.log("传输: 仍未等到对方连接 — 检查:发送方 Wi-Fi 开着?弹窗点了「允许」?");
+                    Bus.log("传输: 20 秒内仍未收到对方连接(检查两台手机的距离与 Wi-Fi 状态)");
                 }
             }
         }, 20000);
+        //pri added by zhuyang,P2P bearer disabled (product decision: same LAN -> hotspot),20261019,end
     }
 
-    /** 发送方入口:拿到对方 IP 直接连(同网秒连);搜索已由 warmUp 预热。 */
+    /** 发送方入口: 同 LAN 直连 → 热点,不再有 P2P 兜底。 */
     public void startAsSender() {
+        //pri added by zhuyang,P2P bearer disabled (product decision: same LAN -> hotspot),20261019,start
         mReceiverRole = false;
-        register();
-        if (mP2p == null || mChannel == null) {
-            fail(new XferError(XferError.Stage.CONNECT, XferError.CONNECT_REFUSED, "本机不支持 Wi-Fi Direct"));
-            return;
-        }
-        checkWifi();
         //pri added by zhuyang,A wait left over from a round with no live link must not block the new round,20261019,start
         if (mSenderWaiting && !hasLiveLink()) {
-            Bus.log("P2P: 上一轮的等待已失效(没有活链路),继续发起本轮连接");
+            Bus.log("承载: 上一轮的等待已失效(没有活链路),继续发起本轮连接");
             mSenderWaiting = false;
         }
         if (isAlive(mSendSocket)) {
-            Bus.log("P2P: 发送通道已就绪,忽略重复的发送请求");
+            Bus.log("承载: 发送通道已就绪,忽略重复的发送请求");
             return;
         }
         if (mSenderWaiting) {
-            Bus.log("P2P: 已在等待对方发起直连");
-            return;
-        }
-        if (mGoAddress != null) {
-            Bus.log("P2P: 直连组已建立,忽略重复的发送请求");
+            Bus.log("承载: 已在等待对方接入");
             return;
         }
         //pri added by zhuyang,A wait left over from a round with no live link must not block the new round,20261019,end
         mSenderWaiting = true;
-        Bus.log("P2P: 本机为发送方:优先热点/局域网直连,失败则等 P2P…");
+        Bus.log("承载: 本机为发送方:① 同 LAN → ② 热点(无 P2P 兜底)");
         startConnectStrategy();
-        mMain.postDelayed(new Runnable() {
-            @Override public void run() {
-                if (mRunning && mGoAddress == null && !mReceiverRole && !hasLiveLink()) {
-                    Bus.log("P2P: 仍未建立直连(可退回重新碰一次,或检查两台 Wi-Fi 是否都打开)");
-                }
-            }
-        }, 20000);
+        //pri added by zhuyang,P2P bearer disabled (product decision: same LAN -> hotspot),20261019,end
     }
 
     //pri added by zhuyang,TapService tells the link layer whether this phone still holds photos (may swipe later),20261014
@@ -1198,12 +1207,12 @@ public class Xfer {
         return mCanSend ? "U" : "R";
     }
 
-    //pri added by zhuyang,Who may drive P2P discovery/connect: a decided receiver, or a sender whose ①② attempts failed,20261014
+    //pri added by zhuyang,P2P bearer disabled (product decision: same LAN -> hotspot),20261019
     private boolean mayDriveP2p() {
-        return (mReceiverRole && !mCanSend) || mDriveP2p;
+        return false;
     }
 
-    /** 连接策略:① 对方热点(直连,最快,实测 ~50Mbps) ② 同一 Wi-Fi 直连 ③ Wi-Fi Direct 兜底。 */
+    /** 连接策略: ① 同 LAN 直连(碰巧同网) ② 热点(非 owner 加入/owner 等接入);无 P2P 兜底。 */
     private void startConnectStrategy() {
         new Thread(new Runnable() {
             @Override public void run() {
@@ -1212,13 +1221,50 @@ public class Xfer {
                     Bus.log("传输: 发送通道已就绪,跳过重新加入/直连");
                     return;
                 }
-                //pri added by zhuyang,Batch 6: only the non-owner joins; owner reuses its own AP,20261017,start
+                //pri added by zhuyang,LAN first: a lucky same-subnet peer is the cheapest bearer,20261019,start
+                if (mPeerLanIp != null) {
+                    Bus.log("承载: ① 同 LAN 直连 " + mPeerLanIp + "(1 次,"
+                            + (LAN_CONNECT_TIMEOUT_MS / 1000) + "s)");
+                    if (connectTo(mPeerLanIp, "局域网")) {
+                        if (mApOwner && (mHotspotActive || mHotspotReservation != null || mHotspotStarting)) {
+                            Bus.log("热点: 同 LAN 已连通,关闭本机热点(省电/恢复射频)");
+                            closeHotspot();
+                        }
+                        return;
+                    }
+                    if (!mSenderWaiting) return;
+                } else {
+                    Bus.log("承载: 对方 payload 无局域网 IP,跳过同 LAN");
+                }
+                //pri added by zhuyang,LAN first: a lucky same-subnet peer is the cheapest bearer,20261019,end
+                //pri added by zhuyang,Hotspot second: owner waits for the peer, non-owner joins the derived AP,20261019,start
+                if (mApOwner) {
+                    Bus.log("承载: ② 本机为 AP owner,等待对方接入本机热点…");
+                    long deadline = SystemClock.elapsedRealtime() + OWNER_WAIT_MS;
+                    while (mRunning && mSenderWaiting && SystemClock.elapsedRealtime() < deadline) {
+                        if (hasLiveLink() || mGotConnection) {
+                            Bus.log("承载: 对方已接入(热点/LAN)");
+                            return;
+                        }
+                        if (!mHotspotActive && !mHotspotStarting) {
+                            Bus.log("热点: 本机热点不可用,热点承载失败");
+                            fail(new XferError(XferError.Stage.CONNECT, XferError.CONNECT_TIMEOUT,
+                                    "热点开启失败且无法同 LAN 直连(请确认两台手机距离与 Wi-Fi 状态)"));
+                            return;
+                        }
+                        try { Thread.sleep(500); } catch (InterruptedException ignored) {}
+                    }
+                    if (mRunning && mSenderWaiting && !hasLiveLink()) {
+                        Bus.log("热点: " + (OWNER_WAIT_MS / 1000) + "s 内对方仍未接入,判定连接失败");
+                        fail(new XferError(XferError.Stage.CONNECT, XferError.CONNECT_TIMEOUT,
+                                "热点已开启但对方未接入(请确认两台手机距离与 Wi-Fi 状态)"));
+                    }
+                    return;
+                }
                 String hsSsid = null;
                 String hsPass = null;
                 boolean derived = false;
-                if (mApOwner) {
-                    Bus.log("传输: 本机是本轮 AP owner,跳过加入热点");
-                } else if (Build.VERSION.SDK_INT >= 33 && mDerivedSsid != null) {
+                if (Build.VERSION.SDK_INT >= 33 && mDerivedSsid != null) {
                     hsSsid = mDerivedSsid;
                     hsPass = mDerivedPass;
                     derived = true;
@@ -1229,23 +1275,19 @@ public class Xfer {
                     hsSsid = HS_SSID;
                     hsPass = HS_PASS;
                 }
-                if (hsSsid != null && joinHotspot(hsSsid, hsPass, derived)) return;
-                //pri added by zhuyang,Batch 6: only the non-owner joins; owner reuses its own AP,20261017,end
-                if (!mSenderWaiting) {
-                    Bus.log("传输: 连接阶段已判定失败,不再走 LAN/P2P 兜底");
+                if (hsSsid == null) {
+                    Bus.log("承载: 非 AP owner 且本轮没有热点凭据,热点承载失败");
+                    fail(new XferError(XferError.Stage.CONNECT, XferError.CONNECT_TIMEOUT,
+                            "没有可用的热点凭据(请确认两台手机距离与 Wi-Fi 状态)"));
                     return;
                 }
-                if (mPeerLanIp != null && connectTo(mPeerLanIp, "局域网")) return;
-                if (!mSenderWaiting) {
-                    Bus.log("传输: 连接阶段已判定失败,不再走 P2P 兜底");
-                    return;
-                }
-                Bus.log("传输: 热点/同网直连未成功(对方热点没开?不在同一 Wi-Fi?),走 Wi-Fi Direct 兜底…");
-                mDriveP2p = true; //pri added by zhuyang,Only here does the sender take over P2P discovery/connect,20261014
-                mDiscovering = true; //pri added by zhuyang,Batch 5: the sender's P2P fallback owns the same 1/2/4s budget,20261017
-                mP2pAttempt = 0;
-                mPauseWarm = false;
-                warmDiscoverLoop();
+                Bus.log("承载: ② 非 owner,用" + (derived ? "会话派生" : "对方") + "凭据加入热点 SSID=" + hsSsid);
+                if (joinHotspot(hsSsid, hsPass, derived)) return;
+                if (!mSenderWaiting) return;
+                Bus.log("承载: ①同 LAN 与 ②热点均失败,无 P2P 兜底,报告 CONNECT_TIMEOUT");
+                fail(new XferError(XferError.Stage.CONNECT, XferError.CONNECT_TIMEOUT,
+                        "同 LAN 与热点均无法连接(请确认两台手机距离与 Wi-Fi 状态)"));
+                //pri added by zhuyang,Hotspot second: owner waits for the peer, non-owner joins the derived AP,20261019,end
             }
         }).start();
     }
@@ -1350,8 +1392,6 @@ public class Xfer {
                     Bus.log("传输: " + how + "连接交由接收/裁决路径接管 " + ip + ":" + PORT);
                     return true;
                 }
-                mPauseWarm = true; // 连上后停止 P2P 搜索:射频让路给数据传输(否则吞吐暴跌)
-                try { mP2p.stopPeerDiscovery(mChannel, null); } catch (Throwable ignored) {}
                 Bus.log("传输: " + how + "直连成功 " + ip + ":" + PORT + "(免搜索)");
                 mListener.onP2pReady(false, ip);
                 return true;
@@ -1366,49 +1406,299 @@ public class Xfer {
         return false;
     }
 
-    //pri modify by zhuyang,Batch 6: join with this round's credentials (5x1s, <=10s), then connect to the gateway port,20261017,start
+    //pri added by zhuyang,Hotspot join: hidden silent connect first, specifier only when the hidden API is unavailable,20261019,start
     private boolean joinHotspot(String ssid, String pass, boolean derived) {
-        if (Build.VERSION.SDK_INT < 29) return false;
-        Bus.log("传输: 用" + (derived ? "会话派生" : "对方热点") + "凭据接入 SSID=" + ssid
-                + "(最多 " + HS_JOIN_MAX_ATTEMPTS + " 次," + (HS_JOIN_BUDGET_MS / 1000) + "s 内)…");
-        // 关键:先停掉预热的 P2P 搜索 —— P2P 占着射频时,系统弹窗为找热点发起的扫描会
-        // 直接失败(WifiNetworkFactory: Scan failed - Device or resource busy)→ 永远"找不到设备"
-        mPauseWarm = true;
-        try { mP2p.stopPeerDiscovery(mChannel, null); } catch (Throwable ignored) {}
-        final long deadline = SystemClock.elapsedRealtime() + HS_JOIN_BUDGET_MS;
-        for (int attempt = 1; attempt <= HS_JOIN_MAX_ATTEMPTS && mRunning; attempt++) {
-            //pri added by zhuyang,Batch 6: a send/receive link that came up on LAN/P2P meanwhile ends the join retries,20261017
-            if (isAlive(mSendSocket) || (mReceiverRole && isAlive(mStashedSocket))) {
-                Bus.log("传输: 已有活动连接,停止热点接入重试");
-                return true;
-            }
-            if (attempt > 1) {
-                long left = deadline - SystemClock.elapsedRealtime();
-                if (left <= 0) break;
-                try { Thread.sleep(Math.min(HS_JOIN_GAP_MS, left)); } catch (InterruptedException ignored) {}
-                if (!mRunning) break;
-            }
-            //pri added by zhuyang,Batch 6: derived uses WPA2 (our own PSK AP); payload keeps WPA3 first and WPA2 next,20261017
-            boolean wpa3 = !derived && (attempt % 2 == 1);
-            Bus.log("传输: 热点接入尝试 " + attempt + "/" + HS_JOIN_MAX_ATTEMPTS
-                    + (wpa3 ? "(WPA3)" : "(WPA2)"));
-            long remain = deadline - SystemClock.elapsedRealtime();
-            if (remain <= 0) break;
-            if (joinHotspotOnce(ssid, pass, wpa3, Math.min(HS_JOIN_ATTEMPT_MS, remain))) return true;
+        if (Build.VERSION.SDK_INT < 29) {
+            Bus.log("热点: API<29 不支持热点接入");
+            return false;
         }
-        mPauseWarm = false;
-        Bus.log("传输: 热点接入失败(≤" + (HS_JOIN_BUDGET_MS / 1000) + "s),走局域网/P2P 兜底");
+        final WifiManager wm = (WifiManager) mCtx.getSystemService(Context.WIFI_SERVICE);
+        if (wm == null) return false;
+        final int gen = mWifiGen;
+        if (!ensureWifiEnabled(wm, gen)) return false;
+        if (gen != mWifiGen) return false;
+        if (isAlive(mSendSocket) || (mReceiverRole && isAlive(mStashedSocket))) {
+            Bus.log("传输: 已有活动连接,跳过热点接入");
+            return true;
+        }
+        Bus.log("传输: 接入对方热点 SSID=" + ssid + "(" + (derived ? "会话派生" : "对方凭据") + ")…");
+        final int hr = joinHotspotHidden(wm, ssid, pass, gen);
+        if (hr == HS_HIDDEN_OK) {
+            String gw = waitForWifiGateway(wm, 5000L);
+            if (connectViaGateway(gw)) return true;
+            Bus.log("传输: 热点已接入但连不上网关,恢复原 Wi-Fi");
+            restoreWifiAfterJoin();
+            return false;
+        }
+        if (hr == HS_HIDDEN_UNAVAILABLE) {
+            Bus.log("传输: 隐藏 Wi-Fi 接口不可用,回退 WifiNetworkSpecifier(预算 "
+                    + (HS_SPEC_BUDGET_MS / 1000) + "s,系统弹窗时需用户点「连接」)");
+            boolean ok = joinHotspotOnce(ssid, pass, !derived,
+                    derived ? HS_SPEC_BUDGET_MS : (HS_SPEC_BUDGET_MS * 3 / 5));
+            if (!ok && !derived && gen == mWifiGen) {
+                Bus.log("传输: WPA3 请求未成功,再用 WPA2 试一次(剩余预算)");
+                ok = joinHotspotOnce(ssid, pass, false, HS_SPEC_BUDGET_MS * 2 / 5);
+            }
+            if (!ok) {
+                releaseNetworkRequest();
+                restoreWifiAfterJoin();
+            }
+            return ok;
+        }
+        Bus.log("传输: 隐藏接口接入热点失败,恢复原 Wi-Fi");
+        restoreWifiAfterJoin();
         return false;
     }
-    //pri modify by zhuyang,Batch 6: bounded 5x1s join with derived or payload credentials,20261017,end
 
+    //pri added by zhuyang,Silent join via the hidden addNetwork + enableNetwork (deterministic netId for cleanup),20261019,start
+    private int joinHotspotHidden(WifiManager wm, String ssid, String pass, int gen) {
+        try {
+            Class<?> cfgCls = Class.forName("android.net.wifi.WifiConfiguration");
+            final Object cfg = cfgCls.getConstructor().newInstance();
+            cfgCls.getField("SSID").set(cfg, "\"" + ssid + "\"");
+            if (pass != null) cfgCls.getField("preSharedKey").set(cfg, "\"" + pass + "\"");
+            BitSet km = (BitSet) cfgCls.getField("allowedKeyManagement").get(cfg);
+            km.set(Class.forName("android.net.wifi.WifiConfiguration$KeyMgmt")
+                    .getField("WPA2_PSK").getInt(null));
+            try {
+                int psk = cfgCls.getField("SECURITY_TYPE_PSK").getInt(null);
+                cfgCls.getMethod("setSecurityParams", int.class).invoke(cfg, psk);
+            } catch (Throwable ignored) {}
+            capturePreviousWifi(wm);
+            mHiddenJoinTried = true;
+            mJoinedSsid = ssid;
+            Method addM = WifiManager.class.getMethod("addNetwork", cfgCls);
+            Object added = addM.invoke(wm, cfg);
+            int netId = (added instanceof Integer) ? (Integer) added : -1;
+            if (netId < 0) {
+                Bus.log("传输: 隐藏接口 addNetwork 返回 " + netId + ",回退 specifier");
+                return HS_HIDDEN_UNAVAILABLE;
+            }
+            mJoinedNetId = netId;
+            Method enableM = WifiManager.class.getMethod("enableNetwork", int.class, boolean.class);
+            final long deadline = SystemClock.elapsedRealtime() + HS_HIDDEN_BUDGET_MS;
+            for (int attempt = 1; attempt <= HS_HIDDEN_ATTEMPTS && mRunning; attempt++) {
+                if (gen != mWifiGen) return HS_HIDDEN_FAILED;
+                if (isAlive(mSendSocket) || (mReceiverRole && isAlive(mStashedSocket))) {
+                    return HS_HIDDEN_OK;
+                }
+                Object enabled;
+                try {
+                    enabled = enableM.invoke(wm, netId, true);
+                } catch (Throwable t) {
+                    Bus.log("传输: 隐藏接口 enableNetwork 失败(" + t + "),回退 specifier");
+                    cleanupHiddenJoin(wm, ssid);
+                    return HS_HIDDEN_UNAVAILABLE;
+                }
+                Bus.log("传输: 隐藏接口静默接入尝试 " + attempt + "/" + HS_HIDDEN_ATTEMPTS
+                        + ",SSID=" + ssid + ",netId=" + netId + ",enable=" + enabled);
+                long assocLeft = Math.max(1000L,
+                        Math.min(WIFI_ASSOC_POLL_MS, deadline - SystemClock.elapsedRealtime()));
+                if (waitForAssociation(wm, ssid, assocLeft, gen)) return HS_HIDDEN_OK;
+                if (attempt < HS_HIDDEN_ATTEMPTS) {
+                    try { Thread.sleep(800); } catch (InterruptedException ignored) {}
+                }
+            }
+            Bus.log("传输: 隐藏接口接入热点超时/失败");
+            cleanupHiddenJoin(wm, ssid);
+            return HS_HIDDEN_FAILED;
+        } catch (Throwable t) {
+            Bus.log("传输: 隐藏 Wi-Fi 接口不可用(" + t + "),回退 specifier");
+            cleanupHiddenJoin(wm, ssid);
+            return HS_HIDDEN_UNAVAILABLE;
+        }
+    }
+    //pri added by zhuyang,Silent join via the hidden addNetwork + enableNetwork (deterministic netId for cleanup),20261019,end
+
+    private void capturePreviousWifi(WifiManager wm) {
+        if (mPrevWifiNetId >= 0 || mPrevWifiSsid != null) return;
+        try {
+            android.net.wifi.WifiInfo wi = wm.getConnectionInfo();
+            if (wi != null) {
+                mPrevWifiNetId = wi.getNetworkId();
+                String cur = unquote(wi.getSSID());
+                if (cur != null && !cur.isEmpty() && !"<unknown ssid>".equals(cur)) {
+                    mPrevWifiSsid = cur;
+                }
+            }
+        } catch (Throwable t) {
+            Bus.log("Wi-Fi: 读取加入前网络失败 " + t);
+        }
+        Bus.log("Wi-Fi: 加入前网络 SSID=" + (mPrevWifiSsid == null ? "<未连接>" : mPrevWifiSsid)
+                + ",netId=" + mPrevWifiNetId);
+    }
+
+    private void cleanupHiddenJoin(WifiManager wm, String ssid) {
+        int id = mJoinedNetId;
+        if (id < 0) id = findConfiguredNetId(wm, ssid);
+        if (id >= 0) {
+            boolean ok = removeSavedNetwork(wm, id);
+            Bus.log("Wi-Fi: 清理接入失败的热点网络 netId=" + id + " -> " + ok);
+        }
+        mJoinedNetId = -1;
+    }
+
+    private boolean waitForAssociation(WifiManager wm, String ssid, long timeoutMs, int gen) {
+        final long deadline = SystemClock.elapsedRealtime() + Math.max(200L, timeoutMs);
+        while (mRunning && gen == mWifiGen && SystemClock.elapsedRealtime() < deadline) {
+            try {
+                android.net.wifi.WifiInfo wi = wm.getConnectionInfo();
+                String cur = wi == null ? null : unquote(wi.getSSID());
+                if (ssid.equals(cur)) {
+                    int id = wi.getNetworkId();
+                    if (id >= 0) mJoinedNetId = id;
+                    Bus.log("Wi-Fi: 热点已接入 SSID=" + ssid + ",netId=" + mJoinedNetId);
+                    return true;
+                }
+            } catch (Throwable ignored) {}
+            try { Thread.sleep(300); } catch (InterruptedException ignored) {}
+        }
+        return false;
+    }
+
+    private boolean ensureWifiEnabled(WifiManager wm, int gen) {
+        try {
+            if (wm.isWifiEnabled()) return true;
+        } catch (Throwable ignored) {}
+        Bus.log("Wi-Fi: 当前关闭,先打开 Wi-Fi(热点接入前置,最多 "
+                + (WIFI_ENABLE_WAIT_MS / 1000) + "s)…");
+        try {
+            wm.setWifiEnabled(true);
+        } catch (Throwable t) {
+            Bus.log("Wi-Fi: 打开 Wi-Fi 失败 " + t);
+            return false;
+        }
+        final long deadline = SystemClock.elapsedRealtime() + WIFI_ENABLE_WAIT_MS;
+        while (mRunning && gen == mWifiGen && SystemClock.elapsedRealtime() < deadline) {
+            try {
+                if (wm.isWifiEnabled()) {
+                    Bus.log("Wi-Fi: 已打开,继续接入热点");
+                    return true;
+                }
+            } catch (Throwable ignored) {}
+            try { Thread.sleep(200); } catch (InterruptedException ignored) {}
+        }
+        Bus.log("Wi-Fi: 打开超时/失败,跳过热点接入");
+        return false;
+    }
+
+    private String waitForWifiGateway(WifiManager wm, long timeoutMs) {
+        final long deadline = SystemClock.elapsedRealtime() + timeoutMs;
+        while (mRunning && mJoinedSsid != null && SystemClock.elapsedRealtime() < deadline) {
+            String gw = wifiGateway(wm);
+            if (gw != null) return gw;
+            try { Thread.sleep(300); } catch (InterruptedException ignored) {}
+        }
+        return null;
+    }
+
+    private String wifiGateway(WifiManager wm) {
+        try {
+            android.net.DhcpInfo di = wm.getDhcpInfo();
+            if (di != null && di.gateway != 0) return intToIp(di.gateway);
+        } catch (Throwable ignored) {}
+        try {
+            android.net.ConnectivityManager cm =
+                    (android.net.ConnectivityManager) mCtx.getSystemService(Context.CONNECTIVITY_SERVICE);
+            if (cm != null) {
+                for (android.net.Network n : cm.getAllNetworks()) {
+                    android.net.NetworkCapabilities nc = cm.getNetworkCapabilities(n);
+                    if (nc == null || !nc.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI)) continue;
+                    android.net.LinkProperties lp = cm.getLinkProperties(n);
+                    if (lp == null) continue;
+                    for (android.net.RouteInfo r : lp.getRoutes()) {
+                        if (r.isDefaultRoute() && r.getGateway() != null) {
+                            return r.getGateway().getHostAddress();
+                        }
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+        return null;
+    }
+
+    private boolean connectViaGateway(String gw) {
+        if (gw == null) {
+            Bus.log("传输: 热点网关未知(DHCP 未就绪)");
+            return false;
+        }
+        for (int i = 0; i < 3 && mRunning; i++) {
+            if (isAlive(mSendSocket) || (mReceiverRole && isAlive(mStashedSocket))) {
+                Bus.log("传输: 已有活动连接,停止热点网关连接");
+                return true;
+            }
+            try {
+                Socket s = new Socket();
+                s.connect(new InetSocketAddress(gw, PORT), 2000);
+                Link link = clientHello(s);
+                if (link == null) {
+                    try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
+                    continue;
+                }
+                if (!handleClientRole(link)) {
+                    Bus.log("传输: 热点连接交由接收/裁决路径接管(网关=" + gw + ")");
+                    return true;
+                }
+                Bus.log("传输: 热点直连成功(网关=" + gw + ",免搜索)");
+                mListener.onP2pReady(false, gw);
+                return true;
+            } catch (FatalXferException fe) {
+                fail(fe.error);
+                return false;
+            } catch (Exception e) {
+                Bus.log("传输: 热点内连接尝试 " + (i + 1) + " 失败: " + e);
+                try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
+            }
+        }
+        return false;
+    }
+
+    private void restoreWifiAfterJoin() {
+        releaseNetworkRequest();
+        final boolean had = mHiddenJoinTried || mJoinedNetId >= 0
+                || mPrevWifiNetId >= 0 || mPrevWifiSsid != null;
+        mWifiGen++;
+        if (!had) return;
+        final WifiManager wm = (WifiManager) mCtx.getSystemService(Context.WIFI_SERVICE);
+        if (wm != null) {
+            int hotId = mJoinedNetId;
+            if (hotId < 0 && mJoinedSsid != null) hotId = findConfiguredNetId(wm, mJoinedSsid);
+            if (hotId >= 0) {
+                boolean ok = removeSavedNetwork(wm, hotId);
+                Bus.log("Wi-Fi: " + (ok ? "已忘记热点网络" : "忘记热点网络失败")
+                        + " netId=" + hotId + ",SSID=" + mJoinedSsid);
+            } else if (mJoinedSsid != null) {
+                Bus.log("Wi-Fi: 未找到已保存的热点网络(无需清理) SSID=" + mJoinedSsid);
+            }
+            int prevId = mPrevWifiNetId;
+            if (prevId < 0 && mPrevWifiSsid != null) prevId = findConfiguredNetId(wm, mPrevWifiSsid);
+            if (prevId >= 0) {
+                boolean ok = enableSavedNetwork(wm, prevId);
+                Bus.log("Wi-Fi: 恢复加入前网络 SSID=" + mPrevWifiSsid + ",netId=" + prevId
+                        + " -> " + ok);
+            } else if (mPrevWifiSsid != null) {
+                Bus.log("Wi-Fi: 无法恢复原网络(未找到 netId) SSID=" + mPrevWifiSsid);
+                try { wm.reconnect(); } catch (Throwable ignored) {}
+            } else {
+                Bus.log("Wi-Fi: 加入前未连接任何网络,保持 Wi-Fi 开启");
+            }
+        }
+        mJoinedNetId = -1;
+        mJoinedSsid = null;
+        mHiddenJoinTried = false;
+        mPrevWifiNetId = -1;
+        mPrevWifiSsid = null;
+    }
+    //pri added by zhuyang,Hotspot join: hidden silent connect first, specifier only when the hidden API is unavailable,20261019,end
+
+    //pri added by zhuyang,Specifier fallback: one request long enough for the user to tap the system dialog,20261019,start
     private boolean joinHotspotOnce(String ssid, String pass, boolean wpa3, long attemptMs) {
         try {
             android.net.wifi.WifiNetworkSpecifier.Builder sb =
                     new android.net.wifi.WifiNetworkSpecifier.Builder().setSsid(ssid);
             if (pass != null) {
-                if (wpa3) sb.setWpa3Passphrase(pass); //pri added by zhuyang,Batch 6: legacy path, this ROM's LOHS default is WPA2/WPA3 mixed,20261017
-                else sb.setWpa2Passphrase(pass);      //pri added by zhuyang,Batch 6: derived AP is explicitly WPA2 PSK,20261017
+                if (wpa3) sb.setWpa3Passphrase(pass);
+                else sb.setWpa2Passphrase(pass);
             }
             android.net.NetworkRequest req = new android.net.NetworkRequest.Builder()
                     .addTransportType(android.net.NetworkCapabilities.TRANSPORT_WIFI)
@@ -1418,21 +1708,30 @@ public class Xfer {
             final android.net.ConnectivityManager cm =
                     (android.net.ConnectivityManager) mCtx.getSystemService(Context.CONNECTIVITY_SERVICE);
             if (cm == null) return false;
+            Bus.log("传输: 回退 WifiNetworkSpecifier 接入 SSID=" + ssid + "(" + (wpa3 ? "WPA3" : "WPA2")
+                    + "," + (attemptMs / 1000) + "s)…");
             final java.util.concurrent.CountDownLatch latch = new java.util.concurrent.CountDownLatch(1);
             final android.net.Network[] holder = new android.net.Network[1];
+            final boolean[] unavailable = {false};
             mWifiNetCb = new android.net.ConnectivityManager.NetworkCallback() {
                 @Override public void onAvailable(android.net.Network network) {
                     holder[0] = network;
                     latch.countDown();
                 }
                 @Override public void onUnavailable() {
+                    unavailable[0] = true;
                     latch.countDown();
                 }
             };
             cm.requestNetwork(req, mWifiNetCb, (int) attemptMs);
             if (!latch.await(attemptMs + 300, java.util.concurrent.TimeUnit.MILLISECONDS)
                     || holder[0] == null) {
-                Bus.log("传输: 热点接入未成功(本次超时或被拒绝)");
+                if (unavailable[0]) {
+                    Bus.log("传输: 系统直接拒绝热点请求(未弹窗)");
+                } else {
+                    Bus.log("传输: 热点接入未成功(" + (attemptMs / 1000)
+                            + "s);若系统弹出了「连接到设备」,需用户点击「连接」(悬浮窗可能遮挡)");
+                }
                 releaseNetworkRequest();
                 return false;
             }
@@ -1467,8 +1766,6 @@ public class Xfer {
                         Bus.log("传输: 热点连接交由接收/裁决路径接管");
                         return true;
                     }
-                    mPauseWarm = true; // 接入成功后停 P2P 搜索:射频让路给数据传输(否则吞吐暴跌)
-                    try { mP2p.stopPeerDiscovery(mChannel, null); } catch (Throwable ignored) {}
                     Bus.log("传输: 热点直连成功(免搜索)");
                     mListener.onP2pReady(false, gw);
                     return true;
@@ -1489,6 +1786,7 @@ public class Xfer {
             return false;
         }
     }
+    //pri added by zhuyang,Specifier fallback: one request long enough for the user to tap the system dialog,20261019,end
 
     private void releaseNetworkRequest() {
         try {
@@ -1501,8 +1799,63 @@ public class Xfer {
         mWifiNetCb = null;
     }
 
+    private static int findConfiguredNetId(WifiManager wm, String ssid) {
+        try {
+            Method m = WifiManager.class.getMethod("getConfiguredNetworks");
+            List<?> list = (List<?>) m.invoke(wm);
+            if (list != null) {
+                for (Object c : list) {
+                    if (c == null) continue;
+                    Object raw = c.getClass().getField("SSID").get(c);
+                    if (!(raw instanceof String)) continue;
+                    if (!ssid.equals(unquote((String) raw))) continue;
+                    int id = c.getClass().getField("networkId").getInt(c);
+                    if (id >= 0) return id;
+                }
+            }
+        } catch (Throwable t) {
+            Bus.log("Wi-Fi: 读取已保存网络失败 " + t);
+        }
+        return -1;
+    }
+
+    private static boolean removeSavedNetwork(WifiManager wm, int netId) {
+        try {
+            Method m = WifiManager.class.getMethod("removeNetwork", int.class);
+            return Boolean.TRUE.equals(m.invoke(wm, netId));
+        } catch (Throwable t) {
+            Bus.log("Wi-Fi: 忘记网络失败 netId=" + netId + " " + t);
+            return false;
+        }
+    }
+
+    private static boolean enableSavedNetwork(WifiManager wm, int netId) {
+        try {
+            Method m = WifiManager.class.getMethod("enableNetwork", int.class, boolean.class);
+            return Boolean.TRUE.equals(m.invoke(wm, netId, true));
+        } catch (Throwable t) {
+            Bus.log("Wi-Fi: 恢复网络失败 netId=" + netId + " " + t);
+            return false;
+        }
+    }
+
+    private static String unquote(String s) {
+        if (s == null) return null;
+        if (s.length() >= 2 && s.startsWith("\"") && s.endsWith("\"")) {
+            return s.substring(1, s.length() - 1);
+        }
+        return s;
+    }
+
+    private static String intToIp(int ip) {
+        return (ip & 0xff) + "." + ((ip >> 8) & 0xff) + "." + ((ip >> 16) & 0xff)
+                + "." + ((ip >> 24) & 0xff);
+    }
+
     private void startDiscovery() {
-        if (mPauseWarm || mGotConnection) return; // 连接已就绪,不再搜索
+        //pri added by zhuyang,P2P bearer disabled (product decision: same LAN -> hotspot),20261019
+        if (!P2P_ENABLED) return;
+        if (mGotConnection) return; // 连接已就绪,不再搜索
         Bus.log("P2P: 开始搜索附近设备…");
         try {
             mP2p.discoverPeers(mChannel, new WifiP2pManager.ActionListener() {
@@ -1519,6 +1872,8 @@ public class Xfer {
 
     //pri modify by zhuyang,Batch 5: P2P discovery owns its retry count; 1/2/4s backoff, max 3,20261017,start
     private void retryDiscovery() {
+        //pri added by zhuyang,P2P bearer disabled (product decision: same LAN -> hotspot),20261019
+        if (!P2P_ENABLED) return;
         if (!mDiscovering) return; //pri added by zhuyang,Batch 5: a failed round must not fail again on late peer events,20261017
         if (!mRunning || !mayDriveP2p()) {
             mDiscovering = false;
@@ -1545,6 +1900,8 @@ public class Xfer {
     //pri modify by zhuyang,Batch 5: P2P discovery owns its retry count; 1/2/4s backoff, max 3,20261017,end
 
     private void register() {
+        //pri added by zhuyang,P2P bearer disabled (product decision: same LAN -> hotspot),20261019
+        if (!P2P_ENABLED) return;
         if (mRx != null) return;
         mRx = new BroadcastReceiver() {
             @Override public void onReceive(Context c, Intent i) {
@@ -1590,6 +1947,8 @@ public class Xfer {
     //pri modify by zhuyang,Exact P2P address/name only: no Android* wildcard and no model/BT fallback,20261017,end
 
     private void onPeers(WifiP2pDeviceList peers) {
+        //pri added by zhuyang,P2P bearer disabled (product decision: same LAN -> hotspot),20261019
+        if (!P2P_ENABLED) return;
         Collection<WifiP2pDevice> list = peers.getDeviceList();
         if (list == null || list.isEmpty()) return;
 
@@ -1642,6 +2001,8 @@ public class Xfer {
     }
 
     private void onConn(WifiP2pInfo info) {
+        //pri added by zhuyang,P2P bearer disabled (product decision: same LAN -> hotspot),20261019
+        if (!P2P_ENABLED) return;
         if (!info.groupFormed) return;
         InetAddress addr = info.groupOwnerAddress;
         mGoAddress = (addr == null) ? null : addr.getHostAddress();
@@ -1729,6 +2090,7 @@ public class Xfer {
             //pri added by zhuyang,Wrap the socket streams so liveness sees byte-level progress,20261017,end
             if (expected == null) {
                 Bus.log("传输: [未认证] 本轮无对方 sid,跳过 HELLO/ROLE 校验 " + s.getInetAddress());
+                maybeCloseHotspotForLan(s);
                 s.setSoTimeout(0);
                 Link link = new Link(s, in, out, rxAt, txAt);
                 mUnauthCount.decrementAndGet();
@@ -1760,6 +2122,7 @@ public class Xfer {
             out.flush();
             Bus.log("传输: [认证] HELLO 校验通过 " + s.getInetAddress()
                     + ",对方角色=" + hello.role + ",本机角色=" + localRole());
+            maybeCloseHotspotForLan(s);
             Link link = new Link(s, in, out, rxAt, txAt);
             link.peerHave = hello.have;
             if (hello.have != null) Bus.log("传输: [认证] 对端已有图片位图 have=" + hello.have);
@@ -2047,6 +2410,11 @@ public class Xfer {
                 if (SystemClock.elapsedRealtime() - listenStart >= OFFER_WAIT_MS) {
                     notifyOfferExpiredOnce(link, new XferError(XferError.Stage.OFFER, XferError.OFFER_TIMEOUT,
                             "已连接 " + (OFFER_WAIT_MS / 1000) + "s 仍未收到报价(对方未开始发送)"));
+                    //pri added by zhuyang,Offer timeout on a joined AP must restore the user's Wi-Fi,20261019
+                    if (mJoinedSsid != null && mPeerSocket == null) {
+                        Bus.log("热点: 等待报价超时,恢复原 Wi-Fi");
+                        restoreWifiAfterJoin();
+                    }
                     break;
                 }
                 //pri added by zhuyang,No offer within 20s: close and let the receive page report it,20261017,end
@@ -2634,11 +3002,7 @@ public class Xfer {
             closeQuietly(link);
             //pri modify by zhuyang,Clear both role handles for the dead Link before closing it,20261017,end
             //pri added by zhuyang,Release the hotspot on failure too so Wi-Fi comes back,20261017,start
-            if (mReceiverRole && mHotspotActive) {
-                closeHotspot();
-                Bus.log("传输: 热点已关闭,Wi-Fi 恢复可用");
-            }
-            //pri added by zhuyang,Batch 6: a receiver that joined the owner AP unbinds it after the round,20261017
+            //pri modify by zhuyang,Keep the AP for a 1s grace period so the sender can read DONE_ACK,20261019
             releaseHotspotLater();
             //pri added by zhuyang,Release the hotspot on failure too so Wi-Fi comes back,20261017,end
         }
@@ -3363,18 +3727,23 @@ public class Xfer {
     }
     //pri added by zhuyang,Offer/verdict layer of the two-phase protocol,20261014,end
 
-    //pri added by zhuyang,Release the hotspot network only after the whole transaction finished,20261014
+    //pri modify by zhuyang,Release the hotspot network when the whole transaction finishes (success/failure/cancel),20261019
     private void releaseHotspotLater() {
-        if (mWifiNetCb != null) {
-            mMain.postDelayed(new Runnable() {
-                @Override public void run() { releaseNetworkRequest(); }
-            }, 5000);
-        }
-        //pri added by zhuyang,Batch 6: the AP owner releases its hotspot when the transaction ends,20261017
-        if (mHotspotActive || mHotspotReservation != null) {
-            Bus.log("热点: 本轮传输结束,释放 AP owner 热点");
-            closeHotspot();
-        }
+        //pri added by zhuyang,1s grace so the peer can read DONE_ACK before the AP goes away; generations cancel stale runs,20261019,start
+        final int hg = mHotspotGen;
+        final int wg = mWifiGen;
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try { Thread.sleep(HS_RELEASE_GRACE_MS); } catch (InterruptedException ignored) {}
+                if (wg != mWifiGen) return; // a new round already cleaned up / re-joined
+                restoreWifiAfterJoin();
+                if (hg == mHotspotGen && (mHotspotActive || mHotspotReservation != null)) {
+                    Bus.log("热点: 本轮传输结束,释放 AP owner 热点");
+                    closeHotspot();
+                }
+            }
+        }, "hotspot-release").start();
+        //pri added by zhuyang,1s grace so the peer can read DONE_ACK before the AP goes away; generations cancel stale runs,20261019,end
     }
 
     private byte[] thumbnail(Uri uri) {
@@ -3411,9 +3780,13 @@ public class Xfer {
         closeQuietly(mSendSocket);
         try { if (mRx != null) mCtx.unregisterReceiver(mRx); } catch (Exception ignored) {}
         mRx = null;
-        releaseNetworkRequest();
+        //pri added by zhuyang,Service teardown must forget the joined AP and restore the original network,20261019
+        restoreWifiAfterJoin();
         closeHotspot();
-        try { if (mP2p != null && mChannel != null) mP2p.removeGroup(mChannel, null); } catch (Exception ignored) {}
+        //pri added by zhuyang,P2P bearer disabled (product decision: same LAN -> hotspot),20261019
+        if (P2P_ENABLED) {
+            try { if (mP2p != null && mChannel != null) mP2p.removeGroup(mChannel, null); } catch (Exception ignored) {}
+        }
     }
 
     // ---------- helpers ----------
@@ -3423,14 +3796,17 @@ public class Xfer {
         if (err == null) return;
         mSenderWaiting = false;
         mDiscovering = false; //pri added by zhuyang,Batch 5: a failed round stops its connect stage,20261017
-        mDriveP2p = false;
         Bus.log("传输: [失败] " + err.code + "(" + XferError.nameOf(err.code) + ") stage=" + err.stage
                 + " — " + (err.detail == null ? "" : err.detail));
-        //pri added by zhuyang,Batch 6: a terminal failure with no live link must not leave the round's AP open,20261017
-        if (!hasLiveLink() && (mHotspotActive || mHotspotReservation != null)) {
-            closeHotspot();
-            Bus.log("热点: 本轮失败,已释放热点");
+        //pri modify by zhuyang,A terminal failure with no live link must not leave the AP/joined Wi-Fi behind,20261019,start
+        if (!hasLiveLink()) {
+            restoreWifiAfterJoin();
+            if (mHotspotActive || mHotspotReservation != null) {
+                closeHotspot();
+                Bus.log("热点: 本轮失败,已释放热点");
+            }
         }
+        //pri modify by zhuyang,A terminal failure with no live link must not leave the AP/joined Wi-Fi behind,20261019,end
         final String legacy = err.detail == null ? XferError.nameOf(err.code) : err.detail;
         mMain.post(new Runnable() {
             @Override public void run() {
