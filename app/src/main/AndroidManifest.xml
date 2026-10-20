@@ -22,8 +22,6 @@
 
     <!-- 悬浮窗 + 前台服务 -->
     <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
-    <!-- pri added by zhuyang,Change 1: the main window is TYPE_NAVIGATION_BAR_PANEL (layer 25) now, and DisplayPolicy.validateAddingWindowLw enforces STATUS_BAR_SERVICE on that type; protectionLevel is signature|recents, so a platform-signed /system/app gets it by declaring it,20261014 -->
-    <uses-permission android:name="android.permission.STATUS_BAR_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />

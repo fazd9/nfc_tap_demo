@@ -39,9 +39,6 @@ import android.window.OnBackInvokedDispatcher
 import android.widget.TextView
 import android.widget.Toast
 import androidx.core.app.NotificationCompat
-import androidx.core.view.ViewCompat
-import androidx.core.view.WindowInsetsCompat
-import androidx.core.view.WindowInsetsControllerCompat
 import com.pri.nfctouchdemo.HomeActivity
 import com.pri.nfctouchdemo.R
 import com.pri.nfctouchdemo.anim.Timeline
@@ -189,7 +186,7 @@ class OverlayService : Service() {
         createChannel()
         //pri added by zhuyang,Change 2: registered once for the life of the service, as the reference's init/release pair does,20261014
         topTaskWatcher = TaskStackWatcher(::onTopTaskChanged).also { it.register() }
-        //pri added by chenpengqi,Screen-off path: this window type sits above the keyguard, so a lock must take the page down with it,20261019,start
+        //pri modify by zhuyang,Screen-off path: a screen-off is an exit from either page, so the page is dropped and the session cancel is sent,20261020,start
         val screenFilter = IntentFilter(Intent.ACTION_SCREEN_OFF)
         val receiver = object : BroadcastReceiver() {
             override fun onReceive(context: Context?, intent: Intent?) {
@@ -203,7 +200,7 @@ class OverlayService : Service() {
             registerReceiver(receiver, screenFilter)
         }
         screenReceiver = receiver
-        //pri added by chenpengqi,Screen-off path: this window type sits above the keyguard, so a lock must take the page down with it,20261019,end
+        //pri modify by zhuyang,Screen-off path: a screen-off is an exit from either page, so the page is dropped and the session cancel is sent,20261020,end
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -232,7 +229,6 @@ class OverlayService : Service() {
         val view = rootView ?: return
         // 旋转 / 手势导航切换后系统栏高度和屏幕尺寸都会变
         applyBarInsets()
-        requestFullScreen()
         val size = displaySize()
         val params = view.layoutParams as? WindowManager.LayoutParams ?: return
         if (params.width != size.x || params.height != size.y) {
@@ -754,20 +750,16 @@ class OverlayService : Service() {
     //pri modify by chenpengqi,Gesture-nav Back path: the other half of the same fix,20261016,end
 
     //pri added by zhuyang,Change 2: the page gives way when the top task changes (Home / Recents), as FunnyWindowService does,20261014,start
-    //pri added by zhuyang,Fired by TaskStackWatcher on a binder thread: read the setting and touch the view tree on the main thread,20261014
+    //pri modify by zhuyang,Fired by TaskStackWatcher on a binder thread: touch the view tree on the main thread,20261020
     private fun onTopTaskChanged() {
         mainHandler.post {
-            //pri added by zhuyang,Same gate as the reference: only gesture navigation dismisses on a task change,20261014
-            val navMode = Settings.Secure.getInt(contentResolver, "navigation_mode", -1)
-            if (navMode == 2) {
-                //pri added by zhuyang,Nothing on screen -> nothing to dismiss,20261014
-                if (attached) {
-                    Log.i(TAG, "顶层任务变化：手势导航，收起动效页")
-                    dismissPage()
-                }
-            } else {
-                Log.i(TAG, "顶层任务变化：非手势导航，忽略")
+            //pri modify by zhuyang,The page sits under the visible nav bar now: a top-task change (Home / Recents in 3-button navigation, the Home swipe in gesture navigation) must exit in both modes,20261020,start
+            //pri added by zhuyang,Nothing on screen -> nothing to dismiss,20261014
+            if (attached) {
+                Log.i(TAG, "顶层任务变化，收起动效页")
+                dismissPage()
             }
+            //pri modify by zhuyang,The page sits under the visible nav bar now: a top-task change (Home / Recents in 3-button navigation, the Home swipe in gesture navigation) must exit in both modes,20261020,end
         }
     }
     //pri added by zhuyang,Change 2: the page gives way when the top task changes (Home / Recents), as FunnyWindowService does,20261014,end
@@ -860,8 +852,6 @@ class OverlayService : Service() {
         rippleView.onResume()
 
         applyBarInsets()
-        // 悬浮窗不是绝对能收起系统栏；收不起来也没关系，内容本来就铺到最下沿
-        requestFullScreen()
         content.postDelayed({ applyBarInsets() }, 400L)
         ensureForeground()
     }
@@ -916,19 +906,9 @@ class OverlayService : Service() {
     private fun countExtra(intent: Intent?, fallback: Int): Int =
         if (intent?.hasExtra(EXTRA_COUNT) == true) intent.getIntExtra(EXTRA_COUNT, fallback) else fallback
 
-    //pri added by zhuyang,Change 1: window type of the animation page,20261014,start
-    //pri added by zhuyang,TYPE_NAVIGATION_BAR_PANEL = layer 25: above the status bar / keyguard / IME, like FunnyWindowModel,20261014
-    //pri added by zhuyang,The constant itself is @hide (not in the public SDK), so it is read from this ROM's framework,20261014
-    private val overlayWindowType: Int by lazy {
-        runCatching {
-            Class.forName("android.view.WindowManager\$LayoutParams")
-                .getField("TYPE_NAVIGATION_BAR_PANEL").getInt(null)
-        }.getOrElse {
-            Log.e(TAG, "取 TYPE_NAVIGATION_BAR_PANEL 失败，退回 TYPE_APPLICATION_OVERLAY", it)
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
-        }
-    }
-    //pri added by zhuyang,Change 1: window type of the animation page,20261014,end
+    //pri modify by zhuyang,Drop TYPE_NAVIGATION_BAR_PANEL layer 25 for TYPE_APPLICATION_OVERLAY layer 11: the nav bar and the keyguard now draw above the page, so the nav bar stays visible and the page never shows on the lock screen,20261020,start
+    //pri modify by zhuyang,Same type the fail banner already uses,20261020,end
+    private val overlayWindowType: Int = WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY
 
     /**
      * 一个整屏、透明、可以获得焦点的悬浮窗 —— 返回键要能落到这一层。
@@ -1172,8 +1152,23 @@ class OverlayService : Service() {
     private fun applyBarInsets() {
         systemTop = topInsetPx()
         overlay.topInset = systemTop.toFloat()
-        // 底部没有控制条要让开了，白线直接贴到屏幕最下沿
-        overlay.bottomInset = 0f
+        //pri modify by zhuyang,Bottom inset only in 3-button navigation: the window now sits under the nav bar, so bottom-anchored text must clear it; gesture navigation keeps the white line on the very bottom edge,20261020,start
+        overlay.bottomInset = if (isThreeButtonNav()) bottomInsetPx().toFloat() else 0f
+        //pri modify by zhuyang,Bottom inset only in 3-button navigation: the window now sits under the nav bar, so bottom-anchored text must clear it; gesture navigation keeps the white line on the very bottom edge,20261020,end
+    }
+
+    private fun isThreeButtonNav(): Boolean =
+        Settings.Secure.getInt(contentResolver, "navigation_mode", -1) != 2
+
+    private fun bottomInsetPx(): Int {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                val insets = windowManager.maximumWindowMetrics.windowInsets
+                return insets.getInsetsIgnoringVisibility(WindowInsets.Type.navigationBars()).bottom
+            } catch (_: Throwable) {
+            }
+        }
+        return dimenOf("navigation_bar_height")
     }
 
     private fun topInsetPx(): Int {
@@ -1193,19 +1188,6 @@ class OverlayService : Service() {
     private fun dimenOf(resName: String): Int {
         val id = resources.getIdentifier(resName, "dimen", "android")
         return if (id > 0) resources.getDimensionPixelSize(id) else 0
-    }
-
-    /**
-     * 请系统把状态栏 / 导航栏收起来。
-     *
-     * 悬浮窗（`TYPE_APPLICATION_OVERLAY`）不是绝对能收起系统栏的，
-     * 收不起来也不影响整屏：窗口本来就铺到最下沿，导航栏落在窗口下面被内容盖住。
-     */
-    private fun requestFullScreen() {
-        val controller = rootView?.let { ViewCompat.getWindowInsetsController(it) } ?: return
-        controller.systemBarsBehavior =
-            WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-        controller.hide(WindowInsetsCompat.Type.systemBars())
     }
 
     /** 整块屏幕的像素尺寸（含系统栏）。 */
