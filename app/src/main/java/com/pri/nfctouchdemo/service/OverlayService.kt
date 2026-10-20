@@ -652,11 +652,9 @@ class OverlayService : Service() {
     //pri modify by zhuyang,Exit sync: whatever way the page goes away, the peer must be told so it drops its side too,20261020,start
     //pri modify by zhuyang,Receiving page still reports the reject pill; the send page now reports a cancel instead of staying silent,20261020
     private fun dismissPage() {
-        //pri added by zhuyang,Receiving page goes out exactly like the reject pill, otherwise the next incoming image would re-open the card,20261014
-        when (mode) {
-            OverlayView.Mode.RECEIVE -> notifyNfc(ACTION_UI_RECEIVE_REJECT)
-            OverlayView.Mode.SEND -> notifyNfc(ACTION_UI_SESSION_CANCELLED)
-        }
+        //pri modify by zhuyang,Exit sync: both modes report a session cancel; the reject pill keeps its own verdict,20261020,start
+        notifyNfc(ACTION_UI_SESSION_CANCELLED)
+        //pri modify by zhuyang,Exit sync: both modes report a session cancel; the reject pill keeps its own verdict,20261020,end
         hideDemo()
         //pri added by zhuyang,Drop a live drag / fly / dissolve so the detached view tree does not carry it into the next round,20261014
         overlay.resetSendState()
@@ -669,10 +667,9 @@ class OverlayService : Service() {
         if (!attached) return
         Log.i(TAG, "息屏：收起动效页并通知对端")
         cancelDissolve()
-        when (mode) {
-            OverlayView.Mode.RECEIVE -> notifyNfc(ACTION_UI_RECEIVE_REJECT)
-            OverlayView.Mode.SEND -> notifyNfc(ACTION_UI_SESSION_CANCELLED)
-        }
+        //pri modify by zhuyang,Exit sync: a screen-off is an exit from either page, so both send the session cancel,20261020,start
+        notifyNfc(ACTION_UI_SESSION_CANCELLED)
+        //pri modify by zhuyang,Exit sync: a screen-off is an exit from either page, so both send the session cancel,20261020,end
         hideDemo()
         overlay.resetSendState()
     }

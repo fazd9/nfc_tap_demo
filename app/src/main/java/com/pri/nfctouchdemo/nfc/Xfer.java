@@ -84,17 +84,21 @@ public class Xfer {
     private static final long HS_SPEC_BUDGET_MS = 25000L;
     private static final long WIFI_ENABLE_WAIT_MS = 5000L;
     private static final long WIFI_ASSOC_POLL_MS = 6000L;
-    private static final long OWNER_WAIT_MS = 8000L; //pri modify by zhuyang,Peer not joined in 8s is treated as gone (6s machine step),20261020
+    private static final long OWNER_WAIT_MS = 15000L; //pri modify by zhuyang,Exit sync: outlast the 12s tap-time join budget before calling the peer gone,20261020
     private static final long HS_RELEASE_GRACE_MS = 1000L;
     private static final int HS_HIDDEN_ATTEMPTS = 2;
     private static final int HS_HIDDEN_UNAVAILABLE = 0;
     private static final int HS_HIDDEN_OK = 1;
     private static final int HS_HIDDEN_FAILED = 2;
-    //pri added by zhuyang,Tap-time preconnect: quick association attempts with backoff, hard-capped at 8s from the tap,20261019,start
-    private static final long HS_EARLY_BUDGET_MS = 8000L;
+    //pri added by zhuyang,Tap-time preconnect: quick association attempts with backoff, hard-capped at 12s from the tap,20261020,start
+    //pri modify by zhuyang,Exit sync: the tap-time join must survive a late AP start, so the early loop gets 12s,20261020
+    private static final long HS_EARLY_BUDGET_MS = 12000L;
     private static final long HS_EARLY_ATTEMPT_MS = 4000L;
+    //pri added by zhuyang,Exit sync: the first join fires before the framework has scanned the fresh AP; fail it fast and retry,20261020
+    private static final long HS_EARLY_FIRST_PROBE_MS = 1200L;
     private static final long HS_EARLY_RETRY_MS = 400L;
-    private static final long HS_EARLY_START_DELAY_MS = 350L;
+    //pri modify by zhuyang,Exit sync: the owner AP is up about 1s after the tap, so wait before the first join,20261020
+    private static final long HS_EARLY_START_DELAY_MS = 1500L;
     private static final long HS_EARLY_HANDOFF_WAIT_MS = 5000L;
     //pri added by zhuyang,Tap-time preconnect: quick association attempts with backoff, hard-capped at 8s from the tap,20261019,end
     //pri added by zhuyang,Hotspot bearer: silent hidden join first, specifier fallback with a dialog-sized budget,20261019,end
@@ -102,9 +106,15 @@ public class Xfer {
     //pri added by zhuyang,Liveness limits: read cap, PING idle, dead peer, write stall and round total,20261017,start
     private static final int RX_TIMEOUT_MS = 30000;      // control/role paths still allow a slow first frame
     private static final int RX_DATA_TIMEOUT_MS = 10000; // data phase: a chunk or PING must arrive within 10s
-    private static final int HEARTBEAT_IDLE_MS = 2000;   // no frame written for this long -> PING
-    private static final int HEARTBEAT_DEAD_MS = 10000;  // no byte received for this long -> link is dead
-    private static final int HEARTBEAT_TICK_MS = 500;    // heartbeat check period
+    //pri modify by zhuyang,Exit sync: the round lasts seconds, so the interaction heartbeat is second-scale,20261020,start
+    private static final int HEARTBEAT_IDLE_MS = 300;    // no frame written for this long -> PING
+    private static final int HEARTBEAT_DEAD_MS = 1000;   // no byte received for this long -> link is dead
+    private static final int HEARTBEAT_TICK_MS = 50;     // heartbeat check period
+    //pri added by zhuyang,Exit sync: once bytes flow a slow link may gap over 1s, so the data phase uses 5s,20261020
+    private static final int TRANSFER_DEAD_MS = 5000;    // data phase: no byte received for this long -> link is dead
+    //pri added by zhuyang,Exit sync: keep the listener and the AP briefly so a late-joining peer is told st=out,20261020
+    private static final int ABORT_FAREWELL_MS = 12000;
+    //pri modify by zhuyang,Exit sync: the round lasts seconds, so the interaction heartbeat is second-scale,20261020,end
     private static final int WRITE_STALL_MS = 10000;     // transfer phase: no write progress -> close
     private static final long TRANSFER_TOTAL_MS = 5 * 60 * 1000L; // one photo round is capped at 5 minutes
     private static final int OFFER_WAIT_MS = 20000;      // connected receiver waiting for the peer's offer
@@ -125,6 +135,8 @@ public class Xfer {
     private static final int ROLE_READ_TIMEOUT_MS = 1500;   //pri added by zhuyang,Wait this long for the peer ROLE frame after HELLO_ACK,20261017
     private static final int ROLE_LISTEN_TIMEOUT_MS = 1000; //pri added by zhuyang,Upper bound for joining the role listener before reusing its stream,20261017
     private static final int VERDICT_YIELDED = -1;          //pri added by zhuyang,readVerdict result: this phone yielded and now receives,20261017
+    //pri added by zhuyang,Exit sync: readVerdict result when the peer sent CANCEL while we waited for a verdict,20261020
+    private static final int VERDICT_CANCELLED = -2;
     //pri added by zhuyang,Batch 5: connect stage budget (LAN once + P2P 1/2/4s backoff),20261017,start
     private static final int LAN_CONNECT_TIMEOUT_MS = 2000;
     private static final int P2P_DISCOVER_MAX = 3;
@@ -222,6 +234,8 @@ public class Xfer {
         volatile boolean hbRunning;
         volatile boolean hbWritePhase;                         // true after ACCEPT: watchdog instead of rx-dead
         volatile boolean hbExpectRx;                           // false while the sender is still writing the offer
+        //pri added by zhuyang,Exit sync: data is flowing, so the dead check relaxes to TRANSFER_DEAD_MS,20261020
+        volatile boolean hbTransferPhase;
         final java.util.concurrent.atomic.AtomicBoolean linkDead =
                 new java.util.concurrent.atomic.AtomicBoolean();
         final java.util.concurrent.atomic.AtomicBoolean failCb =
@@ -342,6 +356,8 @@ public class Xfer {
     private volatile String mPeerSid; //pri added by zhuyang,Peer session id from the NFC payload; null means the debug path skips HELLO,20261017
     //pri added by zhuyang,Liveness probe: whether this round is still on screen (HELLO st=in/out),20261020
     private volatile boolean mRoundLive = true;
+    //pri added by zhuyang,Exit sync: while a farewell window is open the radio must stay up so a late peer gets st=out,20261020
+    private volatile boolean mFarewellActive;
     private volatile boolean mGotConnection;
     //pri added by zhuyang,Counter of accepted sockets whose HELLO has not been checked yet,20261017
     private final java.util.concurrent.atomic.AtomicInteger mUnauthCount =
@@ -492,6 +508,7 @@ public class Xfer {
         mYielded = false;
         mVerdictSent = false;
         mRoundAborted.set(false); //pri added by zhuyang,Exit sync: the next tap may cancel its own round,20261020
+        mFarewellActive = false; //pri added by zhuyang,Exit sync: a new round owns the radio again,20261020
         mPeerGoneSignal = false; //pri added by zhuyang,Exit sync: liveness signals belong to one round,20261020
         mPeerGoneReported.set(false); //pri added by zhuyang,Exit sync: the next tap may report its own PEER_GONE,20261020
         mRoundFailed.set(false); //pri added by zhuyang,Exit sync: the next tap starts with no failure,20261020
@@ -599,12 +616,34 @@ public class Xfer {
     //pri added by zhuyang,Batch 6: a non-owner receiver joins the owner AP so it can accept the owner's send,20261017,start
     public void startHotspotClient() {
         if (mApOwner) return;
-        //pri added by zhuyang,LAN first: same subnet means the peer can reach us directly, so never join a hotspot,20261019,start
+        //pri modify by zhuyang,Exit sync: same LAN still builds the tap-time link, directly against the peer port,20261020,start
         if (likelySameLan()) {
-            Bus.log("承载: 对方与本机同处一个 LAN(对方 IP=" + mPeerLanIp + "),跳过热点接入,走同网直连");
+            final String peerIp = mPeerLanIp;
+            Bus.log("承载: 对方与本机同处一个 LAN(对方 IP=" + peerIp + "),碰触即同网直连");
+            new Thread(new Runnable() {
+                @Override public void run() {
+                    final long deadline = SystemClock.elapsedRealtime() + HS_EARLY_BUDGET_MS;
+                    int attempt = 0;
+                    while (mRunning && SystemClock.elapsedRealtime() < deadline) {
+                        if (isAlive(mSendSocket) || isAlive(mStashedSocket) || mPeerSocket != null) return;
+                        attempt++;
+                        if (connectTo(peerIp, "局域网")) return;
+                        try { Thread.sleep(400); } catch (InterruptedException ignored) { return; }
+                    }
+                    Bus.log("承载: 同 LAN 碰触直连未在 " + HS_EARLY_BUDGET_MS + "ms 内完成(尝试 "
+                            + attempt + " 次)");
+                    //pri added by zhuyang,Exit sync: a joiner that never reached the peer must not leave its page up,20261020,start
+                    if (mRunning && mRoundLive && mLocalSwipedAt == 0 && !mRoundAborted.get()
+                            && !mRoundFailed.get() && !mGotConnection && !hasLiveLink()) {
+                        Bus.log("承载: 同 LAN 碰触直连失败,判定对方已退出");
+                        reportPeerGone("同 LAN 碰触直连失败");
+                    }
+                    //pri added by zhuyang,Exit sync: a joiner that never reached the peer must not leave its page up,20261020,end
+                }
+            }, "lan-client").start();
             return;
         }
-        //pri added by zhuyang,LAN first: same subnet means the peer can reach us directly, so never join a hotspot,20261019,end
+        //pri modify by zhuyang,Exit sync: same LAN still builds the tap-time link, directly against the peer port,20261020,end
         final String ssid;
         final String pass;
         final boolean derived;
@@ -688,7 +727,8 @@ public class Xfer {
                             joined = true;
                             return;
                         }
-                        long attemptMs = Math.max(500L, Math.min(HS_EARLY_ATTEMPT_MS, left));
+                        long attemptMs = Math.max(500L, Math.min(
+                                attempt == 1 ? HS_EARLY_FIRST_PROBE_MS : HS_EARLY_ATTEMPT_MS, left));
                         Bus.log("热点: 碰触提前接入尝试 " + attempt + "(剩余 " + left
                                 + "ms,单次 " + attemptMs + "ms)");
                         hr = joinHotspotHidden(wm, ssid, pass, gen, 1, attemptMs, HS_EARLY_BUDGET_MS);
@@ -731,6 +771,13 @@ public class Xfer {
             if (!joined && !mEarlyJoinAbort && !mEarlyJoinHandoff && gen == mWifiGen
                     && !isAlive(mSendSocket) && !isAlive(mStashedSocket)) {
                 restoreWifiAfterJoin();
+                //pri added by zhuyang,Exit sync: a joiner that never reaches the peer must not leave its page up forever,20261020,start
+                if (mRunning && mRoundLive && !mRoundAborted.get() && !mRoundFailed.get()
+                        && !mGotConnection && !hasLiveLink()) {
+                    Bus.log("热点: 碰触提前接入失败,判定对方已退出");
+                    reportPeerGone("碰触后 " + HS_EARLY_BUDGET_MS + "ms 内无法接入对方");
+                }
+                //pri added by zhuyang,Exit sync: a joiner that never reaches the peer must not leave its page up forever,20261020,end
             }
         }
     }
@@ -922,7 +969,8 @@ public class Xfer {
             @Override
             public void run() {
                 if (mRunning && round == mRound && !mRoundAborted.get() && !mRoundFailed.get()
-                        && mRoundLive && !mGotConnection && !hasLiveLink()) {
+                        && mRoundLive && mApOwner && !mGotConnection && !hasLiveLink()) {
+                    //pri modify by zhuyang,Exit sync: only the AP owner waits for an inbound link; the joiner owns the connect budget,20261020
                     Bus.log("传输: " + (OWNER_WAIT_MS / 1000) + " 秒内仍未收到对方连接,判定对方已退出");
                     reportPeerGone((OWNER_WAIT_MS / 1000) + " 秒内对方未接入");
                 }
@@ -1219,7 +1267,13 @@ public class Xfer {
     private void startHeartbeat(final Link link, final boolean expectRx) {
         if (link == null) return;
         synchronized (link) {
-            if (link.hbRunning || !isAlive(link)) return;
+            if (!isAlive(link)) return;
+            //pri added by zhuyang,Exit sync: a role-listened link promoted to the send channel only flips its expectation,20261020
+            if (link.hbRunning) {
+                link.hbExpectRx = expectRx;
+                return;
+            }
+            //pri added by zhuyang,Exit sync: a role-listened link promoted to the send channel only flips its expectation,20261020
             long now = SystemClock.elapsedRealtime();
             link.lastRx.set(now);
             link.lastTx.set(now);
@@ -1233,8 +1287,8 @@ public class Xfer {
             link.hbThread = t;
             t.start();
         }
-        Bus.log("传输: 心跳已启动(空闲 " + (HEARTBEAT_IDLE_MS / 1000) + "s 发 PING,无数据 "
-                + (HEARTBEAT_DEAD_MS / 1000) + "s 判失效)");
+        Bus.log("传输: 心跳已启动(空闲 " + HEARTBEAT_IDLE_MS + "ms 发 PING,交互 "
+                + HEARTBEAT_DEAD_MS + "ms / 传输 " + TRANSFER_DEAD_MS + "ms 无数据判失效)");
     }
 
     private static void stopHeartbeat(Link link) {
@@ -1258,10 +1312,15 @@ public class Xfer {
                                 "写停滞超过 " + (WRITE_STALL_MS / 1000) + "s,连接失效"));
                         return;
                     }
-                } else if (link.hbExpectRx && now - link.lastRx.get() >= HEARTBEAT_DEAD_MS) {
-                    signalLinkDead(link, new XferError(XferError.Stage.TRANSFER, XferError.TRANSFER_TIMEOUT,
-                            "连接超时(" + (HEARTBEAT_DEAD_MS / 1000) + "s 未收到对端任何数据)"));
-                    return;
+                } else if (link.hbExpectRx) {
+                    //pri modify by zhuyang,Exit sync: 1s while the user decides, 5s once bytes flow,20261020,start
+                    final int deadMs = link.hbTransferPhase ? TRANSFER_DEAD_MS : HEARTBEAT_DEAD_MS;
+                    if (now - link.lastRx.get() >= deadMs) {
+                        signalLinkDead(link, new XferError(XferError.Stage.TRANSFER, XferError.TRANSFER_TIMEOUT,
+                                "连接超时(" + deadMs + "ms 未收到对端任何数据)"));
+                        return;
+                    }
+                    //pri modify by zhuyang,Exit sync: 1s while the user decides, 5s once bytes flow,20261020,end
                 }
                 if (now - link.lastTx.get() >= HEARTBEAT_IDLE_MS) {
                     boolean locked = false;
@@ -1639,6 +1698,8 @@ public class Xfer {
             return true;
         }
         Bus.log("传输: 接入对方热点 SSID=" + ssid + "(" + (derived ? "会话派生" : "对方凭据") + ")…");
+        //pri added by zhuyang,Exit sync: the swipe-time join owns the peer-gone signal; the early probe's misses are normal,20261020
+        mPeerGoneSignal = false;
         //pri added by zhuyang,Tap-time preconnect: a swipe during an early attempt waits for that attempt (a live link is reusable) instead of restarting the join,20261019,start
         mEarlyJoinHandoff = true;
         try {
@@ -2323,16 +2384,17 @@ public class Xfer {
         if (mServer != null) return;
         new Thread(new Runnable() {
             @Override public void run() {
+                java.net.ServerSocket ss = null;
                 try {
                     //pri modify by zhuyang,SO_REUSEADDR avoids EADDRINUSE when the previous round's listener is still in TIME_WAIT,20261020,start
-                    java.net.ServerSocket ss = new java.net.ServerSocket();
+                    ss = new java.net.ServerSocket();
                     ss.setReuseAddress(true);
                     ss.bind(new java.net.InetSocketAddress(PORT));
                     mServer = ss;
                     //pri modify by zhuyang,SO_REUSEADDR avoids EADDRINUSE when the previous round's listener is still in TIME_WAIT,20261020,end
                     Bus.log("传输: 已监听端口 " + PORT + ",等待对方连接…");
                     while (mRunning) {
-                        final Socket s = mServer.accept();
+                        final Socket s = ss.accept();
                         //pri added by zhuyang,Accept only accepts: HELLO is read on its own thread with a hard cap,20261017,start
                         if (mUnauthCount.incrementAndGet() > MAX_UNAUTH_CONNECTIONS) {
                             mUnauthCount.decrementAndGet();
@@ -2347,8 +2409,8 @@ public class Xfer {
                         //pri added by zhuyang,Accept only accepts: HELLO is read on its own thread with a hard cap,20261017,end
                     }
                 } catch (Exception e) {
-                    //pri added by zhuyang,A bind failure must not leave mServer pointing at a half-built listener,20261020
-                    mServer = null;
+                    //pri added by zhuyang,Exit sync: an old farewell listener must not clear the next round's server,20261020
+                    if (mServer == ss) mServer = null;
                     if (mRunning) Bus.log("传输: 监听异常 " + e);
                 }
             }
@@ -2519,13 +2581,11 @@ public class Xfer {
                 mStashedSocket = link;
                 startRoleListener(link);
             } else {
-                // ROLE(R): the peer is receiving, so this accepted link is our send channel.
-                setSendLink(link);
-                mStashedSocket = null;
-                Bus.log("传输: 对端是接收方(ROLE=R),本连接作为发送通道");
-                mMain.post(new Runnable() {
-                    @Override public void run() { mListener.onP2pReady(false, null); }
-                });
+                //pri modify by zhuyang,Exit sync: ROLE(R) only makes this link a candidate send channel; stash it and keep reading until the swipe,20261020,start
+                mStashedSocket = link;
+                startRoleListener(link);
+                Bus.log("传输: 对端是接收方(ROLE=R),暂存连接并监听,上滑后提升为发送通道");
+                //pri modify by zhuyang,Exit sync: ROLE(R) only makes this link a candidate send channel; stash it and keep reading until the swipe,20261020,end
             }
         } else if (first.type == Proto.TYPE_META) {
             // Compatibility: a 1a client (or old debug peer) sends the offer directly.
@@ -2597,9 +2657,17 @@ public class Xfer {
             Bus.log("传输: 对端角色=" + (role == null ? "未知" : role) + ",本机接收:暂存连接并监听");
             return false;
         }
-        setSendLink(link);
-        Bus.log("传输: 对端角色=" + (role == null ? "未知" : role) + ",本连接作为发送通道");
-        return true;
+        //pri modify by zhuyang,Exit sync: an unswiped side keeps the link readable until the swipe promotes it,20261020,start
+        if (isAlive(mSendSocket)) {
+            Bus.log("传输: 发送通道已就绪,关闭多余连接");
+            closeQuietly(link);
+            return false;
+        }
+        mStashedSocket = link;
+        startRoleListener(link);
+        Bus.log("传输: 对端角色=" + (role == null ? "未知" : role) + ",暂存连接并监听(上滑后提升为发送通道)");
+        return false;
+        //pri modify by zhuyang,Exit sync: an unswiped side keeps the link readable until the swipe promotes it,20261020,end
     }
     //pri added by zhuyang,Client-side classification: the link we opened may be the receive link or our send channel,20261017,end
 
@@ -2681,6 +2749,9 @@ public class Xfer {
             return;
         }
         try { link.s.setSoTimeout(RX_TIMEOUT_MS); } catch (Exception ignored) {} //pri modify by zhuyang,Bound every link read,20261017
+        //pri added by zhuyang,Exit sync: a link that only waits for an offer still needs the 300ms/1s heartbeat,20261020
+        startHeartbeat(link, true);
+        //pri added by zhuyang,Exit sync: a link that only waits for an offer still needs the 300ms/1s heartbeat,20261020
         Thread t = new Thread(new Runnable() {
             @Override public void run() { roleListenerLoop(link); }
         }, "role-listen");
@@ -2697,26 +2768,32 @@ public class Xfer {
     private boolean settleRoleListener(Link link) {
         if (!localRoleSettled()) return false;
         if (!mReceiverRole && mSendSocket == null && mStashedSocket == link) {
-            mStashedSocket = null;
-            mSendSocket = link;
-            try { link.s.setSoTimeout(0); } catch (Exception ignored) {}
-            Bus.log("传输: 本机先上滑(对端未宣告发送),沿用对端连接作为发送通道");
-            mMain.post(new Runnable() {
-                @Override public void run() { mListener.onP2pReady(false, null); }
-            });
+            //pri modify by zhuyang,Exit sync: promote through the single locked helper so two threads cannot adopt the same link,20261020,start
+            if (promoteStashedToSend() != null) {
+                Bus.log("传输: 本机先上滑(对端未宣告发送),沿用对端连接作为发送通道");
+                mMain.post(new Runnable() {
+                    @Override public void run() { mListener.onP2pReady(false, null); }
+                });
+            }
+            //pri modify by zhuyang,Exit sync: promote through the single locked helper so two threads cannot adopt the same link,20261020,end
         }
         return true;
     }
 
+    //pri modify by zhuyang,Exit sync: the listener is a full frame reader (ROLE/META/PING/PONG/CANCEL/HELLO) and reports a closed peer at once,20261020,start
     private void roleListenerLoop(Link link) {
-        Bus.log("传输: 开始监听对端角色(50ms 轮询)");
-        //pri added by zhuyang,Connected receiver must see an offer within 20s,20261017,start
+        Bus.log("传输: 开始监听对端角色(50ms 轮询,心跳 300ms)");
         long listenStart = SystemClock.elapsedRealtime();
-        //pri added by zhuyang,Connected receiver must see an offer within 20s,20261017,end
+        boolean handedOff = false;
+        boolean peerClosed = false;
         try {
             while (mRunning) {
                 if (mStashedSocket != link || mRoleListenerAbort == link) break;
-                //pri added by zhuyang,No offer within 20s: close and let the receive page report it,20261017,start
+                if (link.linkDead.get() || link.s.isClosed()) {
+                    peerClosed = true;
+                    break;
+                }
+                //pri added by zhuyang,No offer within 20s while the peer is alive: the long timeout still applies,20261017,start
                 if (SystemClock.elapsedRealtime() - listenStart >= OFFER_WAIT_MS) {
                     notifyOfferExpiredOnce(link, new XferError(XferError.Stage.OFFER, XferError.OFFER_TIMEOUT,
                             "已连接 " + (OFFER_WAIT_MS / 1000) + "s 仍未收到报价(对方未开始发送)"));
@@ -2727,35 +2804,34 @@ public class Xfer {
                     }
                     break;
                 }
-                //pri added by zhuyang,No offer within 20s: close and let the receive page report it,20261017,end
+                //pri added by zhuyang,No offer within 20s while the peer is alive: the long timeout still applies,20261017,end
                 Proto.Frame f;
                 try {
+                    //pri modify by zhuyang,Exit sync: poll the buffer (a timed read could split a frame); the 1s heartbeat closes a dead link,20261020,start
                     if (link.in.available() <= 0) {
                         if (settleRoleListener(link)) break;
-                        Thread.sleep(50); //pri added by zhuyang,Poll instead of a timed frame read so a partial frame is never lost,20261017
+                        try { Thread.sleep(50); } catch (InterruptedException ignored) {}
                         continue;
                     }
                     f = Proto.readFrame(link.in, RX_TIMEOUT_MS, Proto.MAX_FRAME_LEN);
-                } catch (InterruptedException ie) {
-                    continue;
+                    //pri modify by zhuyang,Exit sync: poll the buffer (a timed read could split a frame); the 1s heartbeat closes a dead link,20261020,end
                 } catch (Exception e) {
                     Bus.log("传输: 角色监听结束: " + e);
+                    peerClosed = true;
                     break;
                 }
                 if (f == null) {
                     Bus.log("传输: 角色监听连接已关闭");
+                    peerClosed = true;
                     break;
                 }
-                //pri added by zhuyang,Keep the stashed link alive while the peer waits,20261017,start
                 if (f.type == Proto.TYPE_PING) {
                     replyPong(link);
                     continue;
                 }
                 if (f.type == Proto.TYPE_PONG) {
-                    Bus.log("传输: 收到 PONG");
                     continue;
                 }
-                //pri added by zhuyang,Keep the stashed link alive while the peer waits,20261017,end
                 if (f.type == Proto.TYPE_ROLE) {
                     Proto.Role role = Proto.parseRole(f.data);
                     if (role == null) continue;
@@ -2765,12 +2841,14 @@ public class Xfer {
                     }
                     Bus.log("传输: 收到角色帧 ROLE(" + role.role + ")");
                     if ("S".equals(role.role)) {
+                        handedOff = true;
                         handlePeerSendRole(link, role.sid);
                     } else {
                         mPeerRole = role.role;
                     }
                 } else if (f.type == Proto.TYPE_META) {
                     Bus.log("传输: 角色监听读到报价,本机按接收处理");
+                    handedOff = true;
                     mStashedSocket = link;
                     handleIncoming(link, f);
                     break;
@@ -2781,6 +2859,8 @@ public class Xfer {
                     notifyLinkFailedOnce(link, new XferError(XferError.Stage.TRANSFER,
                             XferError.CANCELLED, "对方取消: " + reason));
                     break;
+                } else if (f.type == Proto.TYPE_HELLO || f.type == Proto.TYPE_HELLO_ACK) {
+                    Bus.log("传输: 角色监听忽略握手帧 " + f.type);
                 } else {
                     Bus.log("传输: 角色监听忽略帧类型 " + f.type);
                 }
@@ -2789,6 +2869,14 @@ public class Xfer {
             }
         } finally {
             if (mRoleListenerThread == Thread.currentThread()) mRoleListenerThread = null;
+            //pri added by zhuyang,Exit sync: a closed socket with no CANCEL still means the peer left - report PEER_GONE,20261020,start
+            if (peerClosed && !handedOff && mRoleListenerAbort != link && !mRoundAborted.get()
+                    && mRoundLive && mStashedSocket == link && mPeerSocket != link) {
+                Bus.log("传输: 角色监听连接已断开,判定对方已退出");
+                notifyLinkFailedOnce(link, new XferError(XferError.Stage.CONNECT,
+                        XferError.PEER_GONE, "对端在报价前已断开"));
+            }
+            //pri added by zhuyang,Exit sync: a closed socket with no CANCEL still means the peer left - report PEER_GONE,20261020,end
             // A normal exit means this link has no owner any more. An abort hands it to another reader.
             if (mRoleListenerAbort != link && mStashedSocket == link && mPeerSocket != link) {
                 mStashedSocket = null;
@@ -2797,6 +2885,8 @@ public class Xfer {
             Bus.log("传输: 角色监听结束");
         }
     }
+
+    //pri modify by zhuyang,Exit sync: the listener is a full frame reader (ROLE/META/PING/PONG/CANCEL/HELLO) and reports a closed peer at once,20261020,end
     //pri added by zhuyang,Role listener: the only reader of a stashed link until it yields or receives,20261017,end
 
     private void closeQuietly(Socket s) {
@@ -2805,6 +2895,11 @@ public class Xfer {
 
     private void closeQuietly(Link link) {
         try { if (link != null) link.s.close(); } catch (Exception ignored) {}
+    }
+
+    //pri added by zhuyang,Exit sync: the farewell listener is a ServerSocket, closed on its own timer,20261020
+    private void closeQuietly(ServerSocket s) {
+        try { if (s != null) s.close(); } catch (Exception ignored) {}
     }
 
     /** 接收方是组员:主动连组主,等待读图。 */
@@ -2933,13 +3028,25 @@ public class Xfer {
                     } catch (Exception e) {
                         Bus.log("传输: 帧读取失败 " + e);
                         readError = "传输中断(读帧失败)";
-                        error = link.linkDead.get() ? linkError(link, XferError.Stage.TRANSFER)
-                                : new XferError(XferError.Stage.TRANSFER, XferError.PROTOCOL_ERROR, readError);
+                        //pri modify by zhuyang,Exit sync: a close/reset at any phase means the peer left; only a bad frame is a protocol error,20261020,start
+                        final boolean noDataYet = expect == 0 && !chunkedStarted;
+                        if (noDataYet || isPeerDrop(e)) {
+                            error = new XferError(XferError.Stage.CONNECT, XferError.PEER_GONE,
+                                    "对端已断开(" + e + ")");
+                        } else {
+                            error = link.linkDead.get() ? linkError(link, XferError.Stage.TRANSFER)
+                                    : new XferError(XferError.Stage.TRANSFER, XferError.PROTOCOL_ERROR, readError);
+                        }
+                        //pri modify by zhuyang,Exit sync: a close/reset at any phase means the peer left; only a bad frame is a protocol error,20261020,end
                         break;
                     }
                     //pri modify by zhuyang,Offer wait stays at 20s; the data phase tightens to 10s (a chunk or PING must arrive),20261017,end
                     if (f == null) {
                         Bus.log("传输: 对端已关闭连接");
+                        //pri modify by zhuyang,Exit sync: EOF at any phase means the peer exited, not a protocol fault,20261020,start
+                        readError = "对端已断开";
+                        error = new XferError(XferError.Stage.CONNECT, XferError.PEER_GONE, readError);
+                        //pri modify by zhuyang,Exit sync: EOF at any phase means the peer exited, not a protocol fault,20261020,end
                         break;
                     }
                 }
@@ -3044,6 +3151,8 @@ public class Xfer {
                     curBytes = 0;
                     expectedSeq = 0;
                     chunkedStarted = true;
+                    //pri added by zhuyang,Exit sync: bytes are about to flow, relax the dead check to 5s,20261020
+                    link.hbTransferPhase = true;
                     //pri modify by zhuyang,Batch 4: decide by content hash, never by the index bitmap,20261019,start
                     boolean skip = false;
                     if (fi.sha256 != null) {
@@ -3322,11 +3431,21 @@ public class Xfer {
                     postProgress(progress, true);
                     notifyLinkFailedOnce(link, cerr);
                 } else {
-                    XferError cerr = error != null ? error
-                            : new XferError(XferError.Stage.OFFER, XferError.OFFER_TIMEOUT, "对方未开始发送(报价超时或连接断开)");
+                    //pri modify by zhuyang,Exit sync: a dead peer is a silent collapse, a live peer with no offer keeps the long timeout,20261020,start
+                    XferError cerr = error;
+                    if (cerr == null) {
+                        cerr = link.linkDead.get() || link.s.isClosed()
+                                ? new XferError(XferError.Stage.CONNECT, XferError.PEER_GONE, "对端已断开")
+                                : new XferError(XferError.Stage.OFFER, XferError.OFFER_TIMEOUT, "对方未开始发送(报价超时)");
+                    }
                     progress.fail(cerr.detail);
                     postProgress(progress, true);
-                    notifyOfferExpiredOnce(link, cerr);
+                    if (cerr.code == XferError.PEER_GONE || cerr.code == XferError.CANCELLED) {
+                        notifyLinkFailedOnce(link, cerr);
+                    } else {
+                        notifyOfferExpiredOnce(link, cerr);
+                    }
+                    //pri modify by zhuyang,Exit sync: a dead peer is a silent collapse, a live peer with no offer keeps the long timeout,20261020,end
                 }
             }
             //pri modify by zhuyang,Only DONE (or the legacy FULL count) completes; EOF alone is never success,20261017,end
@@ -3342,11 +3461,21 @@ public class Xfer {
                     postProgress(progress, true);
                     notifyLinkFailedOnce(link, cerr);
                 } else {
-                    XferError cerr = error != null ? error
-                            : new XferError(XferError.Stage.OFFER, XferError.OFFER_TIMEOUT, "对方未开始发送(接收异常)");
+                    //pri modify by zhuyang,Exit sync: a dead peer is a silent collapse, never an offer-timeout banner,20261020,start
+                    XferError cerr = error;
+                    if (cerr == null) {
+                        cerr = link.linkDead.get() || link.s.isClosed()
+                                ? new XferError(XferError.Stage.CONNECT, XferError.PEER_GONE, "对端已断开(" + e + ")")
+                                : new XferError(XferError.Stage.OFFER, XferError.OFFER_TIMEOUT, "对方未开始发送(接收异常)");
+                    }
                     progress.fail(cerr.detail);
                     postProgress(progress, true);
-                    notifyOfferExpiredOnce(link, cerr);
+                    if (cerr.code == XferError.PEER_GONE || cerr.code == XferError.CANCELLED) {
+                        notifyLinkFailedOnce(link, cerr);
+                    } else {
+                        notifyOfferExpiredOnce(link, cerr);
+                    }
+                    //pri modify by zhuyang,Exit sync: a dead peer is a silent collapse, never an offer-timeout banner,20261020,end
                 }
             }
             //pri added by zhuyang,Every receive failure path must call back exactly once,20261017,end
@@ -3543,17 +3672,20 @@ public class Xfer {
 
     //pri added by zhuyang,Promote the peer-initiated stashed link to the send channel (P2P owner case),20261017,start
     private Link promoteStashedToSend() {
-        Link l = mStashedSocket;
-        if (l == null || l == mPeerSocket) return null;
-        if (!isAlive(l)) { mStashedSocket = null; return null; }
-        mStashedSocket = null;
-        stopRoleListener(l);
-        if (!isAlive(l)) return null;
-        mSendSocket = l;
-        try { l.s.setSoTimeout(0); } catch (Exception ignored) {}
-        sendRoleOnLink(l, "S");
-        Bus.log("传输: 暂存连接提升为发送通道");
-        return l;
+        //pri added by zhuyang,Exit sync: the role listener and the swipe path may race here; only one may adopt the link,20261020
+        synchronized (this) {
+            Link l = mStashedSocket;
+            if (l == null || l == mPeerSocket) return null;
+            if (!isAlive(l)) { mStashedSocket = null; return null; }
+            mStashedSocket = null;
+            stopRoleListener(l);
+            if (!isAlive(l)) return null;
+            mSendSocket = l;
+            try { l.s.setSoTimeout(0); } catch (Exception ignored) {}
+            sendRoleOnLink(l, "S");
+            Bus.log("传输: 暂存连接提升为发送通道");
+            return l;
+        }
     }
     //pri added by zhuyang,Promote the peer-initiated stashed link to the send channel (P2P owner case),20261017,end
 
@@ -3695,6 +3827,17 @@ public class Xfer {
                         Bus.log("传输: 已让出并转入接收,本机报价作废");
                         return;
                     }
+                    //pri added by zhuyang,Exit sync: the peer sent CANCEL while deciding - end the round silently on this side too,20261020,start
+                    if (verdict == VERDICT_CANCELLED) {
+                        stopHeartbeat(send);
+                        closeQuietly(send);
+                        if (mSendSocket == send) mSendSocket = null;
+                        if (mStashedSocket == send) mStashedSocket = null;
+                        releaseHotspotLater();
+                        fail(new XferError(XferError.Stage.TRANSFER, XferError.CANCELLED, "对方退出本次传输"));
+                        return;
+                    }
+                    //pri added by zhuyang,Exit sync: the peer sent CANCEL while deciding - end the round silently on this side too,20261020,end
                     if (verdict != Proto.TYPE_ACCEPT) {
                         stopHeartbeat(send);
                         closeQuietly(send);
@@ -3714,6 +3857,8 @@ public class Xfer {
                     stage = XferError.Stage.TRANSFER; //pri added by zhuyang,Batch 5: accepted; images are now streaming,20261017
                     //pri added by zhuyang,From here on a blocked write is caught by the stall watchdog,20261017
                     send.hbWritePhase = true;
+                    //pri added by zhuyang,Exit sync: data is flowing, so a slow link gets the 5s dead window,20261020
+                    send.hbTransferPhase = true;
                     send.hbExpectRx = false;
                     send.lastWriteProgressAt = SystemClock.elapsedRealtime();
                     Bus.log("传输: 进入发送阶段,写停滞 " + (WRITE_STALL_MS / 1000) + "s 看门狗已启用");
@@ -3803,7 +3948,12 @@ public class Xfer {
                         return;
                     }
                     if (send.linkDead.get()) {
-                        throw new FatalXferException(linkError(send, XferError.Stage.TRANSFER));
+                        //pri added by zhuyang,Exit sync: a stall is a real transfer failure; any other mid-stream close is a peer exit,20261020,start
+                        XferError le = send.failError;
+                        if (le != null && le.code == XferError.TRANSFER_STALL) throw new FatalXferException(le);
+                        throw new FatalXferException(new XferError(XferError.Stage.CONNECT,
+                                XferError.PEER_GONE, "发送阶段对端已退出"));
+                        //pri added by zhuyang,Exit sync: a stall is a real transfer failure; any other mid-stream close is a peer exit,20261020,end
                     }
                     stage = XferError.Stage.DONE; //pri added by zhuyang,Batch 5: DONE/DONE_ACK completion stage,20261017
                     byte[] done = Proto.buildDone(sentCount, sentBytes);
@@ -3830,7 +3980,9 @@ public class Xfer {
                             throw new FatalXferException(new XferError(XferError.Stage.DONE,
                                     XferError.CANCELLED, "对方取消了本次传输"));
                         } else if (ack == -4) {
-                            throw new FatalXferException(linkError(send, XferError.Stage.DONE));
+                            //pri added by zhuyang,Exit sync: a closed socket while waiting for DONE_ACK is a silent peer exit,20261020
+                            throw new FatalXferException(new XferError(XferError.Stage.CONNECT,
+                                    XferError.PEER_GONE, "等待完成确认时对端已退出"));
                         } else {
                             throw new FatalXferException(new XferError(XferError.Stage.DONE,
                                     XferError.PROTOCOL_ERROR, "对方未确认完成"));
@@ -3892,6 +4044,10 @@ public class Xfer {
                         } else if (stage == XferError.Stage.DONE) {
                             err = new XferError(XferError.Stage.DONE, XferError.PROTOCOL_ERROR,
                                     "完成确认失败");
+                        } else if (isPeerDrop(e)) {
+                            //pri added by zhuyang,Exit sync: a reset/broken pipe mid-transfer means the peer exited,20261020
+                            err = new XferError(XferError.Stage.CONNECT, XferError.PEER_GONE,
+                                    "发送中断(对端已断开)");
                         } else {
                             err = new XferError(XferError.Stage.TRANSFER, XferError.TRANSFER_TIMEOUT,
                                     "发送中断");
@@ -3925,7 +4081,11 @@ public class Xfer {
                 } catch (java.net.SocketTimeoutException te) {
                     return false;
                 }
-                if (f == null) throw new java.io.EOFException("connection closed while waiting TYPE_SKIP");
+                if (f == null) {
+                    //pri added by zhuyang,Exit sync: the peer closed while this file was being announced - it is gone,20261020
+                    throw new FatalXferException(new XferError(XferError.Stage.TRANSFER,
+                            XferError.PEER_GONE, "对端在接收文件时已退出"));
+                }
                 if (f.type == Proto.TYPE_SKIP) {
                     int idx = Proto.parseSkip(f.data);
                     if (idx == index) return true;
@@ -3950,6 +4110,15 @@ public class Xfer {
         }
     }
     //pri added by zhuyang,Batch 4: after FILE_BEGIN, wait briefly for TYPE_SKIP before streaming DATA,20261019,end
+
+    //pri added by zhuyang,Exit sync: recognise a socket reset / broken pipe anywhere in the cause chain,20261020
+    private static boolean isPeerDrop(Throwable t) {
+        for (int i = 0; t != null && i < 5; i++, t = t.getCause()) {
+            if (t instanceof java.net.SocketException || t instanceof java.io.EOFException) return true;
+        }
+        return false;
+    }
+    //pri added by zhuyang,Exit sync: recognise a socket reset / broken pipe anywhere in the cause chain,20261020
 
     //pri added by zhuyang,Wait for DONE_ACK: 0=OK, -1=protocol error, -2=timeout, -3=peer cancel, -4=link dead,20261017,start
     private int readDoneAck(Link link) {
@@ -4095,9 +4264,11 @@ public class Xfer {
     //pri added by zhuyang,Wait out the role window while reading frames: a peer ROLE(S) in the window is arbitrated by sid,20261017,end
 
     //pri added by zhuyang,Offer/verdict layer of the two-phase protocol,20261014,start
-    //pri modify by zhuyang,Read verdict frames in a loop: ROLE/META/PREVIEW are skipped, 0 = no valid verdict,20261017,start
+    //pri modify by zhuyang,Read verdict frames in a loop: PING/ROLE/META are skipped, CANCEL and a closed socket end the wait at once,20261020,start
     private int readVerdict(Link link, final int round) {
         int verdict = 0;
+        boolean peerClosed = false;
+        String cancelReason = null;
         long deadline = SystemClock.elapsedRealtime() + VERDICT_WAIT_MS;
         try {
             while (mRunning) {
@@ -4107,6 +4278,7 @@ public class Xfer {
                 Proto.Frame f = Proto.readFrame(link.in, 0, Proto.MAX_FRAME_LEN);
                 if (f == null) {
                     Bus.log("传输: 回执连接已关闭");
+                    peerClosed = true;
                     break;
                 }
                 //pri added by zhuyang,Answer the peer heartbeat while the user is deciding,20261017,start
@@ -4115,7 +4287,6 @@ public class Xfer {
                     continue;
                 }
                 if (f.type == Proto.TYPE_PONG) {
-                    Bus.log("传输: 收到 PONG");
                     continue;
                 }
                 //pri added by zhuyang,Answer the peer heartbeat while the user is deciding,20261017,end
@@ -4127,6 +4298,14 @@ public class Xfer {
                     verdict = f.type;
                     break;
                 }
+                //pri added by zhuyang,Exit sync: CANCEL is a verdict - the peer exited while this page waited,20261020,start
+                if (f.type == Proto.TYPE_CANCEL) {
+                    cancelReason = new String(f.data, java.nio.charset.StandardCharsets.UTF_8);
+                    Bus.log("传输: 等回执时收到 CANCEL — " + cancelReason);
+                    verdict = VERDICT_CANCELLED;
+                    break;
+                }
+                //pri added by zhuyang,Exit sync: CANCEL is a verdict - the peer exited while this page waited,20261020,end
                 if (f.type == Proto.TYPE_ROLE) {
                     Proto.Role role = Proto.parseRole(f.data);
                     if (role != null) {
@@ -4153,9 +4332,14 @@ public class Xfer {
             Bus.log("传输: 等待对方「接收/拒绝」超时(" + (VERDICT_WAIT_MS / 1000) + "s)");
         } catch (Exception e) {
             Bus.log("传输: 未收到回执(对方已断开): " + e);
+            peerClosed = true;
         }
         if (mYielded) return VERDICT_YIELDED;
         synchronized (mPreReadFrames) { mPreReadFrames.clear(); } //pri added by zhuyang,No yield: the peer's offer frames are stale,20261017
+        if (verdict == VERDICT_CANCELLED) {
+            Bus.log("传输: 对端已退出本次传输 — " + cancelReason);
+            return VERDICT_CANCELLED;
+        }
         if (verdict == Proto.TYPE_ACCEPT) {
             Bus.log("传输: 对方已确认接收");
             mMain.post(new Runnable() {
@@ -4167,9 +4351,10 @@ public class Xfer {
             mMain.post(new Runnable() {
                 @Override public void run() { mListener.onPeerRejected(); }
             });
-        } else if (link.linkDead.get() && link.failReason != null) {
-            //pri added by zhuyang,Heartbeat already judged the peer dead: report that, not a plain timeout,20261017
-            notifyLinkFailedOnce(link, linkError(link, XferError.Stage.OFFER));
+        } else if (peerClosed || (link.linkDead.get() && link.failReason != null)) {
+            //pri modify by zhuyang,Exit sync: a closed socket while waiting for the verdict is a silent peer exit,20261020
+            notifyLinkFailedOnce(link, new XferError(XferError.Stage.CONNECT, XferError.PEER_GONE,
+                    "等待回执时对端已退出"));
         } else {
             fail(new XferError(XferError.Stage.OFFER, XferError.OFFER_TIMEOUT,
                     "等待对方「接收/拒绝」超时(" + (VERDICT_WAIT_MS / 1000) + "s)"));
@@ -4179,7 +4364,7 @@ public class Xfer {
         }
         return verdict;
     }
-    //pri modify by zhuyang,Read verdict frames in a loop: ROLE/META/PREVIEW are skipped, 0 = no valid verdict,20261017,end
+    //pri modify by zhuyang,Read verdict frames in a loop: PING/ROLE/META are skipped, CANCEL and a closed socket end the wait at once,20261020,end
 
     //pri added by zhuyang,Receiver: write the ACCEPT verdict back (images follow from the peer),20261014
     public void confirmReceived() {
@@ -4192,20 +4377,21 @@ public class Xfer {
     }
 
     //pri added by zhuyang,Exit sync: this phone left the page mid-round - tell the peer and drop every link,20261020,start
-    //pri added by zhuyang,CANCEL goes out on the first live link only; a missing or blocked link still ends the round locally,20261020
+    //pri modify by zhuyang,Exit sync: CANCEL must reach the peer on every live link, not only on the one this side happens to pick,20261020,start
     public void abortRound(String why) {
         if (!mRoundAborted.compareAndSet(false, true)) return;
         final String reason = (why == null || why.isEmpty()) ? "本机退出" : why;
-        final Link link = isAlive(mSendSocket) ? mSendSocket
-                : (isAlive(mPeerSocket) ? mPeerSocket
-                : (isAlive(mStashedSocket) ? mStashedSocket : null));
-        Bus.log("传输: 本机退出本轮" + (link == null
+        final java.util.List<Link> links = liveLinks();
+        //pri added by zhuyang,Exit sync: hold the radio open at once, so no teardown path kills the farewell connect,20261020
+        mFarewellActive = true;
+        Bus.log("传输: 本机退出本轮" + (links.isEmpty()
                 ? "(无可用 TCP 链路,只做本地收尾)"
-                : ",通知对端 CANCEL — " + reason));
+                : ",在 " + links.size() + " 条活链路上通知对端 CANCEL — " + reason));
         final XferError cancelled = new XferError(XferError.Stage.TRANSFER, XferError.CANCELLED, reason);
+        final int round = mRound;
         //pri added by zhuyang,The write must leave the main thread: a socket write there throws NetworkOnMainThreadException,20261020
         new Thread(new Runnable() { @Override public void run() {
-            if (link != null) sendCancel(link, reason);
+            for (Link link : links) sendCancel(link, reason);
             stopHeartbeat(mPeerSocket);
             stopHeartbeat(mStashedSocket);
             stopHeartbeat(mSendSocket);
@@ -4217,11 +4403,42 @@ public class Xfer {
             mSendSocket = null;
             mRoleListenerThread = null;
             mRoleListenerAbort = null;
-            try { if (mServer != null) mServer.close(); } catch (Exception ignored) {}
-            mServer = null;
+            //pri added by zhuyang,Exit sync: keep the listener for a farewell window so a late peer gets HELLO_ACK st=out,20261020,start
+            final ServerSocket farewell = mServer;
+            new Thread(new Runnable() { @Override public void run() {
+                try { Thread.sleep(ABORT_FAREWELL_MS); } catch (InterruptedException ignored) {}
+                //pri added by zhuyang,Exit sync: a new round may already own this listener; leave its radio alone,20261020
+                if (round != mRound) return;
+                mFarewellActive = false;
+                closeQuietly(farewell);
+                if (mServer == farewell) mServer = null;
+                if (mApOwner && (mHotspotActive || mHotspotReservation != null)) {
+                    Bus.log("热点: 本轮退出已满 " + (ABORT_FAREWELL_MS / 1000) + "s,释放 AP");
+                    closeHotspot();
+                } else if (!mApOwner) {
+                    restoreWifiAfterJoin();
+                }
+            }}, "abort-farewell").start();
+            //pri added by zhuyang,Exit sync: keep the listener for a farewell window so a late peer gets HELLO_ACK st=out,20261020,end
             fail(cancelled);
         }}, "abort-round").start();
     }
+    //pri modify by zhuyang,Exit sync: CANCEL must reach the peer on every live link, not only on the one this side happens to pick,20261020,end
+
+    //pri added by zhuyang,Exit sync: snapshot of the distinct live links of this round,20261020
+    private java.util.List<Link> liveLinks() {
+        java.util.List<Link> out = new java.util.ArrayList<Link>(3);
+        addLiveLink(out, mSendSocket);
+        addLiveLink(out, mPeerSocket);
+        addLiveLink(out, mStashedSocket);
+        return out;
+    }
+
+    private static void addLiveLink(java.util.List<Link> out, Link link) {
+        if (!isAlive(link) || out.contains(link)) return;
+        out.add(link);
+    }
+    //pri added by zhuyang,Exit sync: snapshot of the distinct live links of this round,20261020
 
     //pri added by zhuyang,Mark the link with the coded reason before closing so its writer/reader does not report a second cause,20261020
     private void closeAsCancelled(Link link, XferError err) {
@@ -4284,6 +4501,8 @@ public class Xfer {
             @Override public void run() {
                 try { Thread.sleep(HS_RELEASE_GRACE_MS); } catch (InterruptedException ignored) {}
                 if (wg != mWifiGen) return; // a new round already cleaned up / re-joined
+                //pri added by zhuyang,Exit sync: a farewell window owns the radio; its own timer releases it,20261020
+                if (mFarewellActive) return;
                 restoreWifiAfterJoin();
                 if (hg == mHotspotGen && (mHotspotActive || mHotspotReservation != null)) {
                     Bus.log("热点: 本轮传输结束,释放 AP owner 热点");
@@ -4370,13 +4589,15 @@ public class Xfer {
         Bus.log("传输: [失败] " + err.code + "(" + XferError.nameOf(err.code) + ") stage=" + err.stage
                 + " — " + (err.detail == null ? "" : err.detail));
         //pri modify by zhuyang,A terminal failure with no live link must not leave the AP/joined Wi-Fi behind,20261019,start
-        if (!hasLiveLink()) {
+        //pri modify by zhuyang,Exit sync: not while a farewell window is open - the radio is carrying st=out to a late peer,20261020,start
+        if (!hasLiveLink() && !mFarewellActive) {
             restoreWifiAfterJoin();
             if (mHotspotActive || mHotspotReservation != null) {
                 closeHotspot();
                 Bus.log("热点: 本轮失败,已释放热点");
             }
         }
+        //pri modify by zhuyang,Exit sync: not while a farewell window is open - the radio is carrying st=out to a late peer,20261020,end
         //pri modify by zhuyang,A terminal failure with no live link must not leave the AP/joined Wi-Fi behind,20261019,end
         final String legacy = err.detail == null ? XferError.nameOf(err.code) : err.detail;
         mMain.post(new Runnable() {

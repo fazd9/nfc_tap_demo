@@ -794,7 +794,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
             return;
         }
         //pri added by zhuyang,The idle timeout closed the card on purpose: its own socket teardown must not paint a banner,20261020,end
-        //pri added by zhuyang,The same peer CANCEL may arrive twice: only handle the first,20261020,start
+        //pri modify by zhuyang,Exit sync: the peer's CANCEL is a silent exit - drop this page at once, no failure banner,20261020,start
         if (err.code == XferError.CANCELLED) {
             if (mCancelHandled) {
                 Bus.log("服务: 本轮取消已处理,忽略重复通知 — " + err.detail);
@@ -803,8 +803,18 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
             mCancelHandled = true;
             //pri added by zhuyang,Liveness probe: a peer CANCEL ends this round on both sides,20261020
             if (sXfer != null) sXfer.setRoundLive(false);
+            Bus.log("服务: 对方退出本轮,本机同步收起");
+            mSelfExited = true;
+            mRejected = true;
+            mSendShown = false;
+            mReceiveShown = false;
+            mAccepted = false;
+            cancelReceiveIdleTimeout();
+            startService(OverlayService.hideIntent(this, OverlayService.DISSOLVE_MS));
+            Bus.unlockRole();
+            return;
         }
-        //pri added by zhuyang,The same peer CANCEL may arrive twice: only handle the first,20261020,end
+        //pri modify by zhuyang,Exit sync: the peer's CANCEL is a silent exit - drop this page at once, no failure banner,20261020,end
         cancelReceiveIdleTimeout(); //pri added by zhuyang,The round ends here: the 30s auto-dismiss is moot,20261020
         boolean sender = (mUserWantsSend && !mRoleYielded)
                 || (mSendShown && !mReceiveShown && !mRoleYielded);
@@ -1050,7 +1060,9 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
                 mRejected = true;
                 mReceiveShown = false;
                 if (sXfer != null) sXfer.setRoundLive(false); //pri added by zhuyang,Liveness probe: the card is gone,20261020
-                if (sXfer != null) sXfer.rejectTransfer();
+                //pri modify by zhuyang,Exit sync: the 30s timeout is an exit, so the peer gets CANCEL on every live link,20261020,start
+                if (sXfer != null) sXfer.abortRound("接收页超时");
+                //pri modify by zhuyang,Exit sync: the 30s timeout is an exit, so the peer gets CANCEL on every live link,20261020,end
                 startService(OverlayService.hideIntent(TapService.this, OverlayService.DISSOLVE_MS));
                 mAccepted = false;
                 mPreviewCount = 0;
