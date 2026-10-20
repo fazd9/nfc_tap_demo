@@ -102,9 +102,9 @@ class OverlayService : Service() {
     /** 当前是哪一种确认页：发送（上滑发送）还是接收（接收 / 拒绝）。 */
     private var mode = OverlayView.Mode.SEND
 
-    //pri added by zhuyang,Receive page switched in place from a live send page: its backdrop belongs to this phone and must not be replaced by the peer photo,20261019,start
-    private var receiveSwitchedFromSend = false
-    //pri added by zhuyang,Receive page switched in place from a live send page: its backdrop belongs to this phone and must not be replaced by the peer photo,20261019,end
+    //pri modify by zhuyang,A receive page whose backdrop is this phone's own screen (in-place switch from a send page, or the empty state that captured the screen) must keep it when the peer photo arrives,20261020,start
+    private var receiveOwnsBackdrop = false
+    //pri modify by zhuyang,A receive page whose backdrop is this phone's own screen (in-place switch from a send page, or the empty state that captured the screen) must keep it when the peer photo arrives,20261020,end
 
     //pri added by zhuyang,Empty state (E7): page up but no elements yet - the peer has not offered anything,20261014,start
     //pri added by zhuyang,Explicit flag from the NFC layer (EXTRA_WAITING), never inferred from "photo == null",20261014
@@ -270,7 +270,7 @@ class OverlayService : Service() {
         cancelDissolve() //pri added by zhuyang,E5: the new round owns the window,20261014
         waitingForPeer = false //pri added by zhuyang,Empty state: a send page never waits for a peer offer,20261014
         mode = OverlayView.Mode.SEND
-        receiveSwitchedFromSend = false //pri added by zhuyang,A new send page owns its own captured backdrop,20261019
+        receiveOwnsBackdrop = false //pri modify by zhuyang,A new send page owns its own captured backdrop,20261020
         uriExtra(intent, EXTRA_BACKDROP)?.let { backdropUri = it }
         uriExtra(intent, EXTRA_PHOTO)?.let { photoUri = it }
         // 发送侧的对端标识：NFC 层不给就退回动效层自带的默认文案
@@ -351,7 +351,7 @@ class OverlayService : Service() {
         //pri added by zhuyang,Live switch: a SEND page visible at entry becomes the RECEIVE card in place,20261014,start
         if (rootView != null && attached && wasSend) {
             //pri added by zhuyang,In-place switch: same window and same backdrop, only the elements change,20261019
-            receiveSwitchedFromSend = true
+            receiveOwnsBackdrop = true
             overlay.setMode(mode)
             overlay.setPeerInfo(peerLabel, peerCount)
             overlay.setStatus(statusText)
@@ -359,8 +359,8 @@ class OverlayService : Service() {
             return
         }
         //pri added by zhuyang,Live switch: a SEND page visible at entry becomes the RECEIVE card in place,20261014,end
-        //pri added by zhuyang,Any receive page built from scratch (not the in-place switch) follows the peer-photo backdrop design,20261019
-        receiveSwitchedFromSend = false
+        //pri modify by zhuyang,The empty state captured this phone's own screen: that backdrop belongs to this phone too and must survive the peer photo,20261020
+        receiveOwnsBackdrop = waiting
 
         if (!Settings.canDrawOverlays(this)) {
             Toast.makeText(this, R.string.toast_need_overlay, Toast.LENGTH_SHORT).show()
@@ -397,8 +397,8 @@ class OverlayService : Service() {
         if (rootView == null) return
         // 接收页里这张照片既是卡片也是折射背景；发送页里它只是卡片（背景是用户自己选的那张）
         val isReceive = mode == OverlayView.Mode.RECEIVE
-        //pri modify by zhuyang,In-place receive from a send page keeps this phone's own backdrop: only the card photo comes from the peer,20261019
-        val usePeerAsBackdrop = isReceive && !receiveSwitchedFromSend
+        //pri modify by zhuyang,A receive page that already owns this phone's backdrop (in-place switch or empty state) keeps it: only the card photo comes from the peer,20261020
+        val usePeerAsBackdrop = isReceive && !receiveOwnsBackdrop
         Thread {
             val picture = ImageLoader.decode(this, uri)
             val background = if (usePeerAsBackdrop) ImageLoader.decodeCover(this, uri, displaySize().x, displaySize().y) else null
