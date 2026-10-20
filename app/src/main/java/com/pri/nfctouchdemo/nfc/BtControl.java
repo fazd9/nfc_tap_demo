@@ -1,3 +1,4 @@
+//pri modify by zhuyang,Not wired into the flow any more: exit sync now relies on the HELLO liveness probe,20261020
 package com.pri.nfctouchdemo.nfc;
 
 import android.bluetooth.BluetoothAdapter;

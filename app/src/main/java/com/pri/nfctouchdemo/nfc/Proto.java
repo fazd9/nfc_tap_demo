@@ -66,13 +66,17 @@ public final class Proto {
         public final boolean hasPhotos;
         //pri modify by zhuyang,Kept for HELLO format compatibility only: the sender no longer uses it to skip,20261019
         public final String have;
+        //pri added by zhuyang,Whether the peer is still in this round (st=in/out); absent field means true (old peer),20261020
+        public final boolean inRound;
 
-        Hello(int version, String sid, String role, boolean hasPhotos, String have) {
+        //pri added by zhuyang,Whether the peer is still in this round (st=in/out); absent field means true (old peer),20261020
+        Hello(int version, String sid, String role, boolean hasPhotos, String have, boolean inRound) {
             this.version = version;
             this.sid = sid;
             this.role = role;
             this.hasPhotos = hasPhotos;
             this.have = have;
+            this.inRound = inRound;
         }
     }
 
@@ -194,13 +198,20 @@ public final class Proto {
     }
 
     public static byte[] buildHello(String sid, String role, boolean hasPhotos) {
-        return buildHello(sid, role, hasPhotos, null);
+        return buildHello(sid, role, hasPhotos, null, true);
     }
 
     //pri modify by zhuyang,Batch 4: optional have= is still encoded/decoded for old peers but is no longer advisory,20261019
     public static byte[] buildHello(String sid, String role, boolean hasPhotos, String have) {
+        return buildHello(sid, role, hasPhotos, have, true);
+    }
+
+    //pri added by zhuyang,st=in/out tells the peer whether this round is still on screen,20261020
+    public static byte[] buildHello(String sid, String role, boolean hasPhotos, String have,
+                                    boolean inRound) {
         String s = "v=" + HELLO_VERSION + "|sid=" + sid + "|r=" + role
-                + "|hp=" + (hasPhotos ? "1" : "0");
+                + "|hp=" + (hasPhotos ? "1" : "0")
+                + "|st=" + (inRound ? "in" : "out");
         if (have != null && !have.isEmpty()) s += "|have=" + have;
         return s.getBytes(StandardCharsets.UTF_8);
     }
@@ -211,7 +222,13 @@ public final class Proto {
 
     //pri modify by zhuyang,Batch 4: optional have= is still encoded/decoded for old peers but is no longer advisory,20261019
     public static byte[] buildHelloAck(String sid, String role, String have) {
-        String s = "v=" + HELLO_VERSION + "|sid=" + sid + "|r=" + role;
+        return buildHelloAck(sid, role, have, true);
+    }
+
+    //pri added by zhuyang,st=in/out in the ACK lets the connecting side detect an exited peer at link ready,20261020
+    public static byte[] buildHelloAck(String sid, String role, String have, boolean inRound) {
+        String s = "v=" + HELLO_VERSION + "|sid=" + sid + "|r=" + role
+                + "|st=" + (inRound ? "in" : "out");
         if (have != null && !have.isEmpty()) s += "|have=" + have;
         return s.getBytes(StandardCharsets.UTF_8);
     }
@@ -250,6 +267,7 @@ public final class Proto {
         String role = null;
         boolean hp = false;
         String have = null;
+        boolean inRound = true; //pri added by zhuyang,A peer without st= is an old build: treat it as still in the round,20261020
         String text = new String(data, StandardCharsets.UTF_8);
         for (String kv : text.split("\\|")) {
             int eq = kv.indexOf('=');
@@ -268,6 +286,9 @@ public final class Proto {
                 role = v;
             } else if ("hp".equals(k)) {
                 hp = "1".equals(v);
+            } else if ("st".equals(k)) {
+                //pri added by zhuyang,st=in/out: unknown values fall back to in (compatibility),20261020
+                inRound = !"out".equals(v);
             } else if ("have".equals(k)) {
                 //pri modify by zhuyang,Batch 4: parse-only compatibility; the receiver no longer emits it and the sender ignores it,20261019
                 have = normalizeBitmap(v);
@@ -275,7 +296,7 @@ public final class Proto {
             }
         }
         if (version <= 0 || !isHex32(sid) || !isRole(role)) return null;
-        return new Hello(version, sid, role, hp, have);
+        return new Hello(version, sid, role, hp, have, inRound);
     }
 
     //pri added by zhuyang,Batch 4: image-index bitmap codec kept only for HELLO format compatibility; resume now uses sha256,20261019,start

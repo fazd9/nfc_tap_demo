@@ -84,7 +84,7 @@ public class Xfer {
     private static final long HS_SPEC_BUDGET_MS = 25000L;
     private static final long WIFI_ENABLE_WAIT_MS = 5000L;
     private static final long WIFI_ASSOC_POLL_MS = 6000L;
-    private static final long OWNER_WAIT_MS = 18000L;
+    private static final long OWNER_WAIT_MS = 8000L; //pri modify by zhuyang,Peer not joined in 8s is treated as gone (6s machine step),20261020
     private static final long HS_RELEASE_GRACE_MS = 1000L;
     private static final int HS_HIDDEN_ATTEMPTS = 2;
     private static final int HS_HIDDEN_UNAVAILABLE = 0;
@@ -304,6 +304,14 @@ public class Xfer {
     //pri added by zhuyang,Exit sync: a local exit cancels this round exactly once,20261020
     private final java.util.concurrent.atomic.AtomicBoolean mRoundAborted =
             new java.util.concurrent.atomic.AtomicBoolean();
+    //pri added by zhuyang,Exit sync: a refused port or a missing hotspot is a liveness signal; PEER_GONE is reported once per round,20261020,start
+    private volatile boolean mPeerGoneSignal;
+    private final java.util.concurrent.atomic.AtomicBoolean mPeerGoneReported =
+            new java.util.concurrent.atomic.AtomicBoolean();
+    //pri added by zhuyang,A round that already failed must not be re-reported as PEER_GONE (that would hide its failure banner),20261020
+    private final java.util.concurrent.atomic.AtomicBoolean mRoundFailed =
+            new java.util.concurrent.atomic.AtomicBoolean();
+    //pri added by zhuyang,Exit sync: a refused port or a missing hotspot is a liveness signal; PEER_GONE is reported once per round,20261020,end
     private volatile boolean mDoneNotified; //pri added by zhuyang,"transfer done" is delivered at most once per connection,20261014
     private volatile int mExpect;           //pri added by zhuyang,Total image count announced by TYPE_META this round,20261014
     private volatile int mRound;            //pri added by zhuyang,Round token: a stale verdict must not leak into the next round,20261014
@@ -332,6 +340,8 @@ public class Xfer {
     private volatile String mPeerHsSsid;
     private volatile String mPeerHsPass;
     private volatile String mPeerSid; //pri added by zhuyang,Peer session id from the NFC payload; null means the debug path skips HELLO,20261017
+    //pri added by zhuyang,Liveness probe: whether this round is still on screen (HELLO st=in/out),20261020
+    private volatile boolean mRoundLive = true;
     private volatile boolean mGotConnection;
     //pri added by zhuyang,Counter of accepted sockets whose HELLO has not been checked yet,20261017
     private final java.util.concurrent.atomic.AtomicInteger mUnauthCount =
@@ -452,6 +462,14 @@ public class Xfer {
         return l != null && !l.linkDead.get() && l.s.isConnected() && !l.s.isClosed();
     }
 
+    //pri added by zhuyang,Liveness probe: set before any socket is closed so a late HELLO already reports st=out,20261020
+    public void setRoundLive(boolean live) {
+        if (mRoundLive == live) return;
+        mRoundLive = live;
+        Bus.log("传输: 本轮页面状态 st=" + (live ? "in" : "out") + ",后续 HELLO 携带该状态");
+    }
+    //pri added by zhuyang,Liveness probe: set before any socket is closed so a late HELLO already reports st=out,20261020
+
     //pri added by zhuyang,Batch 5: a stray inbound connection must not fail an already-running round,20261017
     private void failInbound(XferError err) {
         if (hasLiveLink()) {
@@ -474,6 +492,9 @@ public class Xfer {
         mYielded = false;
         mVerdictSent = false;
         mRoundAborted.set(false); //pri added by zhuyang,Exit sync: the next tap may cancel its own round,20261020
+        mPeerGoneSignal = false; //pri added by zhuyang,Exit sync: liveness signals belong to one round,20261020
+        mPeerGoneReported.set(false); //pri added by zhuyang,Exit sync: the next tap may report its own PEER_GONE,20261020
+        mRoundFailed.set(false); //pri added by zhuyang,Exit sync: the next tap starts with no failure,20261020
         mDoneNotified = false;
         mExpect = 0;
         mFirstSavedUri = null;
@@ -895,14 +916,19 @@ public class Xfer {
             return;
         }
         Bus.log("传输: 等待对方连接(同 LAN 直连,或对方接入本机热点)…");
+        //pri added by zhuyang,Exit sync: no link within 8s of the tap means the peer left, so this phone closes too,20261020,start
+        final int round = mRound;
         mMain.postDelayed(new Runnable() {
             @Override
             public void run() {
-                if (mRunning && !mGotConnection) {
-                    Bus.log("传输: 20 秒内仍未收到对方连接(检查两台手机的距离与 Wi-Fi 状态)");
+                if (mRunning && round == mRound && !mRoundAborted.get() && !mRoundFailed.get()
+                        && mRoundLive && !mGotConnection && !hasLiveLink()) {
+                    Bus.log("传输: " + (OWNER_WAIT_MS / 1000) + " 秒内仍未收到对方连接,判定对方已退出");
+                    reportPeerGone((OWNER_WAIT_MS / 1000) + " 秒内对方未接入");
                 }
             }
-        }, 20000);
+        }, OWNER_WAIT_MS);
+        //pri added by zhuyang,Exit sync: no link within 8s of the tap means the peer left, so this phone closes too,20261020,end
         //pri added by zhuyang,P2P bearer disabled (product decision: same LAN -> hotspot),20261019,end
     }
 
@@ -1407,9 +1433,8 @@ public class Xfer {
                         try { Thread.sleep(500); } catch (InterruptedException ignored) {}
                     }
                     if (mRunning && mSenderWaiting && !hasLiveLink()) {
-                        Bus.log("热点: " + (OWNER_WAIT_MS / 1000) + "s 内对方仍未接入,判定连接失败");
-                        fail(new XferError(XferError.Stage.CONNECT, XferError.CONNECT_TIMEOUT,
-                                "热点已开启但对方未接入(请确认两台手机距离与 Wi-Fi 状态)"));
+                        Bus.log("热点: " + (OWNER_WAIT_MS / 1000) + "s 内对方仍未接入,判定对方已退出");
+                        reportPeerGone((OWNER_WAIT_MS / 1000) + " 秒内对方未接入");
                     }
                     return;
                 }
@@ -1440,6 +1465,13 @@ public class Xfer {
                     return;
                 }
                 if (!mSenderWaiting) return;
+                //pri added by zhuyang,Exit sync: a refused port or a missing AP after the full retry budget means the peer left,20261020,start
+                if (mPeerGoneSignal) {
+                    Bus.log("承载: 同 LAN 与热点均失败,对方热点/端口不可达,判定对方已退出");
+                    reportPeerGone("对方热点/端口不可达");
+                    return;
+                }
+                //pri added by zhuyang,Exit sync: a refused port or a missing AP after the full retry budget means the peer left,20261020,end
                 Bus.log("承载: ①同 LAN 与 ②热点均失败,无 P2P 兜底,报告 CONNECT_TIMEOUT");
                 fail(new XferError(XferError.Stage.CONNECT, XferError.CONNECT_TIMEOUT,
                         "同 LAN 与热点均无法连接(请确认两台手机距离与 Wi-Fi 状态)"));
@@ -1465,12 +1497,19 @@ public class Xfer {
                 Bus.log("传输: [未认证] 本轮无对方 sid,跳过 HELLO/ROLE 握手(调试路径)");
             } else {
                 //pri modify by zhuyang,Batch 4: do not emit have= any more; resume is decided per FILE_BEGIN sha256,20261019
-                byte[] hello = Proto.buildHello(Bus.sid(), localRole(), mHasPhotos);
+                byte[] hello = Proto.buildHello(Bus.sid(), localRole(), mHasPhotos, null, mRoundLive);
                 Proto.writeFrame(out, Proto.TYPE_HELLO, hello.length, hello);
                 out.flush();
                 Proto.Frame f = Proto.readFrame(in, Proto.HELLO_TIMEOUT_MS, Proto.MAX_HELLO_LEN);
-                if (f == null || f.type != Proto.TYPE_HELLO_ACK) {
-                    Bus.log("传输: [认证] 对方未回 HELLO_ACK,关闭连接");
+                if (f == null) {
+                    //pri added by zhuyang,Exit sync: the peer dropped before HELLO_ACK, it is gone,20261020
+                    Bus.log("传输: [认证] HELLO_ACK 未到(对方已断开),判定对方已退出");
+                    closeQuietly(s);
+                    throw new FatalXferException(new XferError(XferError.Stage.CONNECT,
+                            XferError.PEER_GONE, "对方未回 HELLO_ACK(已断开)"));
+                }
+                if (f.type != Proto.TYPE_HELLO_ACK) {
+                    Bus.log("传输: [认证] 对方首帧不是 HELLO_ACK(type=" + f.type + "),关闭连接");
                     closeQuietly(s);
                     throw new FatalXferException(new XferError(XferError.Stage.CONNECT,
                             XferError.AUTH_FAILED, "对方未回 HELLO_ACK(校验失败)"));
@@ -1484,6 +1523,21 @@ public class Xfer {
                             XferError.AUTH_FAILED, "HELLO_ACK 的 sid/版本不匹配"));
                 }
                 mPeerRole = ack.role;
+                Bus.log("传输: [认证] 对端状态 st=" + (ack.inRound ? "in" : "out"));
+                //pri added by zhuyang,Liveness probe: the peer exited before this link was ready, close now instead of waiting,20261020,start
+                if (!ack.inRound) {
+                    Bus.log("传输: 对端已退出本轮(st=out),本机立即收起");
+                    closeQuietly(s);
+                    throw new FatalXferException(new XferError(XferError.Stage.CONNECT,
+                            XferError.PEER_GONE, "对方已退出本轮"));
+                }
+                //pri added by zhuyang,Liveness probe: the peer exited before this link was ready, close now instead of waiting,20261020,end
+                //pri added by zhuyang,This phone already left: deliver st=out, then drop the link instead of adopting it,20261020
+                if (!mRoundLive) {
+                    Bus.log("传输: 本机已退出本轮,握手后即断开(不做角色分类)");
+                    closeQuietly(s);
+                    return null;
+                }
                 byte[] role = Proto.buildRole(localRole(), Bus.sid());
                 Proto.writeFrame(out, Proto.TYPE_ROLE, role.length, role);
                 out.flush();
@@ -1527,7 +1581,10 @@ public class Xfer {
             closeQuietly(s);
             throw fe;
         } catch (java.net.SocketTimeoutException e) {
-            Bus.log("传输: [认证] 等待 HELLO_ACK 超时(" + Proto.HELLO_TIMEOUT_MS + "ms),关闭连接");
+            Bus.log("传输: [认证] 等待 HELLO_ACK 超时(" + Proto.HELLO_TIMEOUT_MS + "ms),判定对方已退出");
+            closeQuietly(s);
+            throw new FatalXferException(new XferError(XferError.Stage.CONNECT,
+                    XferError.PEER_GONE, "等待 HELLO_ACK 超时(" + Proto.HELLO_TIMEOUT_MS + "ms)"));
         } catch (Exception e) {
             Bus.log("传输: [认证] HELLO 握手失败: " + e);
         }
@@ -1554,6 +1611,10 @@ public class Xfer {
             } catch (FatalXferException fe) {
                 fail(fe.error);
                 return false;
+            } catch (java.net.ConnectException ce) {
+                //pri added by zhuyang,Exit sync: nothing listens on the peer port, remember it as a peer-gone signal,20261020
+                mPeerGoneSignal = true;
+                Bus.log("传输: " + how + "连接被拒(对方端口未监听,可能已退出): " + ce);
             } catch (Exception e) {
                 Bus.log("传输: " + how + "直连尝试 " + (i + 1) + " 失败: " + e);
             }
@@ -1689,6 +1750,8 @@ public class Xfer {
                 }
             }
             Bus.log("传输: 隐藏接口接入热点超时/失败");
+            //pri added by zhuyang,Exit sync: the peer AP never showed up in the whole budget,20261020
+            mPeerGoneSignal = true;
             cleanupHiddenJoin(wm, ssid);
             return HS_HIDDEN_FAILED;
         } catch (Throwable t) {
@@ -1848,6 +1911,11 @@ public class Xfer {
             } catch (FatalXferException fe) {
                 fail(fe.error);
                 return false;
+            } catch (java.net.ConnectException ce) {
+                //pri added by zhuyang,Exit sync: nothing listens on the peer port, remember it as a peer-gone signal,20261020
+                mPeerGoneSignal = true;
+                Bus.log("传输: 热点内连接被拒(对方端口未监听,可能已退出): " + ce);
+                try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
             } catch (Exception e) {
                 Bus.log("传输: 热点内连接尝试 " + (i + 1) + " 失败: " + e);
                 try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
@@ -1932,6 +2000,7 @@ public class Xfer {
                     || holder[0] == null) {
                 if (unavailable[0]) {
                     Bus.log("传输: 系统直接拒绝热点请求(未弹窗)");
+                    mPeerGoneSignal = true; //pri added by zhuyang,Exit sync: the peer AP is not there,20261020
                 } else {
                     Bus.log("传输: 热点接入未成功(" + (attemptMs / 1000)
                             + "s);若系统弹出了「连接到设备」,需用户点击「连接」(悬浮窗可能遮挡)");
@@ -1977,6 +2046,11 @@ public class Xfer {
                     fail(fe.error);
                     releaseNetworkRequest();
                     return false;
+                } catch (java.net.ConnectException ce) {
+                    //pri added by zhuyang,Exit sync: nothing listens on the peer port, remember it as a peer-gone signal,20261020
+                    mPeerGoneSignal = true;
+                    Bus.log("传输: 热点内连接被拒(对方端口未监听,可能已退出): " + ce);
+                    try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
                 } catch (Exception e) {
                     Bus.log("传输: 热点内连接尝试 " + (i + 1) + " 失败: " + e);
                     try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
@@ -2311,8 +2385,15 @@ public class Xfer {
             }
             s.setSoTimeout(Proto.HELLO_TIMEOUT_MS);
             Proto.Frame f = Proto.readFrame(in, Proto.HELLO_TIMEOUT_MS, Proto.MAX_HELLO_LEN);
-            if (f == null || f.type != Proto.TYPE_HELLO) {
-                Bus.log("传输: [认证] 未收到 HELLO,关闭连接 " + s.getInetAddress());
+            if (f == null) {
+                //pri added by zhuyang,Exit sync: the peer accepted but closed without HELLO, it is gone,20261020
+                Bus.log("传输: [认证] 未收到 HELLO(对方已断开),判定对方已退出 " + s.getInetAddress());
+                closeQuietly(s);
+                failInbound(new XferError(XferError.Stage.CONNECT, XferError.PEER_GONE, "对方未发送 HELLO(已断开)"));
+                return;
+            }
+            if (f.type != Proto.TYPE_HELLO) {
+                Bus.log("传输: [认证] 对方首帧不是 HELLO(type=" + f.type + "),关闭连接 " + s.getInetAddress());
                 closeQuietly(s);
                 failInbound(new XferError(XferError.Stage.CONNECT, XferError.AUTH_FAILED, "未收到 HELLO"));
                 return;
@@ -2325,14 +2406,30 @@ public class Xfer {
                 failInbound(new XferError(XferError.Stage.CONNECT, XferError.AUTH_FAILED, "HELLO 的 sid/版本不匹配"));
                 return;
             }
+            Bus.log("传输: [认证] 对端状态 st=" + (hello.inRound ? "in" : "out"));
+            //pri added by zhuyang,Liveness probe: the peer left before this link was ready, close now instead of waiting,20261020,start
+            if (!hello.inRound) {
+                Bus.log("传输: 对端已退出本轮(st=out),本机立即收起 " + s.getInetAddress());
+                closeQuietly(s);
+                failInbound(new XferError(XferError.Stage.CONNECT, XferError.PEER_GONE, "对方已退出本轮"));
+                return;
+            }
+            //pri added by zhuyang,Liveness probe: the peer left before this link was ready, close now instead of waiting,20261020,end
             //pri modify by zhuyang,Batch 4: do not emit have= any more; resume is decided per FILE_BEGIN sha256,20261019
-            byte[] ack = Proto.buildHelloAck(Bus.sid(), localRole());
+            byte[] ack = Proto.buildHelloAck(Bus.sid(), localRole(), null, mRoundLive);
             Proto.writeFrame(out, Proto.TYPE_HELLO_ACK, ack.length, ack);
             byte[] role = Proto.buildRole(localRole(), Bus.sid());
             Proto.writeFrame(out, Proto.TYPE_ROLE, role.length, role);
             out.flush();
             Bus.log("传输: [认证] HELLO 校验通过 " + s.getInetAddress()
                     + ",对方角色=" + hello.role + ",本机角色=" + localRole());
+            //pri added by zhuyang,Liveness probe: this phone already left, the ACK above carried st=out, so drop the link,20261020,start
+            if (!mRoundLive) {
+                Bus.log("传输: 本机已退出本轮,回完 st=out 即断开 " + s.getInetAddress());
+                closeQuietly(s);
+                return;
+            }
+            //pri added by zhuyang,Liveness probe: this phone already left, the ACK above carried st=out, so drop the link,20261020,end
             maybeCloseHotspotForLan(s);
             Link link = new Link(s, in, out, rxAt, txAt);
             //pri modify by zhuyang,Batch 4: have= is format compatibility only; skip decisions use FILE_BEGIN sha256,20261019
@@ -2357,10 +2454,10 @@ public class Xfer {
             }
             classifyAuthenticated(link, first);
         } catch (java.net.SocketTimeoutException e) {
-            Bus.log("传输: [认证] HELLO 超时(" + Proto.HELLO_TIMEOUT_MS + "ms),关闭连接 "
+            Bus.log("传输: [认证] HELLO 超时(" + Proto.HELLO_TIMEOUT_MS + "ms),判定对方已退出 "
                     + s.getInetAddress());
             closeQuietly(s);
-            failInbound(new XferError(XferError.Stage.CONNECT, XferError.CONNECT_TIMEOUT, "HELLO 握手超时"));
+            failInbound(new XferError(XferError.Stage.CONNECT, XferError.PEER_GONE, "HELLO 握手超时"));
         } catch (Exception e) {
             Bus.log("传输: [认证] HELLO 处理失败,关闭连接: " + e);
             closeQuietly(s);
@@ -4102,17 +4199,13 @@ public class Xfer {
         final Link link = isAlive(mSendSocket) ? mSendSocket
                 : (isAlive(mPeerSocket) ? mPeerSocket
                 : (isAlive(mStashedSocket) ? mStashedSocket : null));
-        //pri added by zhuyang,The SPP side channel reaches the peer even when no TCP link exists yet,20261020
-        final boolean btUp = BtControl.get().isAvailable();
         Bus.log("传输: 本机退出本轮" + (link == null
-                ? "(无可用 TCP 链路" + (btUp ? ",改走蓝牙通知" : ",只做本地收尾") + ")"
-                : ",通知对端 CANCEL — " + reason + (btUp ? "(TCP+蓝牙)" : "")));
+                ? "(无可用 TCP 链路,只做本地收尾)"
+                : ",通知对端 CANCEL — " + reason));
         final XferError cancelled = new XferError(XferError.Stage.TRANSFER, XferError.CANCELLED, reason);
         //pri added by zhuyang,The write must leave the main thread: a socket write there throws NetworkOnMainThreadException,20261020
         new Thread(new Runnable() { @Override public void run() {
             if (link != null) sendCancel(link, reason);
-            //pri added by zhuyang,Send on both bearers when both exist: TCP is primary, Bluetooth is the fallback,20261020
-            if (btUp) BtControl.get().send("CANCEL " + reason);
             stopHeartbeat(mPeerSocket);
             stopHeartbeat(mStashedSocket);
             stopHeartbeat(mSendSocket);
@@ -4149,17 +4242,6 @@ public class Xfer {
         final Link link = mPeerSocket;
         if (link == null || link.s.isClosed() || !link.s.isConnected()) {
             Bus.log("传输: 回执写回失败(连接已关闭) type=" + type);
-            //pri added by zhuyang,No TCP link yet (empty-state receiver exiting before the offer): fall back to the Bluetooth control channel so the peer still learns about it,20261020,start
-            if (type == Proto.TYPE_REJECT) {
-                BtControl bc = BtControl.get();
-                if (bc.isAvailable()) {
-                    Bus.log("传输: 改走蓝牙通知对端取消");
-                    bc.send("CANCEL 本机退出");
-                } else {
-                    Bus.log("传输: 蓝牙控制通道不可用,本轮对端只能靠超时");
-                }
-            }
-            //pri added by zhuyang,No TCP link yet (empty-state receiver exiting before the offer): fall back to the Bluetooth control channel so the peer still learns about it,20261020,end
             return;
         }
         mVerdictSent = true;
@@ -4282,6 +4364,7 @@ public class Xfer {
     //pri modify by zhuyang,Batch 5: every stage funnels through one coded failure exit,20261017,start
     private void fail(final XferError err) {
         if (err == null) return;
+        mRoundFailed.set(true); //pri added by zhuyang,A later liveness check must not overwrite this round's failure,20261020
         mSenderWaiting = false;
         mDiscovering = false; //pri added by zhuyang,Batch 5: a failed round stops its connect stage,20261017
         Bus.log("传输: [失败] " + err.code + "(" + XferError.nameOf(err.code) + ") stage=" + err.stage
@@ -4311,6 +4394,17 @@ public class Xfer {
         fail(new XferError(XferError.Stage.CONNECT, XferError.UNKNOWN, why));
     }
     //pri modify by zhuyang,Batch 5: every stage funnels through one coded failure exit,20261017,end
+
+    //pri added by zhuyang,Exit sync: the peer is gone, so this phone closes silently; at most once per round,20261020,start
+    private void reportPeerGone(String why) {
+        if (mRoundAborted.get() || mRoundFailed.get() || hasLiveLink()) return;
+        //pri added by zhuyang,Liveness probe: this phone already left the round, nothing to close,20261020
+        if (!mRoundLive) return;
+        if (!mPeerGoneReported.compareAndSet(false, true)) return;
+        Bus.log("传输: 判定对方已退出 — " + why);
+        fail(new XferError(XferError.Stage.CONNECT, XferError.PEER_GONE, why));
+    }
+    //pri added by zhuyang,Exit sync: the peer is gone, so this phone closes silently; at most once per round,20261020,end
 
     private static String errName(int reason) {
         switch (reason) {

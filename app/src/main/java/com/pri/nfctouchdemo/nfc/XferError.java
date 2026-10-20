@@ -25,6 +25,8 @@ public final class XferError {
     public static final int CANCELLED = 12;
     public static final int ROLE_CONFLICT = 13;
     public static final int DONE_ACK_TIMEOUT = 14;
+    //pri added by zhuyang,The peer is gone (exited/dropped); this phone must exit too,20261020
+    public static final int PEER_GONE = 15;
 
     public final Stage stage;
     public final int code;
@@ -56,6 +58,7 @@ public final class XferError {
             case CANCELLED: return "CANCELLED";
             case ROLE_CONFLICT: return "ROLE_CONFLICT";
             case DONE_ACK_TIMEOUT: return "DONE_ACK_TIMEOUT";
+            case PEER_GONE: return "PEER_GONE"; //pri added by zhuyang,The peer is gone; this phone must exit too,20261020
             default: return "UNKNOWN";
         }
     }

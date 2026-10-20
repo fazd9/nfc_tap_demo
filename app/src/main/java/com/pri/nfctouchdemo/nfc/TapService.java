@@ -34,7 +34,7 @@ import java.util.concurrent.TimeUnit;     //pri added by zhuyang,Tap-time galler
  *  - 用户在动效层上滑、点"接收"、点"拒绝"时,动效层用 startService 回执三个 ACTION_UI_*,
  *    对应业务判定仍然全部留在本服务(见 onStartCommand 末尾新增的三个分支),原逻辑不变。
  */
-public class TapService extends Service implements Bus.Listener, Xfer.Listener, BtControl.Listener {
+public class TapService extends Service implements Bus.Listener, Xfer.Listener {
 
     private static Xfer sXfer;
     private final Handler mMain = new Handler(Looper.getMainLooper());
@@ -61,7 +61,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener, 
     private Runnable mReceiveIdleTimeout;
     //pri added by zhuyang,The idle timeout closed the card: the socket error that follows must not paint a failure banner,20261020
     private volatile boolean mIdleDismissed;
-    //pri added by zhuyang,One peer CANCEL per round: TCP and the Bluetooth side channel may both deliver it,20261020
+    //pri added by zhuyang,One peer CANCEL per round: duplicated notifications must not paint twice,20261020
     private volatile boolean mCancelHandled;
     private static final long RECEIVE_IDLE_TIMEOUT_MS = 30000L;
 
@@ -167,7 +167,6 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener, 
     public void onDestroy() {
         Bus.log("服务: 被销毁,释放本轮热点");
         if (sXfer != null) sXfer.stopHotspot();
-        BtControl.get().close(); //pri added by zhuyang,Service is going away: drop the SPP control channel too,20261020
         super.onDestroy();
     }
     //pri added by zhuyang,Batch 6: never leave the round's AP behind when the service/task goes away,20261017,end
@@ -178,8 +177,6 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener, 
         Xfer x = xfer(this);
         x.addListener(this);
         x.warmUp();
-        BtControl.get().init(this);            //pri added by zhuyang,Resolve the local MAC before any payload is built,20261020
-        BtControl.get().setListener(this);     //pri added by zhuyang,Peer CANCEL arrives on the SPP side channel,20261020
         loadPending(); // 进程被回收后冷启:恢复上次选中的照片,避免碰触时误判成接收方
         Bus.log("服务: TapService 常驻中(承载碰一碰流程)");
         if (intent != null && "com.pri.nfcdemo.TAG".equals(intent.getAction())) {
@@ -276,6 +273,8 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener, 
         if (intent != null && OverlayService.ACTION_UI_SESSION_CANCELLED.equals(intent.getAction())) {
             Bus.log("服务: 本机退出,通知对端取消本轮");
             mSelfExited = true;
+            //pri added by zhuyang,Liveness probe: flip st to out before any socket closes,20261020
+            if (sXfer != null) sXfer.setRoundLive(false);
             cancelReceiveIdleTimeout();
             if (sXfer != null) sXfer.abortRound("本机退出");
             mSendShown = false;
@@ -302,6 +301,9 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener, 
         }
         if (intent != null && OverlayService.ACTION_UI_RECEIVE_REJECT.equals(intent.getAction())) {
             // 等价于旧 ReceivePage.Listener.onReject():用户点了"拒绝"
+            //pri added by zhuyang,Liveness probe: the receive card is going away, flip st to out before the socket work,20261020
+            if (sXfer != null) sXfer.setRoundLive(false);
+            mSelfExited = true; //pri added by zhuyang,Liveness probe: this page is gone, later socket noise must stay silent,20261020
             cancelReceiveIdleTimeout(); //pri added by zhuyang,The user decided: stop the 30s auto-dismiss,20261020
             if (mAccepted) {
                 //pri added by zhuyang,Exit sync: a verdict is already written during a transfer, so a REJECT is ignored; cancel instead so the sender stops,20261020,start
@@ -364,26 +366,6 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener, 
 
     @Override public void onLog(String line) {}
 
-    //pri added by zhuyang,SPP side channel: a peer CANCEL takes exactly the TCP CANCEL path,20261020,start
-    @Override
-    public void onControl(String msg) {
-        if (msg != null && msg.startsWith("CANCEL")) {
-            String reason = msg.length() > 6 ? msg.substring(6).trim() : "对方退出";
-            if (reason.isEmpty()) reason = "对方退出";
-            Bus.log("服务: 收到蓝牙取消 — " + msg);
-            handleTransferError(new XferError(XferError.Stage.TRANSFER, XferError.CANCELLED,
-                    "对方取消: " + reason));
-        } else {
-            Bus.log("服务: 忽略蓝牙控制消息 — " + msg);
-        }
-    }
-
-    @Override
-    public void onBtDown(String why) {
-        Bus.log("蓝牙: 控制通道不可用(静默降级,不影响 Wi-Fi 传图) — " + why);
-    }
-    //pri added by zhuyang,SPP side channel: a peer CANCEL takes exactly the TCP CANCEL path,20261020,end
-
     @Override
     public void onPeer(final String payload, final String role) {
         //pri added by zhuyang,Tap-time pull: ask the gallery first, then continue with the old body once it answers or times out,20261019
@@ -440,15 +422,6 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener, 
             return;
         }
         //pri added by zhuyang,Both sides have no photos: product does nothing at all this round (no page/AP/link),20261019,end
-        //pri added by zhuyang,Start the Bluetooth side channel before the slow Wi-Fi hotspot path: card = server, reader = client,20261020,start
-        final String peerBtMac = field(payload, "bm");
-        if (peerBtMac != null && peerBtMac.length() == 12) {
-            BtControl.get().start(peerBtMac, role);
-        } else {
-            BtControl.get().close();
-            Bus.log("蓝牙: 对方 payload 无 MAC,本轮不做蓝牙旁路");
-        }
-        //pri added by zhuyang,Start the Bluetooth side channel before the slow Wi-Fi hotspot path: card = server, reader = client,20261020,end
         //pri added by zhuyang,Batch 6: NFC role decides the single AP owner,20261017
         //pri added by zhuyang,D1: drop the previous round's fail banner the moment a new round starts,20261014
         startService(OverlayService.hideFailBannerIntent(this));
@@ -533,6 +506,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener, 
                 field(payload,"sid")); //pri added by zhuyang,Carry the peer sid into the first-frame handshake,20261017
         x.startAsReceiver(); // 服务端先就绪
         if (!Bus.lockRole(round)) { Bus.log("角色已定,忽略同一轮的重复碰触事件(round=" + round + ")"); return; }
+        x.setRoundLive(true); //pri added by zhuyang,Liveness probe: this tap really starts a round that is on screen,20261020
         mPeerLabel = label;
         //pri modify by zhuyang,Both phones only prepare to receive; the role is decided at swipe time,20261014,start
         x.setCanSend(hasPending()); //pri added by zhuyang,Photos in hand = still undecided: the accept loop must not consume an incoming connection as data,20261014
@@ -668,6 +642,8 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener, 
     /** 对方发送完毕:把本次收到的全部图交给查看器(用户已确认接收就打开)。 */
     @Override public void onTransferDone(java.util.List<Bitmap> bmps) {
         mTransferDone = true;
+        //pri added by zhuyang,Liveness probe: the round's data is complete, no peer should wait on this page,20261020
+        if (sXfer != null) sXfer.setRoundLive(false);
         mBmps.clear();
         if (bmps != null) mBmps.addAll(bmps);
         if (mReceiveShown) {
@@ -691,6 +667,8 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener, 
     @Override
     public void onImageSent(int bytes) {
         Bus.log("服务: 发送完成(" + (bytes / 1024) + "KB),悬浮窗关闭,用户仍在相册");
+        //pri added by zhuyang,Liveness probe: the round is over on this side,20261020
+        if (sXfer != null) sXfer.setRoundLive(false);
         Bus.unlockRole();
         PENDING.clear();
         sPublished = false; //pri added by zhuyang,Sent: the gallery's published selection is consumed, not held,20261016
@@ -786,14 +764,28 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener, 
 
     private void handleTransferError(XferError err) {
         mLastErrorAt = android.os.SystemClock.elapsedRealtime();
-        //pri added by zhuyang,Exit sync: a failure caused by this phone's own exit is already closed here, never paint it,20261020,start
-        if (mSelfExited && err.code == XferError.CANCELLED) {
-            Bus.log("服务: 本机退出导致的取消,本地不再弹失败横幅");
+        //pri added by zhuyang,Exit sync: the peer is gone, so this phone closes silently like the peer did,20261020,start
+        if (err.code == XferError.PEER_GONE) {
+            Bus.log("服务: 对方已退出,本机同步收起");
+            mSelfExited = true;
+            //pri added by zhuyang,Liveness probe: this phone is out of the round too,20261020
+            if (sXfer != null) sXfer.setRoundLive(false);
+            if (mSendShown) { mSendShown = false; }
+            if (mReceiveShown) { mReceiveShown = false; mRejected = true; }
+            cancelReceiveIdleTimeout();
+            startService(OverlayService.hideIntent(this, OverlayService.DISSOLVE_MS));
+            Bus.unlockRole();
+            return;
+        }
+        //pri added by zhuyang,Exit sync: the peer is gone, so this phone closes silently like the peer did,20261020,end
+        //pri added by zhuyang,Exit sync: this phone's page is already down, so a failure caused by its own exit never paints a banner,20261020,start
+        if (mSelfExited) {
+            Bus.log("服务: 本机页面已收起,忽略随后的传输错误 — " + err.code + "(" + XferError.nameOf(err.code) + ")");
             cancelReceiveIdleTimeout();
             Bus.unlockRole();
             return;
         }
-        //pri added by zhuyang,Exit sync: a failure caused by this phone's own exit is already closed here, never paint it,20261020,end
+        //pri added by zhuyang,Exit sync: this phone's page is already down, so a failure caused by its own exit never paints a banner,20261020,end
         //pri added by zhuyang,The idle timeout closed the card on purpose: its own socket teardown must not paint a banner,20261020,start
         if (mIdleDismissed) {
             Bus.log("服务: 接收页自动超时已收起,忽略随后连接断开 — " + err.code);
@@ -802,15 +794,17 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener, 
             return;
         }
         //pri added by zhuyang,The idle timeout closed the card on purpose: its own socket teardown must not paint a banner,20261020,end
-        //pri added by zhuyang,The same peer CANCEL may arrive on TCP and on the SPP side channel: only handle the first,20261020,start
+        //pri added by zhuyang,The same peer CANCEL may arrive twice: only handle the first,20261020,start
         if (err.code == XferError.CANCELLED) {
             if (mCancelHandled) {
                 Bus.log("服务: 本轮取消已处理,忽略重复通知 — " + err.detail);
                 return;
             }
             mCancelHandled = true;
+            //pri added by zhuyang,Liveness probe: a peer CANCEL ends this round on both sides,20261020
+            if (sXfer != null) sXfer.setRoundLive(false);
         }
-        //pri added by zhuyang,The same peer CANCEL may arrive on TCP and on the SPP side channel: only handle the first,20261020,end
+        //pri added by zhuyang,The same peer CANCEL may arrive twice: only handle the first,20261020,end
         cancelReceiveIdleTimeout(); //pri added by zhuyang,The round ends here: the 30s auto-dismiss is moot,20261020
         boolean sender = (mUserWantsSend && !mRoleYielded)
                 || (mSendShown && !mReceiveShown && !mRoleYielded);
@@ -1055,6 +1049,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener, 
                 mIdleDismissed = true;
                 mRejected = true;
                 mReceiveShown = false;
+                if (sXfer != null) sXfer.setRoundLive(false); //pri added by zhuyang,Liveness probe: the card is gone,20261020
                 if (sXfer != null) sXfer.rejectTransfer();
                 startService(OverlayService.hideIntent(TapService.this, OverlayService.DISSOLVE_MS));
                 mAccepted = false;
