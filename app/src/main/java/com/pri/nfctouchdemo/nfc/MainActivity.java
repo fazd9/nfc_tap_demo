@@ -406,7 +406,11 @@ public class MainActivity extends Activity implements NfcAdapter.ReaderCallback,
                 Bus.log("本机有选中照片 → 本机是发送方,忽略本次读取(等对方来读本机)");
                 return;
             }
-            if (!Bus.lockRole()) { Bus.log("角色已定(本机已是发送方),忽略本次读取"); return; }
+            //pri added by zhuyang,A manual trigger on the debug page counts as a new round,20261020,start
+            final long round = Bus.newRoleRound();
+            Bus.log("碰触: 新一轮 round=" + round);
+            if (!Bus.lockRole(round)) { Bus.log("角色已定,忽略同一轮的重复碰触事件(round=" + round + ")"); return; }
+            //pri added by zhuyang,A manual trigger on the debug page counts as a new round,20261020,end
             // 系统派发(被碰)即自动进入接收方角色:无需预先打开应用/点按钮
             // (普通应用的近似实现:系统把应用拉起;完全不亮应用直接弹悬浮窗需系统应用)
             mUserWantsReader = true;

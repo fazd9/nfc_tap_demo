@@ -371,6 +371,10 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
     //pri added by zhuyang,Split out only so the tap-time pull can run first without the NFC path waiting on a gallery that is,20261019
     //pri added by zhuyang,absent or does not answer,20261019,end
     private void onPeerAfterSelection(final String payload, final String role) {
+        //pri added by zhuyang,Every real tap advances the round token before any early exit, so the next tap can always start,20261020,start
+        final long round = Bus.newRoleRound();
+        Bus.log("碰触: 新一轮 round=" + round);
+        //pri added by zhuyang,Every real tap advances the round token before any early exit, so the next tap can always start,20261020,end
         //pri added by zhuyang,Both sides have no photos: product does nothing at all this round (no page/AP/link),20261019,start
         final String peerPh = field(payload, "ph");
         final int localCount = sGalleryCount;                 //pri added by zhuyang,The gallery selection, never the send queue,20261019
@@ -407,7 +411,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         //pri added by zhuyang,leaves, so a published selection can only be live while it is genuinely what the user is looking at,20261016
         if (sPublished) {
             Bus.log("碰一碰: 相册已直接上报当前选择 " + PENDING.size() + " 张,不再读屏幕");
-            beginPeerRound(payload, role);
+            beginPeerRound(payload, role, round);
             return;
         }
         //pri added by zhuyang,Gallery pickup (the product flow): if the user is in Google Photos looking at a photo, or with several,20261016,start
@@ -441,26 +445,26 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
                         Bus.log("相册拾取: 读不到相册内容(无障碍未开启),沿用上一轮的选择");
                     }
                     //pri added by zhuyang,The gallery is on screen and readable, and the user has neither opened nor ticked,20261016,end
-                    beginPeerRound(payload, role);
+                    beginPeerRound(payload, role, round);
                 }});
             }}, "gallery-pickup").start();
             return;
         }
         //pri added by zhuyang,Gallery pickup (the product flow): if the user is in Google Photos looking at a photo, or with several,20261016,end
-        beginPeerRound(payload, role);
+        beginPeerRound(payload, role, round);
     }
 
     //pri added by zhuyang,The body that used to be onPeer's tail, unchanged: it decides this round's role from PENDING,20261016,start
     //pri added by zhuyang,Split out only so the gallery pickup above can run first without the NFC path waiting on it when the,20261016
     //pri added by zhuyang,gallery is not involved,20261016,end
-    private void beginPeerRound(String payload, String nfcRole) {
+    private void beginPeerRound(String payload, String nfcRole, long round) {
         final String label = peerName(payload);
         Xfer x = xfer(this);
         x.setExpectedPeer(field(payload,"n"), field(payload,"b"), field(payload,"p"),
                 field(payload,"a"), field(payload,"ip"), field(payload,"hs"), field(payload,"hp"),
                 field(payload,"sid")); //pri added by zhuyang,Carry the peer sid into the first-frame handshake,20261017
         x.startAsReceiver(); // 服务端先就绪
-        if (!Bus.lockRole()) { Bus.log("角色已定,忽略重复的碰触事件"); return; }
+        if (!Bus.lockRole(round)) { Bus.log("角色已定,忽略同一轮的重复碰触事件(round=" + round + ")"); return; }
         mPeerLabel = label;
         //pri modify by zhuyang,Both phones only prepare to receive; the role is decided at swipe time,20261014,start
         x.setCanSend(hasPending()); //pri added by zhuyang,Photos in hand = still undecided: the accept loop must not consume an incoming connection as data,20261014

@@ -327,17 +327,22 @@ public final class Bus {
         }
     }
 
+    //pri added by zhuyang,Role lock is per round now: sRoleRound only generates a token, sRoleHeldRound is the round that owns the lock,20261020,start
     private static volatile boolean sRoleLocked;
+    private static volatile long sRoleRound;
+    private static volatile long sRoleHeldRound;
 
-    /** 角色锁:谁先确定角色(接收方=读取方 / 发送方=卡方)就锁定,另一方事件忽略。 */
-    private static volatile long sRoleLockedAt;
-
-    public static boolean lockRole() {
+    public static long newRoleRound() {
         synchronized (Bus.class) {
-            // 30 秒自动过期:上一轮若漏了解锁,这一轮碰触仍能重新拿锁(只支持一次的根因修复)
-            if (sRoleLocked && System.currentTimeMillis() - sRoleLockedAt < 30000) return false;
+            return ++sRoleRound;
+        }
+    }
+
+    public static boolean lockRole(long round) {
+        synchronized (Bus.class) {
+            if (sRoleLocked && sRoleHeldRound == round) return false;
             sRoleLocked = true;
-            sRoleLockedAt = System.currentTimeMillis();
+            sRoleHeldRound = round;
             return true;
         }
     }
@@ -345,6 +350,7 @@ public final class Bus {
     public static void unlockRole() {
         sRoleLocked = false;
     }
+    //pri added by zhuyang,Role lock is per round now: sRoleRound only generates a token, sRoleHeldRound is the round that owns the lock,20261020,end
 
     public static void setServiceListener(Listener l) {
         sServiceListener = l;
