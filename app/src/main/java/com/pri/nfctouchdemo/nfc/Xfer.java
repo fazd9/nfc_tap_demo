@@ -4149,6 +4149,17 @@ public class Xfer {
         final Link link = mPeerSocket;
         if (link == null || link.s.isClosed() || !link.s.isConnected()) {
             Bus.log("传输: 回执写回失败(连接已关闭) type=" + type);
+            //pri added by zhuyang,No TCP link yet (empty-state receiver exiting before the offer): fall back to the Bluetooth control channel so the peer still learns about it,20261020,start
+            if (type == Proto.TYPE_REJECT) {
+                BtControl bc = BtControl.get();
+                if (bc.isAvailable()) {
+                    Bus.log("传输: 改走蓝牙通知对端取消");
+                    bc.send("CANCEL 本机退出");
+                } else {
+                    Bus.log("传输: 蓝牙控制通道不可用,本轮对端只能靠超时");
+                }
+            }
+            //pri added by zhuyang,No TCP link yet (empty-state receiver exiting before the offer): fall back to the Bluetooth control channel so the peer still learns about it,20261020,end
             return;
         }
         mVerdictSent = true;
