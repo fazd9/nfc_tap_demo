@@ -195,6 +195,11 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
             Bus.log("调试: 模拟碰一碰,对方信息 = " + Bus.redactPayload(payload)); //pri modify by zhuyang,Redact sid and hotspot password,20261017
             Bus.onPeerData(payload, intent.getStringExtra("role"));
         }
+        //pri added by zhuyang,Diagnostic: log this phone's own sid without starting a round - hotspot tests need the peer sid before injecting a tap,20261020,start
+        if (intent != null && "com.pri.nfcdemo.SID".equals(intent.getAction())) {
+            Bus.log("本机 sid=" + Bus.sid());
+        }
+        //pri added by zhuyang,Diagnostic: log this phone's own sid without starting a round - hotspot tests need the peer sid before injecting a tap,20261020,end
         //pri added by zhuyang,AssistContent probe triggered by am startservice: unlike am start it does not change the,20261016
         //pri added by zhuyang,top activity, so the gallery can stay in the foreground while the probe runs,20261016
         if (intent != null && "com.pri.nfcdemo.ASSIST_PROBE".equals(intent.getAction())) {

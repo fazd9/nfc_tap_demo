@@ -1478,11 +1478,14 @@ public class Xfer {
                 if (mApOwner) {
                     Bus.log("承载: ② 本机为 AP owner,等待对方接入本机热点…");
                     long deadline = SystemClock.elapsedRealtime() + OWNER_WAIT_MS;
+                    //pri modify by zhuyang,AP owner waits for a real send channel and promotes the tap-time link on every tick,20261020,start
                     while (mRunning && mSenderWaiting && SystemClock.elapsedRealtime() < deadline) {
-                        if (hasLiveLink() || mGotConnection) {
-                            Bus.log("承载: 对方已接入(热点/LAN)");
+                        if (isAlive(mSendSocket)) {
+                            Bus.log("承载: 发送通道已就绪");
                             return;
                         }
+                        if (adoptTapTimeSendLink()) return;
+                        if (mYielded || mReceiverRole) return;
                         if (!mHotspotActive && !mHotspotStarting) {
                             Bus.log("热点: 本机热点不可用,热点承载失败");
                             fail(new XferError(XferError.Stage.CONNECT, XferError.CONNECT_TIMEOUT,
@@ -1491,10 +1494,17 @@ public class Xfer {
                         }
                         try { Thread.sleep(500); } catch (InterruptedException ignored) {}
                     }
-                    if (mRunning && mSenderWaiting && !hasLiveLink()) {
-                        Bus.log("热点: " + (OWNER_WAIT_MS / 1000) + "s 内对方仍未接入,判定对方已退出");
-                        reportPeerGone((OWNER_WAIT_MS / 1000) + " 秒内对方未接入");
+                    if (!mRunning || !mSenderWaiting) return;
+                    if (isAlive(mSendSocket)) return;
+                    if (hasLiveLink()) {
+                        Bus.log("承载: 对方已接入但没有可用发送通道");
+                        fail(new XferError(XferError.Stage.CONNECT, XferError.CONNECT_TIMEOUT,
+                                "已连接对方,但发送通道未建立"));
+                        return;
                     }
+                    //pri modify by zhuyang,AP owner waits for a real send channel and promotes the tap-time link on every tick,20261020,end
+                    Bus.log("热点: " + (OWNER_WAIT_MS / 1000) + "s 内对方仍未接入,判定对方已退出");
+                    reportPeerGone((OWNER_WAIT_MS / 1000) + " 秒内对方未接入");
                     return;
                 }
                 String hsSsid = null;
@@ -2529,7 +2539,7 @@ public class Xfer {
         }
     }
 
-    //pri added by zhuyang,Debug (no sid) classification: pre-1a peerSpeaksFirst behaviour on a Link,20261017,start
+    //pri modify by zhuyang,Debug classification now mirrors the authenticated ROLE(U)/ROLE(R) stash path instead of letting a heartbeat PING drive peerSpeaksFirst,20261020,start
     private void classifyDebug(Link link) {
         if (!mRunning) {
             closeQuietly(link);
@@ -2540,16 +2550,21 @@ public class Xfer {
         if (!mReceiverRole) {
             setSendLink(link);
             Bus.log("传输: [未认证] 本机是发送方,连接留作发送通道");
+            mMain.post(new Runnable() {
+                @Override public void run() { mListener.onP2pReady(false, null); }
+            });
+        } else if (mCanSend) {
+            mStashedSocket = link;
+            startRoleListener(link);
+            Bus.log("传输: [未认证] 连接暂存并监听角色,上滑后提升为发送通道");
         } else if (peerSpeaksFirst(link)) {
             handleIncoming(link); // 对方在发报价:本机就是这一轮的接收方
-        } else if (!mReceiverRole || mCanSend) {
-            setSendLink(link); // 本机还有照片没上滑(探测期间上滑也算):留着当发送通道
         } else {
             closeQuietly(link);
             Bus.log("传输: [未认证] 对端只是读取方,已释放空连接");
         }
     }
-    //pri added by zhuyang,Debug (no sid) classification: pre-1a peerSpeaksFirst behaviour on a Link,20261017,end
+    //pri modify by zhuyang,Debug classification now mirrors the authenticated ROLE(U)/ROLE(R) stash path instead of letting a heartbeat PING drive peerSpeaksFirst,20261020,end
 
     //pri added by zhuyang,Authenticated classification by the peer's first frame,20261017,start
     private void classifyAuthenticated(Link link, Proto.Frame first) {
