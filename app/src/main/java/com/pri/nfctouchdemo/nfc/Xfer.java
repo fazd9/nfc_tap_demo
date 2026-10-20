@@ -301,6 +301,9 @@ public class Xfer {
     private final java.util.List<Proto.Frame> mPreReadFrames = new java.util.ArrayList<Proto.Frame>();
     //pri added by zhuyang,Role convergence: the send channel and the inbound/stash channel are separate handles,20261017,end
     private volatile boolean mVerdictSent;  //pri added by zhuyang,Verdict is written back at most once per round,20261014
+    //pri added by zhuyang,Exit sync: a local exit cancels this round exactly once,20261020
+    private final java.util.concurrent.atomic.AtomicBoolean mRoundAborted =
+            new java.util.concurrent.atomic.AtomicBoolean();
     private volatile boolean mDoneNotified; //pri added by zhuyang,"transfer done" is delivered at most once per connection,20261014
     private volatile int mExpect;           //pri added by zhuyang,Total image count announced by TYPE_META this round,20261014
     private volatile int mRound;            //pri added by zhuyang,Round token: a stale verdict must not leak into the next round,20261014
@@ -470,6 +473,7 @@ public class Xfer {
         mPeerWantsSend = false;
         mYielded = false;
         mVerdictSent = false;
+        mRoundAborted.set(false); //pri added by zhuyang,Exit sync: the next tap may cancel its own round,20261020
         mDoneNotified = false;
         mExpect = 0;
         mFirstSavedUri = null;
@@ -2666,6 +2670,13 @@ public class Xfer {
                     mStashedSocket = link;
                     handleIncoming(link, f);
                     break;
+                } else if (f.type == Proto.TYPE_CANCEL) {
+                    //pri added by zhuyang,Exit sync: the peer left before its offer, so the page waiting on this link must come down,20261020
+                    String reason = new String(f.data, java.nio.charset.StandardCharsets.UTF_8);
+                    Bus.log("传输: 角色监听收到 CANCEL — " + reason);
+                    notifyLinkFailedOnce(link, new XferError(XferError.Stage.TRANSFER,
+                            XferError.CANCELLED, "对方取消: " + reason));
+                    break;
                 } else {
                     Bus.log("传输: 角色监听忽略帧类型 " + f.type);
                 }
@@ -4075,6 +4086,46 @@ public class Xfer {
     public void rejectTransfer() {
         writeVerdict(Proto.TYPE_REJECT);
     }
+
+    //pri added by zhuyang,Exit sync: this phone left the page mid-round - tell the peer and drop every link,20261020,start
+    //pri added by zhuyang,CANCEL goes out on the first live link only; a missing or blocked link still ends the round locally,20261020
+    public void abortRound(String why) {
+        if (!mRoundAborted.compareAndSet(false, true)) return;
+        final String reason = (why == null || why.isEmpty()) ? "本机退出" : why;
+        final Link link = isAlive(mSendSocket) ? mSendSocket
+                : (isAlive(mPeerSocket) ? mPeerSocket
+                : (isAlive(mStashedSocket) ? mStashedSocket : null));
+        Bus.log("传输: 本机退出本轮" + (link == null ? "(无可用链路,只做本地收尾)" : ",通知对端 CANCEL — " + reason));
+        final XferError cancelled = new XferError(XferError.Stage.TRANSFER, XferError.CANCELLED, reason);
+        //pri added by zhuyang,The write must leave the main thread: a socket write there throws NetworkOnMainThreadException,20261020
+        new Thread(new Runnable() { @Override public void run() {
+            if (link != null) sendCancel(link, reason);
+            stopHeartbeat(mPeerSocket);
+            stopHeartbeat(mStashedSocket);
+            stopHeartbeat(mSendSocket);
+            closeAsCancelled(mPeerSocket, cancelled);
+            mPeerSocket = null;
+            closeAsCancelled(mStashedSocket, cancelled);
+            mStashedSocket = null;
+            closeAsCancelled(mSendSocket, cancelled);
+            mSendSocket = null;
+            mRoleListenerThread = null;
+            mRoleListenerAbort = null;
+            try { if (mServer != null) mServer.close(); } catch (Exception ignored) {}
+            mServer = null;
+            fail(cancelled);
+        }}, "abort-round").start();
+    }
+
+    //pri added by zhuyang,Mark the link with the coded reason before closing so its writer/reader does not report a second cause,20261020
+    private void closeAsCancelled(Link link, XferError err) {
+        if (link == null) return;
+        link.linkDead.set(true);
+        link.failError = err;
+        link.failReason = err.detail;
+        closeQuietly(link);
+    }
+    //pri added by zhuyang,Exit sync: this phone left the page mid-round - tell the peer and drop every link,20261020,end
 
     //pri modify by zhuyang,Write the verdict on the receive Link at most once per round,20261017
     private void writeVerdict(final int type) {

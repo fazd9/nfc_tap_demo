@@ -55,6 +55,13 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
     private boolean mSendShown;                                         // 本轮发送动效页是否已拉起(替代原来的 mSendPage != null)
     private boolean mReceiveShown;                                      // 本轮接收动效页是否已拉起(替代原来的 mReceivePage != null)
     private long mLastErrorAt;                                          //pri added by zhuyang,Batch 5: coded error already rendered,20261017
+    //pri added by zhuyang,Exit sync: the local page is already down, so its own CANCELLED callback must not raise a banner,20261020
+    private volatile boolean mSelfExited;
+    //pri added by zhuyang,Receive card with no Accept/Reject: auto-dismiss after 30s and tell the peer,20261020
+    private Runnable mReceiveIdleTimeout;
+    //pri added by zhuyang,The idle timeout closed the card: the socket error that follows must not paint a failure banner,20261020
+    private volatile boolean mIdleDismissed;
+    private static final long RECEIVE_IDLE_TIMEOUT_MS = 30000L;
 
     /** 相册推送过来的"当前选中照片"。 */
     private static final ArrayList<Uri> PENDING = new ArrayList<Uri>();
@@ -259,8 +266,22 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
             sXfer.startAsSender();
             //pri modify by zhuyang,Swipe now declares the sender role and triggers the link negotiation,20261014,end
         }
+        //pri added by zhuyang,Exit sync: the send page went away on this phone (Back / Home / Recents / screen off / gesture),20261020,start
+        //pri added by zhuyang,Tell the peer to drop the round; abortRound closes every link and reports CANCELLED locally,20261020
+        if (intent != null && OverlayService.ACTION_UI_SESSION_CANCELLED.equals(intent.getAction())) {
+            Bus.log("服务: 本机退出,通知对端取消本轮");
+            mSelfExited = true;
+            cancelReceiveIdleTimeout();
+            if (sXfer != null) sXfer.abortRound("本机退出");
+            mSendShown = false;
+            mReceiveShown = false;
+            Bus.unlockRole();
+            return START_STICKY;
+        }
+        //pri added by zhuyang,Exit sync: the send page went away on this phone (Back / Home / Recents / screen off / gesture),20261020,end
         if (intent != null && OverlayService.ACTION_UI_RECEIVE_ACCEPT.equals(intent.getAction())) {
             // 等价于旧 ReceivePage.Listener.onAccept():用户点了"接收 N 张照片"
+            cancelReceiveIdleTimeout(); //pri added by zhuyang,The user decided: stop the 30s auto-dismiss,20261020
             mAccepted = true;
             if (sXfer != null) sXfer.confirmReceived(); //pri added by zhuyang,Write the ACCEPT verdict back on the same socket,20261014
             if (mTransferDone && mFullCount > 0) { // 已经收完,直接看全部
@@ -276,8 +297,17 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         }
         if (intent != null && OverlayService.ACTION_UI_RECEIVE_REJECT.equals(intent.getAction())) {
             // 等价于旧 ReceivePage.Listener.onReject():用户点了"拒绝"
-            Bus.log("已拒绝接收");
-            if (sXfer != null) sXfer.rejectTransfer(); //pri added by zhuyang,Write the REJECT verdict back (no image was ever sent),20261014
+            cancelReceiveIdleTimeout(); //pri added by zhuyang,The user decided: stop the 30s auto-dismiss,20261020
+            if (mAccepted) {
+                //pri added by zhuyang,Exit sync: a verdict is already written during a transfer, so a REJECT is ignored; cancel instead so the sender stops,20261020,start
+                Bus.log("服务: 传输中退出,通知对端取消本轮");
+                mSelfExited = true;
+                if (sXfer != null) sXfer.abortRound("本机退出");
+                //pri added by zhuyang,Exit sync: a verdict is already written during a transfer, so a REJECT is ignored; cancel instead so the sender stops,20261020,end
+            } else {
+                Bus.log("已拒绝接收");
+                if (sXfer != null) sXfer.rejectTransfer(); //pri added by zhuyang,Write the REJECT verdict back (no image was ever sent),20261014
+            }
             mRejected = true; //pri added by zhuyang,Set before hideIntent: the fallback path must not re-open the card,20261014
             Bus.unlockRole();
             //pri modify by zhuyang,E5: dissolve the card before the window goes,20261014
@@ -388,6 +418,9 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         //pri added by zhuyang,Batch 6: NFC role decides the single AP owner,20261017
         //pri added by zhuyang,D1: drop the previous round's fail banner the moment a new round starts,20261014
         startService(OverlayService.hideFailBannerIntent(this));
+        cancelReceiveIdleTimeout(); //pri added by zhuyang,New round: the previous card's 30s timer must not close this one,20261020
+        mSelfExited = false; //pri added by zhuyang,New round: a local exit of the previous round is over,20261020
+        mIdleDismissed = false; //pri added by zhuyang,New round: an idle auto-dismiss of the previous round is over,20261020
         mLinkReady = false; // 新一轮:连接就绪状态重置
         mSendShown = false;    // 新一轮:本轮"发送页已弹"标记清零(替代原来 mSendPage 字段的生命周期)
         mReceiveShown = false; // 同理,接收页标记清零
@@ -582,6 +615,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
 
     @Override
     public void onImageReceived(int index, int total, Bitmap bmp, int bytes, boolean saved) {
+        cancelReceiveIdleTimeout(); //pri added by zhuyang,Data is flowing: this card is not idle any more,20261020
         mFullCount = index;
         mLastBmp = bmp;
         // 图片到达:必须经过"接收确认"这一步(动效层接收页还没起来就先补起来)
@@ -717,6 +751,23 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
 
     private void handleTransferError(XferError err) {
         mLastErrorAt = android.os.SystemClock.elapsedRealtime();
+        //pri added by zhuyang,Exit sync: a failure caused by this phone's own exit is already closed here, never paint it,20261020,start
+        if (mSelfExited && err.code == XferError.CANCELLED) {
+            Bus.log("服务: 本机退出导致的取消,本地不再弹失败横幅");
+            cancelReceiveIdleTimeout();
+            Bus.unlockRole();
+            return;
+        }
+        //pri added by zhuyang,Exit sync: a failure caused by this phone's own exit is already closed here, never paint it,20261020,end
+        //pri added by zhuyang,The idle timeout closed the card on purpose: its own socket teardown must not paint a banner,20261020,start
+        if (mIdleDismissed) {
+            Bus.log("服务: 接收页自动超时已收起,忽略随后连接断开 — " + err.code);
+            cancelReceiveIdleTimeout();
+            Bus.unlockRole();
+            return;
+        }
+        //pri added by zhuyang,The idle timeout closed the card on purpose: its own socket teardown must not paint a banner,20261020,end
+        cancelReceiveIdleTimeout(); //pri added by zhuyang,The round ends here: the 30s auto-dismiss is moot,20261020
         boolean sender = (mUserWantsSend && !mRoleYielded)
                 || (mSendShown && !mReceiveShown && !mRoleYielded);
         String line = failureText(err.code, !sender);
@@ -897,6 +948,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         mTransferDone = false; mBmps.clear();
         //pri modify by zhuyang,Use the real announced count; the bottom status line stays empty until real transfer progress arrives,20261019
         startForegroundService(OverlayService.receiveIntent(this, label, Math.max(1, count), previewUriOrNull()));
+        armReceiveIdleTimeout(); //pri added by zhuyang,No Accept/Reject for 30s: close this card on both phones,20261020
     }
 
     //pri added by zhuyang,Empty state (E7): the phone with no photo selected raises the same page,20261014,start
@@ -929,6 +981,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
                 }
                 if (captured == null) Bus.log("截屏失败/超时,空态页背景回退为深色");
                 startForegroundService(OverlayService.receiveIntent(TapService.this, mPeerLabel, captured));
+                armReceiveIdleTimeout(); //pri added by zhuyang,Empty state is a receive page too: no decision for 30s closes it,20261020
                 //pri added by zhuyang,No statusIntent at all: the empty state shows nothing but the backdrop,20261014
             }});
         }}).start();
@@ -943,8 +996,45 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         mBmps.clear(); mLastBmp = null;
         startForegroundService(OverlayService.receiveIntent(this, mPeerLabel,
                 Math.max(1, mTotalCount), previewUriOrNull()));
+        armReceiveIdleTimeout(); //pri added by zhuyang,The in-place receive card starts its own 30s no-decision window,20261020
     }
     //pri added by zhuyang,Loser side of the race: the live send page becomes the receive card in place,20261014,end
+
+    //pri added by zhuyang,Receive card backstop: no Accept/Reject and no transfer for 30s -> drop it and tell the peer,20261020,start
+    private void armReceiveIdleTimeout() {
+        cancelReceiveIdleTimeout();
+        final Runnable r = new Runnable() {
+            @Override public void run() {
+                mReceiveIdleTimeout = null;
+                if (!mReceiveShown || mAccepted || mRejected) return;
+                Bus.log("服务: 接收页 30s 无操作,自动收起并通知对端");
+                mIdleDismissed = true;
+                mRejected = true;
+                mReceiveShown = false;
+                if (sXfer != null) sXfer.rejectTransfer();
+                startService(OverlayService.hideIntent(TapService.this, OverlayService.DISSOLVE_MS));
+                mAccepted = false;
+                mPreviewCount = 0;
+                mFullCount = 0;
+                mTotalCount = 0;
+                mTransferDone = false;
+                mBmps.clear();
+                mLastBmp = null;
+                if (sXfer != null) sXfer.stopHotspot();
+                Bus.unlockRole();
+            }
+        };
+        mReceiveIdleTimeout = r;
+        mMain.postDelayed(r, RECEIVE_IDLE_TIMEOUT_MS);
+    }
+
+    private void cancelReceiveIdleTimeout() {
+        if (mReceiveIdleTimeout != null) {
+            mMain.removeCallbacks(mReceiveIdleTimeout);
+            mReceiveIdleTimeout = null;
+        }
+    }
+    //pri added by zhuyang,Receive card backstop: no Accept/Reject and no transfer for 30s -> drop it and tell the peer,20261020,end
 
     //pri added by zhuyang,D3: peer display name = Bluetooth name, then model name,20261014,start
     private static String peerName(String payload) {

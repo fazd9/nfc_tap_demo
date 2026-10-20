@@ -649,26 +649,34 @@ class OverlayService : Service() {
         return true
     }
 
-    //pri added by zhuyang,Same teardown as the normal end of a round: detach the window, the service stays resident,20261014
-    //pri added by zhuyang,Send page has no cancel in the product flow, so this side reports nothing to the NFC layer (same as the notification's close action),20261014
+    //pri modify by zhuyang,Exit sync: whatever way the page goes away, the peer must be told so it drops its side too,20261020,start
+    //pri modify by zhuyang,Receiving page still reports the reject pill; the send page now reports a cancel instead of staying silent,20261020
     private fun dismissPage() {
         //pri added by zhuyang,Receiving page goes out exactly like the reject pill, otherwise the next incoming image would re-open the card,20261014
-        if (mode == OverlayView.Mode.RECEIVE) notifyNfc(ACTION_UI_RECEIVE_REJECT)
+        when (mode) {
+            OverlayView.Mode.RECEIVE -> notifyNfc(ACTION_UI_RECEIVE_REJECT)
+            OverlayView.Mode.SEND -> notifyNfc(ACTION_UI_SESSION_CANCELLED)
+        }
         hideDemo()
         //pri added by zhuyang,Drop a live drag / fly / dissolve so the detached view tree does not carry it into the next round,20261014
         overlay.resetSendState()
     }
+    //pri modify by zhuyang,Exit sync: whatever way the page goes away, the peer must be told so it drops its side too,20261020,end
 
-    //pri added by chenpengqi,Screen-off path: take the page down but report nothing to the NFC layer - locking the phone is not a reject,20261019,start
-    //pri added by chenpengqi,A reject receipt here would run rejectTransfer + stopHotspot in TapService and abort a transfer that is already running,20261019
+    //pri modify by zhuyang,Screen-off path: take the page down and tell the peer,20261020,start
+    //pri modify by zhuyang,A lock is a local exit in the product flow, so it follows the same cancel/reject report as Back / Home,20261020
     private fun onScreenOff() {
         if (!attached) return
-        Log.i(TAG, "息屏：收起动效页")
+        Log.i(TAG, "息屏：收起动效页并通知对端")
         cancelDissolve()
+        when (mode) {
+            OverlayView.Mode.RECEIVE -> notifyNfc(ACTION_UI_RECEIVE_REJECT)
+            OverlayView.Mode.SEND -> notifyNfc(ACTION_UI_SESSION_CANCELLED)
+        }
         hideDemo()
         overlay.resetSendState()
     }
-    //pri added by chenpengqi,Screen-off path: take the page down but report nothing to the NFC layer,20261019,end
+    //pri modify by zhuyang,Screen-off path: take the page down and tell the peer,20261020,end
 
     //pri modify by chenpengqi,Gesture-nav Back path: keep the registration in step with "window attached and not touch-through",20261016,start
     //pri modify by chenpengqi,The callback exists from API 33 on; below that the two key paths above stay the only way in,20261016
@@ -1374,6 +1382,8 @@ class OverlayService : Service() {
         const val ACTION_UI_SEND_CONFIRMED = "com.pri.nfctouchdemo.action.UI_SEND_CONFIRMED"
         const val ACTION_UI_RECEIVE_ACCEPT = "com.pri.nfctouchdemo.action.UI_RECEIVE_ACCEPT"
         const val ACTION_UI_RECEIVE_REJECT = "com.pri.nfctouchdemo.action.UI_RECEIVE_REJECT"
+        //pri added by zhuyang,Exit sync: the local send page went away (Back / Home / Recents / screen off / gesture) - cancel the round on both phones,20261020
+        const val ACTION_UI_SESSION_CANCELLED = "com.pri.nfctouchdemo.action.UI_SESSION_CANCELLED"
 
         /** 背景图（水波折射的那张，产品里对应"对方的屏幕画面"）。 */
         const val EXTRA_BACKDROP = "extra_backdrop"
