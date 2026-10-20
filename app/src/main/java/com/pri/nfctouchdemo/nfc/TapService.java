@@ -34,7 +34,7 @@ import java.util.concurrent.TimeUnit;     //pri added by zhuyang,Tap-time galler
  *  - 用户在动效层上滑、点"接收"、点"拒绝"时,动效层用 startService 回执三个 ACTION_UI_*,
  *    对应业务判定仍然全部留在本服务(见 onStartCommand 末尾新增的三个分支),原逻辑不变。
  */
-public class TapService extends Service implements Bus.Listener, Xfer.Listener {
+public class TapService extends Service implements Bus.Listener, Xfer.Listener, BtControl.Listener {
 
     private static Xfer sXfer;
     private final Handler mMain = new Handler(Looper.getMainLooper());
@@ -61,6 +61,8 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
     private Runnable mReceiveIdleTimeout;
     //pri added by zhuyang,The idle timeout closed the card: the socket error that follows must not paint a failure banner,20261020
     private volatile boolean mIdleDismissed;
+    //pri added by zhuyang,One peer CANCEL per round: TCP and the Bluetooth side channel may both deliver it,20261020
+    private volatile boolean mCancelHandled;
     private static final long RECEIVE_IDLE_TIMEOUT_MS = 30000L;
 
     /** 相册推送过来的"当前选中照片"。 */
@@ -165,6 +167,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
     public void onDestroy() {
         Bus.log("服务: 被销毁,释放本轮热点");
         if (sXfer != null) sXfer.stopHotspot();
+        BtControl.get().close(); //pri added by zhuyang,Service is going away: drop the SPP control channel too,20261020
         super.onDestroy();
     }
     //pri added by zhuyang,Batch 6: never leave the round's AP behind when the service/task goes away,20261017,end
@@ -175,6 +178,8 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         Xfer x = xfer(this);
         x.addListener(this);
         x.warmUp();
+        BtControl.get().init(this);            //pri added by zhuyang,Resolve the local MAC before any payload is built,20261020
+        BtControl.get().setListener(this);     //pri added by zhuyang,Peer CANCEL arrives on the SPP side channel,20261020
         loadPending(); // 进程被回收后冷启:恢复上次选中的照片,避免碰触时误判成接收方
         Bus.log("服务: TapService 常驻中(承载碰一碰流程)");
         if (intent != null && "com.pri.nfcdemo.TAG".equals(intent.getAction())) {
@@ -359,6 +364,26 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
 
     @Override public void onLog(String line) {}
 
+    //pri added by zhuyang,SPP side channel: a peer CANCEL takes exactly the TCP CANCEL path,20261020,start
+    @Override
+    public void onControl(String msg) {
+        if (msg != null && msg.startsWith("CANCEL")) {
+            String reason = msg.length() > 6 ? msg.substring(6).trim() : "对方退出";
+            if (reason.isEmpty()) reason = "对方退出";
+            Bus.log("服务: 收到蓝牙取消 — " + msg);
+            handleTransferError(new XferError(XferError.Stage.TRANSFER, XferError.CANCELLED,
+                    "对方取消: " + reason));
+        } else {
+            Bus.log("服务: 忽略蓝牙控制消息 — " + msg);
+        }
+    }
+
+    @Override
+    public void onBtDown(String why) {
+        Bus.log("蓝牙: 控制通道不可用(静默降级,不影响 Wi-Fi 传图) — " + why);
+    }
+    //pri added by zhuyang,SPP side channel: a peer CANCEL takes exactly the TCP CANCEL path,20261020,end
+
     @Override
     public void onPeer(final String payload, final String role) {
         //pri added by zhuyang,Tap-time pull: ask the gallery first, then continue with the old body once it answers or times out,20261019
@@ -415,11 +440,21 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
             return;
         }
         //pri added by zhuyang,Both sides have no photos: product does nothing at all this round (no page/AP/link),20261019,end
+        //pri added by zhuyang,Start the Bluetooth side channel before the slow Wi-Fi hotspot path: card = server, reader = client,20261020,start
+        final String peerBtMac = field(payload, "bm");
+        if (peerBtMac != null && peerBtMac.length() == 12) {
+            BtControl.get().start(peerBtMac, role);
+        } else {
+            BtControl.get().close();
+            Bus.log("蓝牙: 对方 payload 无 MAC,本轮不做蓝牙旁路");
+        }
+        //pri added by zhuyang,Start the Bluetooth side channel before the slow Wi-Fi hotspot path: card = server, reader = client,20261020,end
         //pri added by zhuyang,Batch 6: NFC role decides the single AP owner,20261017
         //pri added by zhuyang,D1: drop the previous round's fail banner the moment a new round starts,20261014
         startService(OverlayService.hideFailBannerIntent(this));
         cancelReceiveIdleTimeout(); //pri added by zhuyang,New round: the previous card's 30s timer must not close this one,20261020
         mSelfExited = false; //pri added by zhuyang,New round: a local exit of the previous round is over,20261020
+        mCancelHandled = false; //pri added by zhuyang,New round: the previous round's CANCEL must not swallow this one,20261020
         mIdleDismissed = false; //pri added by zhuyang,New round: an idle auto-dismiss of the previous round is over,20261020
         mLinkReady = false; // 新一轮:连接就绪状态重置
         mSendShown = false;    // 新一轮:本轮"发送页已弹"标记清零(替代原来 mSendPage 字段的生命周期)
@@ -767,6 +802,15 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
             return;
         }
         //pri added by zhuyang,The idle timeout closed the card on purpose: its own socket teardown must not paint a banner,20261020,end
+        //pri added by zhuyang,The same peer CANCEL may arrive on TCP and on the SPP side channel: only handle the first,20261020,start
+        if (err.code == XferError.CANCELLED) {
+            if (mCancelHandled) {
+                Bus.log("服务: 本轮取消已处理,忽略重复通知 — " + err.detail);
+                return;
+            }
+            mCancelHandled = true;
+        }
+        //pri added by zhuyang,The same peer CANCEL may arrive on TCP and on the SPP side channel: only handle the first,20261020,end
         cancelReceiveIdleTimeout(); //pri added by zhuyang,The round ends here: the 30s auto-dismiss is moot,20261020
         boolean sender = (mUserWantsSend && !mRoleYielded)
                 || (mSendShown && !mReceiveShown && !mRoleYielded);

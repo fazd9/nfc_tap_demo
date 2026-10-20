@@ -25,6 +25,8 @@ public class HceService extends HostApduService {
     @Override
     public void onCreate() {
         super.onCreate();
+        //pri added by zhuyang,The card side may answer a tap while only HCE is up: resolve bm before the payload is built,20261020
+        BtControl.get().init(this);
         // 预热 payload：首次要初始化蓝牙取本机名 + 枚举网卡，几百毫秒，别留到 APDU 响应路径里
         Bus.warmUpAsync();
     }

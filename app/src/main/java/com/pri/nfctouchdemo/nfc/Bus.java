@@ -59,6 +59,7 @@ public final class Bus {
     private static volatile long sPayloadCacheAt;
     private static volatile String sSid; //pri added by zhuyang,Process-wide session id shared by every round,20261017
     private static volatile int sPhotoCount; //pri modify by zhuyang,Advertise how many photos the gallery currently has selected,20261019
+    private static volatile String sBtMac; //pri added by zhuyang,Local Bluetooth MAC carried as bm for the SPP control channel,20261020
 
     private Bus() {}
 
@@ -71,6 +72,15 @@ public final class Bus {
         payloadChanged();
     }
     //pri modify by zhuyang,Publish the gallery's current selection count and invalidate the payload cache only on change,20261019,end
+
+    //pri added by zhuyang,Advertise the local Bluetooth MAC as 12 uppercase hex digits; null = omit bm,20261020,start
+    public static void setBtMac(String mac) {
+        String v = BtControl.normalizeMac(mac);
+        if (v == null || v.equals(sBtMac)) return;
+        sBtMac = v;
+        payloadChanged();
+    }
+    //pri added by zhuyang,Advertise the local Bluetooth MAC as 12 uppercase hex digits; null = omit bm,20261020,end
 
     //pri added by zhuyang,Generate the 128-bit sid once per process and keep it for all rounds,20261017,start
     public static String sid() {
@@ -232,6 +242,7 @@ public final class Bus {
         if (sP2pAddr != null) sb.append("|a=").append(safe(sP2pAddr));
         String ip = lanIpv4();
         if (ip != null) sb.append("|ip=").append(ip);
+        if (sBtMac != null) sb.append("|bm=").append(sBtMac); //pri added by zhuyang,Peer needs our Bluetooth MAC for the SPP side channel,20261020
         if (sHotspotSsid != null) sb.append("|hs=").append(safe(sHotspotSsid));
         if (sHotspotPass != null) sb.append("|hp=").append(safe(sHotspotPass));
         return sb.toString();

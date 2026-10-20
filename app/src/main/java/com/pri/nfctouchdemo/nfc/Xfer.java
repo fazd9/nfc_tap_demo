@@ -2250,7 +2250,12 @@ public class Xfer {
         new Thread(new Runnable() {
             @Override public void run() {
                 try {
-                    mServer = new ServerSocket(PORT);
+                    //pri modify by zhuyang,SO_REUSEADDR avoids EADDRINUSE when the previous round's listener is still in TIME_WAIT,20261020,start
+                    java.net.ServerSocket ss = new java.net.ServerSocket();
+                    ss.setReuseAddress(true);
+                    ss.bind(new java.net.InetSocketAddress(PORT));
+                    mServer = ss;
+                    //pri modify by zhuyang,SO_REUSEADDR avoids EADDRINUSE when the previous round's listener is still in TIME_WAIT,20261020,end
                     Bus.log("传输: 已监听端口 " + PORT + ",等待对方连接…");
                     while (mRunning) {
                         final Socket s = mServer.accept();
@@ -2268,6 +2273,8 @@ public class Xfer {
                         //pri added by zhuyang,Accept only accepts: HELLO is read on its own thread with a hard cap,20261017,end
                     }
                 } catch (Exception e) {
+                    //pri added by zhuyang,A bind failure must not leave mServer pointing at a half-built listener,20261020
+                    mServer = null;
                     if (mRunning) Bus.log("传输: 监听异常 " + e);
                 }
             }
@@ -4095,11 +4102,17 @@ public class Xfer {
         final Link link = isAlive(mSendSocket) ? mSendSocket
                 : (isAlive(mPeerSocket) ? mPeerSocket
                 : (isAlive(mStashedSocket) ? mStashedSocket : null));
-        Bus.log("传输: 本机退出本轮" + (link == null ? "(无可用链路,只做本地收尾)" : ",通知对端 CANCEL — " + reason));
+        //pri added by zhuyang,The SPP side channel reaches the peer even when no TCP link exists yet,20261020
+        final boolean btUp = BtControl.get().isAvailable();
+        Bus.log("传输: 本机退出本轮" + (link == null
+                ? "(无可用 TCP 链路" + (btUp ? ",改走蓝牙通知" : ",只做本地收尾") + ")"
+                : ",通知对端 CANCEL — " + reason + (btUp ? "(TCP+蓝牙)" : "")));
         final XferError cancelled = new XferError(XferError.Stage.TRANSFER, XferError.CANCELLED, reason);
         //pri added by zhuyang,The write must leave the main thread: a socket write there throws NetworkOnMainThreadException,20261020
         new Thread(new Runnable() { @Override public void run() {
             if (link != null) sendCancel(link, reason);
+            //pri added by zhuyang,Send on both bearers when both exist: TCP is primary, Bluetooth is the fallback,20261020
+            if (btUp) BtControl.get().send("CANCEL " + reason);
             stopHeartbeat(mPeerSocket);
             stopHeartbeat(mStashedSocket);
             stopHeartbeat(mSendSocket);

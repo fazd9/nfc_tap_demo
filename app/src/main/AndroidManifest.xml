@@ -44,6 +44,12 @@
     <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" />
     <uses-permission android:name="android.permission.BLUETOOTH" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" />
+    <!-- pri added by zhuyang,Bluetooth SPP control side channel; LOCAL_MAC_ADDRESS lets getAddress() return the real MAC on a platform-signed build,20261020,start -->
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation" />
+    <uses-permission android:name="android.permission.LOCAL_MAC_ADDRESS" />
+    <!-- pri added by zhuyang,Bluetooth SPP control side channel; LOCAL_MAC_ADDRESS lets getAddress() return the real MAC on a platform-signed build,20261020,end -->
 
     <uses-feature
         android:name="android.hardware.nfc"
