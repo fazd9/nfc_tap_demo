@@ -110,6 +110,10 @@ public class Xfer {
     private static final int HEARTBEAT_IDLE_MS = 300;    // no frame written for this long -> PING
     private static final int HEARTBEAT_DEAD_MS = 1000;   // no byte received for this long -> link is dead
     private static final int HEARTBEAT_TICK_MS = 50;     // heartbeat check period
+    //pri added by zhuyang,A just-associated hotspot link can swallow the first second of downlink while DHCP and power save settle: give a fresh link a relaxed dead window,20261021,start
+    private static final int HEARTBEAT_WARMUP_MS = 3000;      // a link younger than this uses the relaxed window
+    private static final int HEARTBEAT_WARMUP_DEAD_MS = 3000; // no byte during warm-up -> link is dead
+    //pri added by zhuyang,A just-associated hotspot link can swallow the first second of downlink while DHCP and power save settle: give a fresh link a relaxed dead window,20261021,end
     //pri added by zhuyang,Exit sync: once bytes flow a slow link may gap over 1s, so the data phase uses 5s,20261020
     private static final int TRANSFER_DEAD_MS = 5000;    // data phase: no byte received for this long -> link is dead
     //pri added by zhuyang,Exit sync: keep the listener and the AP briefly so a late-joining peer is told st=out,20261020
@@ -1314,7 +1318,11 @@ public class Xfer {
                     }
                 } else if (link.hbExpectRx) {
                     //pri modify by zhuyang,Exit sync: 1s while the user decides, 5s once bytes flow,20261020,start
-                    final int deadMs = link.hbTransferPhase ? TRANSFER_DEAD_MS : HEARTBEAT_DEAD_MS;
+                    //pri modify by zhuyang,Warm-up: a link younger than HEARTBEAT_WARMUP_MS uses the relaxed dead window so a fresh hotspot downlink stall is not mistaken for a dead peer,20261021,start
+                    final boolean warmup = now - link.hbStartedAt < HEARTBEAT_WARMUP_MS;
+                    final int deadMs = link.hbTransferPhase ? TRANSFER_DEAD_MS
+                            : (warmup ? HEARTBEAT_WARMUP_DEAD_MS : HEARTBEAT_DEAD_MS);
+                    //pri modify by zhuyang,Warm-up: a link younger than HEARTBEAT_WARMUP_MS uses the relaxed dead window so a fresh hotspot downlink stall is not mistaken for a dead peer,20261021,end
                     if (now - link.lastRx.get() >= deadMs) {
                         signalLinkDead(link, new XferError(XferError.Stage.TRANSFER, XferError.TRANSFER_TIMEOUT,
                                 "连接超时(" + deadMs + "ms 未收到对端任何数据)"));
@@ -1867,12 +1875,15 @@ public class Xfer {
             try {
                 android.net.wifi.WifiInfo wi = wm.getConnectionInfo();
                 String cur = wi == null ? null : unquote(wi.getSSID());
-                if (ssid.equals(cur)) {
+                //pri modify by zhuyang,The derived SSID repeats every round and getSSID() reports a configured network before it associates: an association only counts once this network holds an IPv4 lease,20261021,start
+                if (ssid.equals(cur) && wi.getIpAddress() != 0) {
                     int id = wi.getNetworkId();
                     if (id >= 0) mJoinedNetId = id;
-                    Bus.log("Wi-Fi: 热点已接入 SSID=" + ssid + ",netId=" + mJoinedNetId);
+                    Bus.log("Wi-Fi: 热点已接入并拿到地址 SSID=" + ssid + ",netId=" + mJoinedNetId
+                            + ",ip=" + intToIp(wi.getIpAddress()));
                     return true;
                 }
+                //pri modify by zhuyang,The derived SSID repeats every round and getSSID() reports a configured network before it associates: an association only counts once this network holds an IPv4 lease,20261021,end
             } catch (Throwable ignored) {}
             try { Thread.sleep(300); } catch (InterruptedException ignored) {}
         }
