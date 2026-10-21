@@ -88,6 +88,19 @@ public final class GalleryPickup {
         }
     }
     //pri added by zhuyang,Ask the platform who is on top instead of trusting the last accessibility event: a window-state event only,20261016,end
+    //pri added by zhuyang,Quiet variant for the NFC payload path: same probe with no log per call,20261020,start
+    public static boolean isGalleryForegroundQuiet() {
+        try {
+            android.app.IActivityTaskManager atm = android.app.ActivityTaskManager.getService();
+            if (atm == null) return false;
+            android.app.ActivityTaskManager.RootTaskInfo info = atm.getFocusedRootTaskInfo();
+            if (info == null || info.topActivity == null) return false;
+            return "com.google.android.apps.photos".equals(info.topActivity.getPackageName());
+        } catch (Throwable e) {
+            return false;
+        }
+    }
+    //pri added by zhuyang,Quiet variant for the NFC payload path: same probe with no log per call,20261020,end
 
     //pri added by zhuyang,Re-read the gallery tree right now through the accessibility service; empty when accessibility is off,20261016
     private static List<Target> scanNow() {

@@ -200,6 +200,11 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
             Bus.log("本机 sid=" + Bus.sid());
         }
         //pri added by zhuyang,Diagnostic: log this phone's own sid without starting a round - hotspot tests need the peer sid before injecting a tap,20261020,end
+        //pri added by zhuyang,Diagnostic: log this phone's own NFC payload so hotspot tests can check what the peer will see,20261020,start
+        if (intent != null && "com.pri.nfcdemo.PAYLOAD".equals(intent.getAction())) {
+            Bus.log("本机 payload=" + Bus.redactPayload(Bus.selfPayload()));
+        }
+        //pri added by zhuyang,Diagnostic: log this phone's own NFC payload so hotspot tests can check what the peer will see,20261020,end
         //pri added by zhuyang,AssistContent probe triggered by am startservice: unlike am start it does not change the,20261016
         //pri added by zhuyang,top activity, so the gallery can stay in the foreground while the probe runs,20261016
         if (intent != null && "com.pri.nfcdemo.ASSIST_PROBE".equals(intent.getAction())) {
@@ -417,45 +422,16 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         final long round = Bus.newRoleRound();
         Bus.log("碰触: 新一轮 round=" + round);
         //pri added by zhuyang,Every real tap advances the round token before any early exit, so the next tap can always start,20261020,end
-        //pri added by zhuyang,Both sides have no photos: product does nothing at all this round (no page/AP/link),20261019,start
         final String peerPh = field(payload, "ph");
-        final int localCount = sGalleryCount;                 //pri added by zhuyang,The gallery selection, never the send queue,20261019
-        int peerCount = -1;                                   //pri added by zhuyang,-1 = unknown (old version / debug path without ph),20261019
-        try { if (peerPh != null) peerCount = Integer.parseInt(peerPh); } catch (Throwable ignored) {}
-        if (localCount <= 0 && peerCount == 0) {
-            Bus.log("碰触: 双方都没有照片(本机 " + localCount + ",对端 " + peerCount + "),本轮不做任何事");
-            return;
-        }
-        //pri added by zhuyang,Both sides have no photos: product does nothing at all this round (no page/AP/link),20261019,end
-        //pri added by zhuyang,Batch 6: NFC role decides the single AP owner,20261017
-        //pri added by zhuyang,D1: drop the previous round's fail banner the moment a new round starts,20261014
-        startService(OverlayService.hideFailBannerIntent(this));
-        cancelReceiveIdleTimeout(); //pri added by zhuyang,New round: the previous card's 30s timer must not close this one,20261020
-        mSelfExited = false; //pri added by zhuyang,New round: a local exit of the previous round is over,20261020
-        mCancelHandled = false; //pri added by zhuyang,New round: the previous round's CANCEL must not swallow this one,20261020
-        mIdleDismissed = false; //pri added by zhuyang,New round: an idle auto-dismiss of the previous round is over,20261020
-        mLinkReady = false; // 新一轮:连接就绪状态重置
-        mSendShown = false;    // 新一轮:本轮"发送页已弹"标记清零(替代原来 mSendPage 字段的生命周期)
-        mReceiveShown = false; // 同理,接收页标记清零
-        mUserWantsSend = false; //pri added by zhuyang,New round: role flags reset,20261014,start
-        mSendStarted = false;
-        mRoleYielded = false;
-        mRejected = false;
-        mPeerOffered = false;
-        mLastBmp = null;        //pri added by zhuyang,Preview bitmap is sticky across rounds,20261014
-        //pri added by zhuyang,Reset the receive counters and viewer list so nothing from the previous round leaks in,20261019,start
-        mAccepted = false;
-        mPreviewCount = 0;
-        mFullCount = 0;
-        mTotalCount = 0;
-        mTransferDone = false;
-        mBmps.clear();
-        //pri added by zhuyang,Reset the receive counters and viewer list so nothing from the previous round leaks in,20261019,end
-        //pri added by zhuyang,New round: role flags reset,20261014,end
+        int parsedPeerCount = -1;                             //pri added by zhuyang,-1 = unknown (old version / debug path without ph),20261019
+        try { if (peerPh != null) parsedPeerCount = Integer.parseInt(peerPh); } catch (Throwable ignored) {}
+        final int peerCount = parsedPeerCount;                //pri added by zhuyang,Final copy captured by the pickup callback,20261020
         //pri added by zhuyang,A gallery that publishes its own selection wins over reading the screen: while one is held, the,20261016
         //pri added by zhuyang,fallback below is not run at all (contract: see ACTION_CLEAR_SELECTION). The gallery clears when the user,20261016
         //pri added by zhuyang,leaves, so a published selection can only be live while it is genuinely what the user is looking at,20261016
         if (sPublished) {
+            if (bothSidesEmpty(peerCount)) return;
+            resetRoundForNewRound();
             Bus.log("碰一碰: 相册已直接上报当前选择 " + PENDING.size() + " 张,不再读屏幕");
             beginPeerRound(payload, role, round);
             return;
@@ -491,14 +467,59 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
                         Bus.log("相册拾取: 读不到相册内容(无障碍未开启),沿用上一轮的选择");
                     }
                     //pri added by zhuyang,The gallery is on screen and readable, and the user has neither opened nor ticked,20261016,end
+                    if (bothSidesEmpty(peerCount)) return;
+                    resetRoundForNewRound();
                     beginPeerRound(payload, role, round);
                 }});
             }}, "gallery-pickup").start();
             return;
         }
         //pri added by zhuyang,Gallery pickup (the product flow): if the user is in Google Photos looking at a photo, or with several,20261016,end
+        if (bothSidesEmpty(peerCount)) return;
+        resetRoundForNewRound();
         beginPeerRound(payload, role, round);
     }
+
+    //pri added by zhuyang,Gate: only a known zero on BOTH sides skips the round - a peer that cannot report a count sends no ph at all,20261020,start
+    private boolean bothSidesEmpty(int peerCount) {
+        final int localCount = sGalleryCount;
+        if (localCount <= 0 && peerCount == 0) {
+            Bus.log("碰触: 双方都没有照片(本机 " + localCount + ",对端 " + peerCount + "),本轮不做任何事");
+            return true;
+        }
+        return false;
+    }
+    //pri added by zhuyang,Gate: only a known zero on BOTH sides skips the round - a peer that cannot report a count sends no ph at all,20261020,end
+
+    //pri added by zhuyang,Per-round state reset, moved out of onPeerAfterSelection so the gate can run after the gallery pickup,20261020,start
+    private void resetRoundForNewRound() {
+        //pri added by zhuyang,Batch 6: NFC role decides the single AP owner,20261017
+        //pri added by zhuyang,D1: drop the previous round's fail banner the moment a new round starts,20261014
+        startService(OverlayService.hideFailBannerIntent(this));
+        cancelReceiveIdleTimeout(); //pri added by zhuyang,New round: the previous card's 30s timer must not close this one,20261020
+        mSelfExited = false; //pri added by zhuyang,New round: a local exit of the previous round is over,20261020
+        mCancelHandled = false; //pri added by zhuyang,New round: the previous round's CANCEL must not swallow this one,20261020
+        mIdleDismissed = false; //pri added by zhuyang,New round: an idle auto-dismiss of the previous round is over,20261020
+        mLinkReady = false; // 新一轮:连接就绪状态重置
+        mSendShown = false;    // 新一轮:本轮"发送页已弹"标记清零(替代原来 mSendPage 字段的生命周期)
+        mReceiveShown = false; // 同理,接收页标记清零
+        mUserWantsSend = false; //pri added by zhuyang,New round: role flags reset,20261014,start
+        mSendStarted = false;
+        mRoleYielded = false;
+        mRejected = false;
+        mPeerOffered = false;
+        mLastBmp = null;        //pri added by zhuyang,Preview bitmap is sticky across rounds,20261014
+        //pri added by zhuyang,Reset the receive counters and viewer list so nothing from the previous round leaks in,20261019,start
+        mAccepted = false;
+        mPreviewCount = 0;
+        mFullCount = 0;
+        mTotalCount = 0;
+        mTransferDone = false;
+        mBmps.clear();
+        //pri added by zhuyang,Reset the receive counters and viewer list so nothing from the previous round leaks in,20261019,end
+        //pri added by zhuyang,New round: role flags reset,20261014,end
+    }
+    //pri added by zhuyang,Per-round state reset, moved out of onPeerAfterSelection so the gate can run after the gallery pickup,20261020,end
 
     //pri added by zhuyang,The body that used to be onPeer's tail, unchanged: it decides this round's role from PENDING,20261016,start
     //pri added by zhuyang,Split out only so the gallery pickup above can run first without the NFC path waiting on it when the,20261016

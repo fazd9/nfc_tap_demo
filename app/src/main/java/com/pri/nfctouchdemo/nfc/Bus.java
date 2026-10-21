@@ -57,6 +57,7 @@ public final class Bus {
     private static volatile boolean sUserWantsReader;
     private static volatile String sPayloadCache;
     private static volatile long sPayloadCacheAt;
+    private static volatile boolean sPayloadGalleryFront; //pri added by zhuyang,Foreground flag the cached payload was built with: a change forces a rebuild,20261020
     private static volatile String sSid; //pri added by zhuyang,Process-wide session id shared by every round,20261017
     private static volatile int sPhotoCount; //pri modify by zhuyang,Advertise how many photos the gallery currently has selected,20261019
     private static volatile String sBtMac; //pri added by zhuyang,Local Bluetooth MAC carried as bm for the SPP control channel,20261020
@@ -214,17 +215,20 @@ public final class Bus {
      * 任何影响内容的字段一变（[setHotspotInfo] / [setP2pIdentity]）立刻作废并后台预热。
      */
     public static String selfPayload() {
+        final boolean galleryFront = GalleryPickup.isGalleryForegroundQuiet(); //pri added by zhuyang,One cheap binder call: a changed foreground app invalidates the cached string,20261020
         final String cached = sPayloadCache;
-        if (cached != null && System.currentTimeMillis() - sPayloadCacheAt < PAYLOAD_TTL_MS) {
+        if (cached != null && galleryFront == sPayloadGalleryFront
+                && System.currentTimeMillis() - sPayloadCacheAt < PAYLOAD_TTL_MS) {
             return cached;
         }
-        String built = buildPayload();
+        String built = buildPayload(galleryFront);
+        sPayloadGalleryFront = galleryFront;
         sPayloadCache = built;
         sPayloadCacheAt = System.currentTimeMillis();
         return built;
     }
 
-    private static String buildPayload() {
+    private static String buildPayload(boolean galleryFront) {
         String base = sSelfPayload;
         if (base == null) {
             //pri modify by zhuyang,Bluetooth is no longer used for matching: drop the BT name from the payload,20261019
@@ -237,7 +241,13 @@ public final class Bus {
         // P2P 名/局域网 IP/热点信息实时拼接:IP 会随网络变化,靠上面的短缓存控制新鲜度
         StringBuilder sb = new StringBuilder(base);
         //pri modify by zhuyang,Right after ts so a tail cut can never drop it; the current selection count (0..99),20261019
-        sb.append("|ph=").append(sPhotoCount);
+        //pri added by zhuyang,Google Photos cannot report a count: ph=? marks it unknown so the peer never sees a false 0,20261020,start
+        if (galleryFront) {
+            sb.append("|ph=?");
+        } else {
+            sb.append("|ph=").append(sPhotoCount);
+        }
+        //pri added by zhuyang,Google Photos cannot report a count: ph=? marks it unknown so the peer never sees a false 0,20261020,end
         if (sP2pName != null) sb.append("|p=").append(safe(sP2pName));
         if (sP2pAddr != null) sb.append("|a=").append(safe(sP2pAddr));
         String ip = lanIpv4();
