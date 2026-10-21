@@ -86,10 +86,6 @@ public class Xfer {
     private static final long WIFI_ASSOC_POLL_MS = 6000L;
     private static final long OWNER_WAIT_MS = 15000L; //pri modify by zhuyang,Exit sync: outlast the 12s tap-time join budget before calling the peer gone,20261020
     private static final long HS_RELEASE_GRACE_MS = 1000L;
-    //pri added by zhuyang,Bounded radio-off retry: 500ms steps, 40 attempts (about 20s) before giving up,20261020,start
-    private static final long RADIO_RESTORE_RETRY_MS = 500L;
-    private static final int RADIO_RESTORE_MAX_ATTEMPTS = 40;
-    //pri added by zhuyang,Bounded radio-off retry: 500ms steps, 40 attempts (about 20s) before giving up,20261020,end
     private static final int HS_HIDDEN_ATTEMPTS = 2;
     private static final int HS_HIDDEN_UNAVAILABLE = 0;
     private static final int HS_HIDDEN_OK = 1;
@@ -97,8 +93,6 @@ public class Xfer {
     //pri added by zhuyang,Tap-time preconnect: quick association attempts with backoff, hard-capped at 12s from the tap,20261020,start
     //pri modify by zhuyang,Exit sync: the tap-time join must survive a late AP start, so the early loop gets 12s,20261020
     private static final long HS_EARLY_BUDGET_MS = 12000L;
-    //pri added by zhuyang,LAN fallback: cap the tap-time same-LAN probe when hotspot credentials exist so the hotspot join still has time,20261021
-    private static final long LAN_PRECONNECT_MS = 4000L;
     private static final long HS_EARLY_ATTEMPT_MS = 4000L;
     //pri added by zhuyang,Exit sync: the first join fires before the framework has scanned the fresh AP; fail it fast and retry,20261020
     private static final long HS_EARLY_FIRST_PROBE_MS = 1200L;
@@ -116,10 +110,6 @@ public class Xfer {
     private static final int HEARTBEAT_IDLE_MS = 300;    // no frame written for this long -> PING
     private static final int HEARTBEAT_DEAD_MS = 1000;   // no byte received for this long -> link is dead
     private static final int HEARTBEAT_TICK_MS = 50;     // heartbeat check period
-    //pri added by zhuyang,Fresh link warm-up: the first downlink of a just-associated hotspot station can stall while DHCP/power save settles,20261021,start
-    private static final int HEARTBEAT_WARMUP_MS = 3000;      // a link younger than this uses the relaxed dead window
-    private static final int HEARTBEAT_WARMUP_DEAD_MS = 3000; // no byte during warm-up -> link is dead
-    //pri added by zhuyang,Fresh link warm-up: the first downlink of a just-associated hotspot station can stall while DHCP/power save settles,20261021,end
     //pri added by zhuyang,Exit sync: once bytes flow a slow link may gap over 1s, so the data phase uses 5s,20261020
     private static final int TRANSFER_DEAD_MS = 5000;    // data phase: no byte received for this long -> link is dead
     //pri added by zhuyang,Exit sync: keep the listener and the AP briefly so a late-joining peer is told st=out,20261020
@@ -390,13 +380,6 @@ public class Xfer {
     private volatile int mPrevWifiNetId = -1;
     private volatile int mWifiGen;
     //pri added by zhuyang,Silent hotspot join bookkeeping: the joined netId and the network to restore,20261019,end
-    //pri added by zhuyang,Remember the user's own radio state so a round that turned Wi-Fi on can turn it back off,20261020,start
-    private volatile boolean mWifiWasOnAtRoundStart = true;
-    private volatile boolean mWifiEnabledByUs = false;
-    //pri added by zhuyang,Pending bounded retry of the radio-off while the AP/link/farewell still holds the radio,20261020
-    private volatile Runnable mRadioRestoreRetry;
-    private final Object mRadioRestoreLock = new Object(); //pri added by zhuyang,Serializes the retry with a new round's cancel,20261020
-    //pri added by zhuyang,Remember the user's own radio state so a round that turned Wi-Fi on can turn it back off,20261020,end
     //pri added by zhuyang,Tap-time preconnect: one Wi-Fi churn owner at a time; a swipe-time join stops the early loop,20261019,start
     private final Object mHotspotJoinLock = new Object();
     private volatile boolean mEarlyJoinAbort;
@@ -557,12 +540,8 @@ public class Xfer {
             Bus.log("热点: 新一轮开始,关闭上一轮残留热点");
             closeHotspot();
         }
-        //pri added by zhuyang,A new round needs the radio: cancel any pending radio-off before it can fire into this round,20261020,start
-        cancelRadioRestoreRetry();
-        //pri added by zhuyang,A new round needs the radio: cancel any pending radio-off before it can fire into this round,20261020,end
         //pri added by zhuyang,Forget the previous round's joined AP and restore the user's network,20261019,start
-        //pri modify by zhuyang,Network restore only: a new round must never turn the radio off,20261020
-        restoreNetworkOnly();
+        restoreWifiAfterJoin();
         //pri added by zhuyang,Forget the previous round's joined AP and restore the user's network,20261019,end
         mDerivedSsid = null;
         mDerivedPass = null;
@@ -643,14 +622,7 @@ public class Xfer {
             Bus.log("承载: 对方与本机同处一个 LAN(对方 IP=" + peerIp + "),碰触即同网直连");
             new Thread(new Runnable() {
                 @Override public void run() {
-                    //pri added by zhuyang,LAN fallback: with hotspot credentials the LAN probe is capped so the hotspot join still has time,20261021,start
-                    final boolean hsCreds = (Build.VERSION.SDK_INT >= 33 && mDerivedSsid != null)
-                            || mPeerHsSsid != null
-                            || (Build.VERSION.SDK_INT >= 33 && mPeerSid == null);
-                    final long budgetMs = hsCreds ? LAN_PRECONNECT_MS : HS_EARLY_BUDGET_MS;
-                    final long deadline = SystemClock.elapsedRealtime() + budgetMs;
-                    final int gen = mWifiGen;
-                    //pri added by zhuyang,LAN fallback: with hotspot credentials the LAN probe is capped so the hotspot join still has time,20261021,end
+                    final long deadline = SystemClock.elapsedRealtime() + HS_EARLY_BUDGET_MS;
                     int attempt = 0;
                     while (mRunning && SystemClock.elapsedRealtime() < deadline) {
                         if (isAlive(mSendSocket) || isAlive(mStashedSocket) || mPeerSocket != null) return;
@@ -658,23 +630,11 @@ public class Xfer {
                         if (connectTo(peerIp, "局域网")) return;
                         try { Thread.sleep(400); } catch (InterruptedException ignored) { return; }
                     }
-                    Bus.log("承载: 同 LAN 碰触直连未在 " + budgetMs + "ms 内完成(尝试 "
+                    Bus.log("承载: 同 LAN 碰触直连未在 " + HS_EARLY_BUDGET_MS + "ms 内完成(尝试 "
                             + attempt + " 次)");
                     //pri added by zhuyang,Exit sync: a joiner that never reached the peer must not leave its page up,20261020,start
                     if (mRunning && mRoundLive && mLocalSwipedAt == 0 && !mRoundAborted.get()
                             && !mRoundFailed.get() && !mGotConnection && !hasLiveLink()) {
-                        //pri added by zhuyang,LAN fallback: same LAN failed, join the peer hotspot exactly like the swipe-time strategy,20261021,start
-                        if (hsCreds) {
-                            if (!mEarlyJoinAbort && !mEarlyJoinHandoff && gen == mWifiGen) {
-                                final String hsSsid = (Build.VERSION.SDK_INT >= 33 && mDerivedSsid != null)
-                                        ? mDerivedSsid : (mPeerHsSsid != null ? mPeerHsSsid : HS_SSID);
-                                Bus.log("承载: 同 LAN 不通,改走对方热点 SSID=" + hsSsid);
-                                joinHotspotAsClient();
-                            }
-                            //pri added by zhuyang,LAN fallback: a swipe-time join already owns the Wi-Fi churn, so do not report the peer gone,20261021
-                            return;
-                        }
-                        //pri added by zhuyang,LAN fallback: same LAN failed, join the peer hotspot exactly like the swipe-time strategy,20261021,end
                         Bus.log("承载: 同 LAN 碰触直连失败,判定对方已退出");
                         reportPeerGone("同 LAN 碰触直连失败");
                     }
@@ -684,11 +644,6 @@ public class Xfer {
             return;
         }
         //pri modify by zhuyang,Exit sync: same LAN still builds the tap-time link, directly against the peer port,20261020,end
-        joinHotspotAsClient();
-    }
-
-    //pri added by zhuyang,LAN fallback: the hotspot-client tail is shared by the no-LAN path and the failed same-LAN probe,20261021,start
-    private void joinHotspotAsClient() {
         final String ssid;
         final String pass;
         final boolean derived;
@@ -724,7 +679,6 @@ public class Xfer {
             }
         }, "ap-client").start();
     }
-    //pri added by zhuyang,LAN fallback: the hotspot-client tail is shared by the no-LAN path and the failed same-LAN probe,20261021,end
     //pri added by zhuyang,Batch 6: a non-owner receiver joins the owner AP so it can accept the owner's send,20261017,end
 
     //pri added by zhuyang,Tap-time preconnect: quick attempts with backoff, hard-capped at 8s from the tap,20261019,start
@@ -886,15 +840,6 @@ public class Xfer {
             //pri added by zhuyang,STA+AP concurrency is supported: try the hotspot even when Wi-Fi is on,20261019,start
             //pri added by zhuyang,No need to turn Wi-Fi off first; LOHS also works when Wi-Fi is off,20261019
             //pri added by zhuyang,STA+AP concurrency is supported: try the hotspot even when Wi-Fi is on,20261019,end
-            //pri added by zhuyang,LOHS powers Wi-Fi on when it is off: this round owns turning the radio back off,20261020
-            //pri added by zhuyang,Capture the user's baseline only when we first take the radio; ownership survives consecutive rounds,20261020,start
-            try {
-                if (!wm.isWifiEnabled() && !mWifiEnabledByUs) {
-                    mWifiWasOnAtRoundStart = false;
-                    mWifiEnabledByUs = true;
-                }
-            } catch (Throwable ignored) {}
-            //pri added by zhuyang,Capture the user's baseline only when we first take the radio; ownership survives consecutive rounds,20261020,end
             final int gen = ++mHotspotGen;
             mHotspotStarting = true;
             startServer(); // 提前监听 8988:消除"对方连过来时服务端还没起"的竞态
@@ -981,8 +926,8 @@ public class Xfer {
 
     /** 关闭热点(调试/收尾用),同时把客户端从热点网络恢复到原 Wi-Fi。 */
     public void stopHotspot() {
-        closeHotspot();
         restoreWifiAfterJoin();
+        closeHotspot();
     }
 
     /** 应用打开即预热: P2P 承载已停用,保留入口不做搜索。 */
@@ -1369,16 +1314,12 @@ public class Xfer {
                     }
                 } else if (link.hbExpectRx) {
                     //pri modify by zhuyang,Exit sync: 1s while the user decides, 5s once bytes flow,20261020,start
-                    //pri modify by zhuyang,Fresh link warm-up: 3s for the first 3s, then the steady 1s check,20261021,start
-                    final boolean warmup = now - link.hbStartedAt < HEARTBEAT_WARMUP_MS;
-                    final int deadMs = link.hbTransferPhase ? TRANSFER_DEAD_MS
-                            : (warmup ? HEARTBEAT_WARMUP_DEAD_MS : HEARTBEAT_DEAD_MS);
+                    final int deadMs = link.hbTransferPhase ? TRANSFER_DEAD_MS : HEARTBEAT_DEAD_MS;
                     if (now - link.lastRx.get() >= deadMs) {
                         signalLinkDead(link, new XferError(XferError.Stage.TRANSFER, XferError.TRANSFER_TIMEOUT,
                                 "连接超时(" + deadMs + "ms 未收到对端任何数据)"));
                         return;
                     }
-                    //pri modify by zhuyang,Fresh link warm-up: 3s for the first 3s, then the steady 1s check,20261021,end
                     //pri modify by zhuyang,Exit sync: 1s while the user decides, 5s once bytes flow,20261020,end
                 }
                 if (now - link.lastTx.get() >= HEARTBEAT_IDLE_MS) {
@@ -1944,14 +1885,6 @@ public class Xfer {
         } catch (Throwable ignored) {}
         Bus.log("Wi-Fi: 当前关闭,先打开 Wi-Fi(热点接入前置,最多 "
                 + (WIFI_ENABLE_WAIT_MS / 1000) + "s)…");
-        //pri added by zhuyang,The user had Wi-Fi off: this round owns turning the radio back off at round end,20261020
-        //pri added by zhuyang,Baseline is the user's own state: capture it only when we first take the radio, never per round,20261020,start
-        //pri added by zhuyang,A per-round re-baseline is what made the close land on the next round's start,20261020
-        if (!mWifiEnabledByUs) {
-            mWifiWasOnAtRoundStart = false;
-            mWifiEnabledByUs = true;
-        }
-        //pri added by zhuyang,Baseline is the user's own state: capture it only when we first take the radio, never per round,20261020,end
         try {
             wm.setWifiEnabled(true);
         } catch (Throwable t) {
@@ -2064,20 +1997,13 @@ public class Xfer {
     //pri added by zhuyang,Tap-time preconnect needs a shorter gateway probe so it stays inside the 8s budget,20261019,end
 
     private void restoreWifiAfterJoin() {
-        restoreNetworkOnly();
-        //pri added by zhuyang,Restore the user's radio state when this round turned Wi-Fi on and nothing needs it,20261020,start
-        tryRestoreRadio();
-        //pri added by zhuyang,Restore the user's radio state when this round turned Wi-Fi on and nothing needs it,20261020,end
-    }
-
-    //pri added by zhuyang,Split restore: forget the joined AP and restore the user's network, no radio block here,20261020,start
-    private void restoreNetworkOnly() {
         releaseNetworkRequest();
         final boolean had = mHiddenJoinTried || mJoinedNetId >= 0
                 || mPrevWifiNetId >= 0 || mPrevWifiSsid != null;
         mWifiGen++;
+        if (!had) return;
         final WifiManager wm = (WifiManager) mCtx.getSystemService(Context.WIFI_SERVICE);
-        if (had && wm != null) {
+        if (wm != null) {
             int hotId = mJoinedNetId;
             if (hotId < 0 && mJoinedSsid != null) hotId = findConfiguredNetId(wm, mJoinedSsid);
             if (hotId >= 0) {
@@ -2106,64 +2032,6 @@ public class Xfer {
         mPrevWifiNetId = -1;
         mPrevWifiSsid = null;
     }
-    //pri added by zhuyang,Split restore: forget the joined AP and restore the user's network, no radio block here,20261020,end
-
-    //pri added by zhuyang,Radio-off attempt: if the AP/link/farewell still owns the radio, retry every 500ms, at most 40 times,20261020,start
-    private void tryRestoreRadio() {
-        tryRestoreRadio(0);
-    }
-
-    private void tryRestoreRadio(final int attempt) {
-        synchronized (mRadioRestoreLock) {
-            if (!(mWifiEnabledByUs && !mWifiWasOnAtRoundStart)) {
-                cancelRadioRestoreRetryLocked();
-                return;
-            }
-            if (mHotspotActive || mHotspotReservation != null || mHotspotStarting
-                    || hasLiveLink() || mFarewellActive) {
-                if (attempt >= RADIO_RESTORE_MAX_ATTEMPTS) {
-                    //pri added by zhuyang,Keep mWifiEnabledByUs: a later round end may still get the radio back,20261020
-                    Bus.log("Wi-Fi: 本轮临时打开的 Wi-Fi 在 20s 内仍被占用,保持开启");
-                    cancelRadioRestoreRetryLocked();
-                    return;
-                }
-                if (mRadioRestoreRetry != null) return;
-                final Runnable retry = new Runnable() {
-                    @Override public void run() {
-                        synchronized (mRadioRestoreLock) {
-                            //pri added by zhuyang,Identity check: a new round's cancel wins even if this runnable was already dequeued,20261020
-                            if (mRadioRestoreRetry != this) return;
-                            mRadioRestoreRetry = null;
-                            tryRestoreRadio(attempt + 1);
-                        }
-                    }
-                };
-                mRadioRestoreRetry = retry;
-                mMain.postDelayed(retry, RADIO_RESTORE_RETRY_MS);
-                return;
-            }
-            final WifiManager wm = (WifiManager) mCtx.getSystemService(Context.WIFI_SERVICE);
-            if (wm != null) {
-                try { wm.setWifiEnabled(false); } catch (Throwable ignored) {}
-            }
-            Bus.log("Wi-Fi: 本轮为热点临时打开,已恢复为关闭");
-            mWifiEnabledByUs = false;
-            cancelRadioRestoreRetryLocked();
-        }
-    }
-
-    private void cancelRadioRestoreRetry() {
-        synchronized (mRadioRestoreLock) {
-            cancelRadioRestoreRetryLocked();
-        }
-    }
-
-    private void cancelRadioRestoreRetryLocked() {
-        final Runnable r = mRadioRestoreRetry;
-        mRadioRestoreRetry = null;
-        if (r != null) mMain.removeCallbacks(r);
-    }
-    //pri added by zhuyang,Radio-off attempt: if the AP/link/farewell still owns the radio, retry every 500ms, at most 40 times,20261020,end
     //pri added by zhuyang,Hotspot join: hidden silent connect first, specifier only when the hidden API is unavailable,20261019,end
 
     //pri added by zhuyang,Specifier fallback: one request long enough for the user to tap the system dialog,20261019,start
@@ -4559,14 +4427,10 @@ public class Xfer {
                 mFarewellActive = false;
                 closeQuietly(farewell);
                 if (mServer == farewell) mServer = null;
-                if (mApOwner) {
-                    if (mHotspotActive || mHotspotReservation != null) {
-                        Bus.log("热点: 本轮退出已满 " + (ABORT_FAREWELL_MS / 1000) + "s,释放 AP");
-                        closeHotspot();
-                    }
-                    //pri added by zhuyang,The AP may already be closed (same-LAN early close): the owner restores the radio unconditionally,20261020
-                    restoreWifiAfterJoin();
-                } else {
+                if (mApOwner && (mHotspotActive || mHotspotReservation != null)) {
+                    Bus.log("热点: 本轮退出已满 " + (ABORT_FAREWELL_MS / 1000) + "s,释放 AP");
+                    closeHotspot();
+                } else if (!mApOwner) {
                     restoreWifiAfterJoin();
                 }
             }}, "abort-farewell").start();
@@ -4654,11 +4518,11 @@ public class Xfer {
                 if (wg != mWifiGen) return; // a new round already cleaned up / re-joined
                 //pri added by zhuyang,Exit sync: a farewell window owns the radio; its own timer releases it,20261020
                 if (mFarewellActive) return;
+                restoreWifiAfterJoin();
                 if (hg == mHotspotGen && (mHotspotActive || mHotspotReservation != null)) {
                     Bus.log("热点: 本轮传输结束,释放 AP owner 热点");
                     closeHotspot();
                 }
-                restoreWifiAfterJoin();
             }
         }, "hotspot-release").start();
         //pri added by zhuyang,1s grace so the peer can read DONE_ACK before the AP goes away; generations cancel stale runs,20261019,end
@@ -4721,11 +4585,8 @@ public class Xfer {
         try { if (mRx != null) mCtx.unregisterReceiver(mRx); } catch (Exception ignored) {}
         mRx = null;
         //pri added by zhuyang,Service teardown must forget the joined AP and restore the original network,20261019
-        closeHotspot();
-        //pri added by zhuyang,Teardown drops any pending radio-off retry, then makes one final restore attempt,20261020,start
-        cancelRadioRestoreRetry();
-        //pri added by zhuyang,Teardown drops any pending radio-off retry, then makes one final restore attempt,20261020,end
         restoreWifiAfterJoin();
+        closeHotspot();
         //pri added by zhuyang,P2P bearer disabled (product decision: same LAN -> hotspot),20261019
         if (P2P_ENABLED) {
             try { if (mP2p != null && mChannel != null) mP2p.removeGroup(mChannel, null); } catch (Exception ignored) {}
@@ -4745,11 +4606,11 @@ public class Xfer {
         //pri modify by zhuyang,A terminal failure with no live link must not leave the AP/joined Wi-Fi behind,20261019,start
         //pri modify by zhuyang,Exit sync: not while a farewell window is open - the radio is carrying st=out to a late peer,20261020,start
         if (!hasLiveLink() && !mFarewellActive) {
+            restoreWifiAfterJoin();
             if (mHotspotActive || mHotspotReservation != null) {
                 closeHotspot();
                 Bus.log("热点: 本轮失败,已释放热点");
             }
-            restoreWifiAfterJoin();
         }
         //pri modify by zhuyang,Exit sync: not while a farewell window is open - the radio is carrying st=out to a late peer,20261020,end
         //pri modify by zhuyang,A terminal failure with no live link must not leave the AP/joined Wi-Fi behind,20261019,end
