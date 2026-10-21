@@ -779,20 +779,40 @@ public class Xfer {
                                 + "ms,单次 " + attemptMs + "ms)");
                         hr = joinHotspotHidden(wm, ssid, pass, gen, 1, attemptMs, HS_EARLY_BUDGET_MS);
                     }
+                    //pri modify by zhuyang,Early join: an associated AP is kept and the gateway connect is retried until the outer deadline,20261021,start
                     if (hr == HS_HIDDEN_OK) {
                         if (mEarlyJoinAbort || gen != mWifiGen) return;
-                        long gwLeft = Math.max(1000L, deadline - SystemClock.elapsedRealtime());
-                        String gw = waitForWifiGateway(wm, Math.min(3000L, gwLeft));
-                        if (mEarlyJoinAbort || gen != mWifiGen) return;
-                        if (gw != null && connectViaGateway(gw, 2, 1500)) {
-                            Bus.log("热点: 碰触提前接入成功,耗时 "
-                                    + (SystemClock.elapsedRealtime() - startedAt) + "ms");
-                            joined = true;
-                            return;
+                        while (mRunning && gen == mWifiGen && !mEarlyJoinAbort
+                                && !mRoundAborted.get() && !mRoundFailed.get()
+                                && SystemClock.elapsedRealtime() < deadline) {
+                            if (isAlive(mSendSocket) || isAlive(mStashedSocket)) {
+                                Bus.log("热点: 碰触提前接入结束,链路已由其他路径建立");
+                                joined = true;
+                                return;
+                            }
+                            long gwLeft = Math.max(1000L, deadline - SystemClock.elapsedRealtime());
+                            String gw = waitForWifiGateway(wm, Math.min(3000L, gwLeft));
+                            if (mEarlyJoinAbort || gen != mWifiGen) return;
+                            if (gw != null && connectViaGateway(gw, 2, 1500)) {
+                                Bus.log("热点: 碰触提前接入成功,耗时 "
+                                        + (SystemClock.elapsedRealtime() - startedAt) + "ms");
+                                joined = true;
+                                return;
+                            }
+                            long waitLeft = Math.max(0L, deadline - SystemClock.elapsedRealtime());
+                            Bus.log("热点: 已接入热点但网关未就绪,继续等待(" + waitLeft + "ms)");
+                            long sleep = Math.min(HS_EARLY_RETRY_MS, waitLeft);
+                            if (sleep > 0) {
+                                try { Thread.sleep(sleep); } catch (InterruptedException ignored) {}
+                            }
                         }
-                        Bus.log("热点: 热点已接入但对方服务未就绪,提前接入放弃");
+                        if (mRunning && gen == mWifiGen && !mEarlyJoinAbort
+                                && SystemClock.elapsedRealtime() >= deadline) {
+                            Bus.log("热点: 热点已接入但对方服务未就绪,提前接入放弃");
+                        }
                         return;
                     }
+                    //pri modify by zhuyang,Early join: an associated AP is kept and the gateway connect is retried until the outer deadline,20261021,end
                     if (hr == HS_HIDDEN_UNAVAILABLE) {
                         Bus.log("传输: 隐藏 Wi-Fi 接口不可用,提前接入改用 WifiNetworkSpecifier");
                         long specLeft = Math.max(1000L, deadline - SystemClock.elapsedRealtime());
@@ -816,7 +836,11 @@ public class Xfer {
         } finally {
             if (!joined && !mEarlyJoinAbort && !mEarlyJoinHandoff && gen == mWifiGen
                     && !isAlive(mSendSocket) && !isAlive(mStashedSocket)) {
-                restoreWifiAfterJoin();
+                //pri modify by zhuyang,Early join: keep the joined AP while the round is live so the next swipe does not restart Wi-Fi,20261021,start
+                if (!mRunning || mRoundAborted.get() || mRoundFailed.get()) {
+                    restoreWifiAfterJoin();
+                }
+                //pri modify by zhuyang,Early join: keep the joined AP while the round is live so the next swipe does not restart Wi-Fi,20261021,end
                 //pri added by zhuyang,Exit sync: a joiner that never reaches the peer must not leave its page up forever,20261020,start
                 if (mRunning && mRoundLive && !mRoundAborted.get() && !mRoundFailed.get()
                         && !mGotConnection && !hasLiveLink()) {
@@ -1741,7 +1765,9 @@ public class Xfer {
                 return false;
             } catch (java.net.ConnectException ce) {
                 //pri added by zhuyang,Exit sync: nothing listens on the peer port, remember it as a peer-gone signal,20261020
-                mPeerGoneSignal = true;
+                //pri modify by zhuyang,Only ECONNREFUSED means the peer is gone; ENETUNREACH is a local routing state,20261021
+                boolean refused = ce.getMessage() != null && ce.getMessage().toLowerCase().contains("econnrefused");
+                if (refused) mPeerGoneSignal = true;
                 Bus.log("传输: " + how + "连接被拒(对方端口未监听,可能已退出): " + ce);
             } catch (Exception e) {
                 Bus.log("传输: " + how + "直连尝试 " + (i + 1) + " 失败: " + e);
@@ -2051,7 +2077,9 @@ public class Xfer {
                 return false;
             } catch (java.net.ConnectException ce) {
                 //pri added by zhuyang,Exit sync: nothing listens on the peer port, remember it as a peer-gone signal,20261020
-                mPeerGoneSignal = true;
+                //pri modify by zhuyang,Only ECONNREFUSED means the peer is gone; ENETUNREACH is a local routing state,20261021
+                boolean refused = ce.getMessage() != null && ce.getMessage().toLowerCase().contains("econnrefused");
+                if (refused) mPeerGoneSignal = true;
                 Bus.log("传输: 热点内连接被拒(对方端口未监听,可能已退出): " + ce);
                 try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
             } catch (Exception e) {
@@ -2251,7 +2279,9 @@ public class Xfer {
                     return false;
                 } catch (java.net.ConnectException ce) {
                     //pri added by zhuyang,Exit sync: nothing listens on the peer port, remember it as a peer-gone signal,20261020
-                    mPeerGoneSignal = true;
+                    //pri modify by zhuyang,Only ECONNREFUSED means the peer is gone; ENETUNREACH is a local routing state,20261021
+                    boolean refused = ce.getMessage() != null && ce.getMessage().toLowerCase().contains("econnrefused");
+                    if (refused) mPeerGoneSignal = true;
                     Bus.log("传输: 热点内连接被拒(对方端口未监听,可能已退出): " + ce);
                     try { Thread.sleep(1000); } catch (InterruptedException ignored) {}
                 } catch (Exception e) {
