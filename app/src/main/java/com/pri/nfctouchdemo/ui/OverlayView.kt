@@ -1261,8 +1261,9 @@ class OverlayView @JvmOverloads constructor(
     //pri added by zhuyang,An explicit flag, not "photo == null": a receive card may lack a photo for other reasons,20261014
     private var waitingForPeer = false
 
-    //pri added by zhuyang,Panel timeline shift in ms: releasing the wait restarts the panel entrance from that frame,20261014
-    private var panelShiftMs = 0L
+    //pri added by zhuyang,Receive entrance clock: -1 follows the panel timeline; >= 0 is the raw elapsed at which it restarted,20261020,start
+    private var receiveEnterAt = -1L
+    //pri added by zhuyang,Receive entrance clock: -1 follows the panel timeline; >= 0 is the raw elapsed at which it restarted,20261020,end
     //pri added by zhuyang,Empty state: the page is up but every element waits for the peer's offer,20261014,end
 
     /** 接收态两个按钮的矩形（屏幕 px）。**绘制和命中判定读的是同一份**，见 [layoutReceiveActions]。 */
@@ -1339,11 +1340,27 @@ class OverlayView @JvmOverloads constructor(
     fun setWaitingForPeer(v: Boolean) {
         if (waitingForPeer == v) return
         waitingForPeer = v
-        //pri added by zhuyang,Released after the entrance already ran: move the panel timeline back to its start, so the panel,20261014
-        //pri added by zhuyang,plays its own entrance now instead of snapping in fully formed,20261014
-        if (!v && elapsed > Timeline.PANEL_MS) panelShiftMs = Timeline.PANEL_MS - elapsed
+        //pri modify by zhuyang,A fresh waiting page follows the panel timeline again,20261020,start
+        if (v) {
+            receiveEnterAt = -1L
+        } else {
+            //pri modify by zhuyang,Release replays only the receive entrance: the panel is already on screen and must not flash again,20261020
+            receiveEnterAt = elapsed
+            receiverRenderer.reset()
+            receiverToast = ""
+        }
+        //pri modify by zhuyang,A fresh waiting page follows the panel timeline again,20261020,end
         invalidate()
     }
+
+    //pri added by zhuyang,Replay only the receive entrance (card falling in) without rewinding the panel timeline,20261020,start
+    fun replayReceiveEntrance() {
+        receiveEnterAt = elapsed
+        receiverRenderer.reset()
+        receiverToast = ""
+        invalidate()
+    }
+    //pri added by zhuyang,Replay only the receive entrance (card falling in) without rewinding the panel timeline,20261020,end
     //pri added by zhuyang,Empty state: page up, no elements until the peer actually offers,20261014,end
 
     /**
@@ -1909,10 +1926,15 @@ class OverlayView @JvmOverloads constructor(
     private fun panelAppearAt(elapsedMs: Long): Float =
         ((elapsedMs - Timeline.PANEL_MS) / Timeline.PANEL_FADE_MS).coerceIn(0f, 1f)
 
-    //pri added by zhuyang,Panel timeline (see panelShiftMs): the panel runs on this, not on the raw elapsed,20261014,start
-    //pri added by zhuyang,Equal to [elapsed] except right after an empty-state release, when it restarts at Timeline.PANEL_MS,20261014
-    private val panelElapsed: Long get() = elapsed + panelShiftMs
-    //pri added by zhuyang,Panel timeline (see panelShiftMs): the panel runs on this, not on the raw elapsed,20261014,end
+    //pri modify by zhuyang,The panel timeline no longer shifts: a release replays only the receive entrance (see receiveEnterAt),20261020,start
+    private val panelElapsed: Long get() = elapsed
+    //pri modify by zhuyang,The panel timeline no longer shifts: a release replays only the receive entrance (see receiveEnterAt),20261020,end
+
+    //pri added by zhuyang,Receive entrance clock: -1 follows the panel timeline, otherwise it restarts at Timeline.PANEL_MS,20261020,start
+    private val receiveElapsed: Long
+        get() = if (receiveEnterAt < 0L) panelElapsed
+        else (elapsed - receiveEnterAt).coerceAtLeast(0L) + Timeline.PANEL_MS
+    //pri added by zhuyang,Receive entrance clock: -1 follows the panel timeline, otherwise it restarts at Timeline.PANEL_MS,20261020,end
 
     /** 清掉发送流程留下的临时状态。 */
     fun resetSendState() {
@@ -1924,7 +1946,7 @@ class OverlayView @JvmOverloads constructor(
         resetRunnable?.let { removeCallbacks(it) }
         resetRunnable = null
         alpha = 1f //pri added by zhuyang,E5: a replayed round must not inherit the dissolve alpha,20261014
-        panelShiftMs = 0L //pri added by zhuyang,A replayed timeline must not inherit the empty-state panel shift (see setWaitingForPeer),20261014
+        receiveEnterAt = -1L //pri modify by zhuyang,A replayed timeline must not inherit the receive entrance restart (see setWaitingForPeer),20261020
         invalidate()
     }
 
@@ -1934,6 +1956,7 @@ class OverlayView @JvmOverloads constructor(
         receiverRenderer.reset()
         receiverToast = ""
         pressedButton = BUTTON_NONE
+        receiveEnterAt = -1L //pri added by zhuyang,A new round follows the panel timeline again,20261020
         invalidate()
     }
     //pri added by zhuyang,New round: drop the previous round's accept/reject decision and toast, so the pills become tappable again,20261019,end
@@ -3304,7 +3327,7 @@ class OverlayView @JvmOverloads constructor(
     // ---------------------------------------------------------- 3. 发送面板
 
     private fun drawTransferPanel(c: Canvas) {
-        val since = (panelElapsed - Timeline.PANEL_MS).toFloat() //pri modify by zhuyang,Panel timeline (see panelShiftMs),20261014
+        val since = (panelElapsed - Timeline.PANEL_MS).toFloat() //pri modify by zhuyang,Panel timeline (panelElapsed == elapsed),20261020
         val appear = (since / Timeline.PANEL_FADE_MS).coerceIn(0f, 1f)
         val textAlpha = (since / PANEL_TEXT_MS).coerceIn(0f, 1f)
         val slide = (1f - easeOutQuint(appear)) * 8f * k
@@ -3375,12 +3398,12 @@ class OverlayView @JvmOverloads constructor(
         // 发送端那一枚相位。放在 layoutCard() 之前：那时候 cardRect 还是干净的版面矩形。
         receiverFrame = if (mode == Mode.RECEIVE) {
             // 面板时间轴回到入场段 = 上一轮结束了：把上一轮的选择与提示清干净
-            if (panelElapsed < Timeline.PANEL_MS) {
+            if (receiveElapsed < Timeline.PANEL_MS) { //pri modify by zhuyang,Receive entrance clock,20261020
                 receiverRenderer.reset()
                 receiverToast = ""
             }
             receiverRenderer.compute(
-                elapsedMs = panelElapsed,
+                elapsedMs = receiveElapsed, //pri modify by zhuyang,Receive entrance clock,20261020
                 cardStartMs = (Timeline.PANEL_MS + CARD_DELAY_MS).toLong(),
                 viewW = viewW / k,
                 viewH = viewH / k,
@@ -3485,10 +3508,10 @@ class OverlayView @JvmOverloads constructor(
         if (cardRect.width() <= 0f) return
 
         // 入场：delay .1s / 位移 .68s / 淡入 .48s
-        //pri modify by zhuyang,Panel timeline (see panelShiftMs); breathePhase stays on the raw elapsed,20261014,start
+        //pri modify by zhuyang,Panel timeline (panelElapsed == elapsed); breathePhase stays on the raw elapsed,20261020,start
         val enterRaw = ((panelElapsed - Timeline.PANEL_MS - CARD_DELAY_MS) / CARD_ENTER_MS).coerceIn(0f, 1f)
         val fadeRaw = ((panelElapsed - Timeline.PANEL_MS - CARD_DELAY_MS) / CARD_FADE_MS).coerceIn(0f, 1f)
-        //pri modify by zhuyang,Panel timeline (see panelShiftMs); breathePhase stays on the raw elapsed,20261014,end
+        //pri modify by zhuyang,Panel timeline (panelElapsed == elapsed); breathePhase stays on the raw elapsed,20261020,end
         val enter = easeOutQuint(enterRaw)
 
         // 入场只剩"位移 + 一点放大"；**形变**（挤压 / 收拢）不在这里，在 [layoutCard]
@@ -3919,7 +3942,7 @@ class OverlayView @JvmOverloads constructor(
         // 可点时刻跟 v6 走：卡片进场 800ms 之后（见 [ReceiverRenderer.actionsEnabled]）；
         // 选过一次（接收或拒绝）之后就再也点不动 —— 那时两枚按钮正在自己淡出。
         if (!receiverRenderer.actionsEnabled(
-                panelElapsed, (Timeline.PANEL_MS + CARD_DELAY_MS).toLong()
+                receiveElapsed, (Timeline.PANEL_MS + CARD_DELAY_MS).toLong() //pri modify by zhuyang,Receive entrance clock,20261020
             )
         ) return false
         when (event.actionMasked) {
@@ -3945,7 +3968,7 @@ class OverlayView @JvmOverloads constructor(
                 if (pressed == BUTTON_PRIMARY) {
                     if (receivePrimaryRect.contains(event.x, event.y)) {
                         // v6 的接收反馈：卡片轻放大 + 两枚按钮淡出，提示先「正在接收」再「已接收」
-                        receiverRenderer.accept(panelElapsed)
+                        receiverRenderer.accept(receiveElapsed) //pri modify by zhuyang,Receive entrance clock,20261020
                         receiverToast = ReceiverRenderer.TOAST_RECEIVING
                         postDelayed({
                             if (receiverToast == ReceiverRenderer.TOAST_RECEIVING) {
@@ -3957,7 +3980,7 @@ class OverlayView @JvmOverloads constructor(
                         onReceiveAccepted?.invoke()
                     }
                 } else if (receiveSecondaryRect.contains(event.x, event.y)) {
-                    receiverRenderer.reject(panelElapsed)
+                    receiverRenderer.reject(receiveElapsed) //pri modify by zhuyang,Receive entrance clock,20261020
                     receiverToast = ReceiverRenderer.TOAST_REJECTED
                     onReceiveRejected?.invoke()
                 }
@@ -4079,6 +4102,7 @@ class OverlayView @JvmOverloads constructor(
         // 一次手势只会走到这里一次（`flying` 挡住后续触摸），标志位是第二道保险。
         if (!sendConfirmedNotified) {
             sendConfirmedNotified = true
+            android.util.Log.i("OverlayService", "动效: 卡片上滑过阈值,回调发送确认") //pri added by zhuyang,Diagnostic: same tag as the service side so one filter catches both,20261020
             onSendConfirmed?.invoke()
         }
         flyProgress = deformProgress   // 先冻住"松手那一刻挤到哪儿了"

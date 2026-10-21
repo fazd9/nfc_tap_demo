@@ -143,6 +143,10 @@ class OverlayService : Service() {
     //pri added by zhuyang,E5: pending "dissolve, then detach" - at most one, and never across rounds,20261014
     private var dissolveRunnable: Runnable? = null
 
+    //pri added by zhuyang,Live switch: one-shot fallback that reveals the held receive page when no peer preview arrives,20261020,start
+    private var receiveEntranceFallback: Runnable? = null
+    //pri added by zhuyang,Live switch: one-shot fallback that reveals the held receive page when no peer preview arrives,20261020,end
+
     //pri added by chenpengqi,Screen-off path: receiver belongs to the service, not to one round,20261019,start
     private var screenReceiver: BroadcastReceiver? = null
     //pri added by chenpengqi,Screen-off path: receiver belongs to the service, not to one round,20261019,end
@@ -264,6 +268,7 @@ class OverlayService : Service() {
     private fun startSendFlow(intent: Intent?) {
         hideFailBanner()
         cancelDissolve() //pri added by zhuyang,E5: the new round owns the window,20261014
+        cancelReceiveEntranceFallback() //pri added by zhuyang,A send page owns the window: drop any pending receive reveal,20261020
         waitingForPeer = false //pri added by zhuyang,Empty state: a send page never waits for a peer offer,20261014
         mode = OverlayView.Mode.SEND
         receiveOwnsBackdrop = false //pri modify by zhuyang,A new send page owns its own captured backdrop,20261020
@@ -316,6 +321,7 @@ class OverlayService : Service() {
     private fun startReceiveFlow(intent: Intent?) {
         hideFailBanner()
         cancelDissolve() //pri added by zhuyang,E5: the new round owns the window,20261014
+        cancelReceiveEntranceFallback() //pri added by zhuyang,A new receive page owns the hold: a previous page's reveal must not fire,20261020
         //pri added by zhuyang,New round: the previous accept/reject and toast must not disable this round's pills,20261019
         if (rootView != null) overlay.resetReceiveRoundState()
         //pri added by zhuyang,Live switch: capture the previous identity before `mode` is overwritten,20261014,start
@@ -351,7 +357,14 @@ class OverlayService : Service() {
             overlay.setMode(mode)
             overlay.setPeerInfo(peerLabel, peerCount)
             overlay.setStatus(statusText)
-            overlay.setWaitingForPeer(waitingForPeer) //pri added by zhuyang,This hand-rolled path applies the same identity state as applyContentAndPlay,20261014
+            //pri added by zhuyang,Live switch: hide this phone's send photo and hold every element until the peer preview arrives,20261020,start
+            //pri added by zhuyang,EXTRA_PHOTO is deliberately not applied here: it can be a stale preview and must never become the incoming card,20261020
+            waitingForPeer = true
+            photoUri = null
+            overlay.setCardPhoto(null)
+            overlay.setWaitingForPeer(true)
+            armReceiveEntranceFallback()
+            //pri added by zhuyang,Live switch: hide this phone's send photo and hold every element until the peer preview arrives,20261020,end
             return
         }
         //pri added by zhuyang,Live switch: a SEND page visible at entry becomes the RECEIVE card in place,20261014,end
@@ -379,6 +392,29 @@ class OverlayService : Service() {
         }
     }
 
+    //pri added by zhuyang,Live switch: a held receive page must not stay blank if the peer preview never comes,20261020,start
+    private fun cancelReceiveEntranceFallback() {
+        receiveEntranceFallback?.let { mainHandler.removeCallbacks(it) }
+        receiveEntranceFallback = null
+    }
+
+    private fun armReceiveEntranceFallback() {
+        cancelReceiveEntranceFallback()
+        val runnable = Runnable {
+            receiveEntranceFallback = null
+            //pri added by zhuyang,Fallback: still on the held receive page -> reveal it with the built-in artwork, never this phone's photo,20261020
+            if (mode == OverlayView.Mode.RECEIVE && waitingForPeer) {
+                waitingForPeer = false
+                overlay.setCardPhoto(null)
+                overlay.setWaitingForPeer(false)
+                overlay.replayReceiveEntrance()
+            }
+        }
+        receiveEntranceFallback = runnable
+        mainHandler.postDelayed(runnable, RECEIVE_ENTRANCE_FALLBACK_MS)
+    }
+    //pri added by zhuyang,Live switch: a held receive page must not stay blank if the peer preview never comes,20261020,end
+
     /**
      * 只换卡片那张照片（接收侧用）：预览图 / 整图到了，卡片和折射背景一起换掉。
      *
@@ -387,6 +423,7 @@ class OverlayService : Service() {
      */
     private fun updatePhoto(intent: Intent?) {
         val uri = uriExtra(intent, EXTRA_PHOTO) ?: return
+        cancelReceiveEntranceFallback() //pri added by zhuyang,The peer preview arrived: a pending fallback reveal must not fire on top of it,20261020
         photoUri = uri
         //pri added by zhuyang,Empty state ends here too: a photo from the peer means this phone is receiving,20261014
         waitingForPeer = false
@@ -435,11 +472,14 @@ class OverlayService : Service() {
         if (intent?.hasExtra(EXTRA_PEER) == true) peerLabel = intent.getStringExtra(EXTRA_PEER)
         peerCount = countExtra(intent, peerCount)
         //pri added by zhuyang,Empty state ends here: this action is only sent when the peer actually swipes,20261014
-        waitingForPeer = false
+        //pri modify by zhuyang,Live switch: a page held for the peer preview stays held - only updatePhoto or the fallback may reveal it,20261020,start
+        val heldForPreview = receiveEntranceFallback != null
+        if (!heldForPreview) waitingForPeer = false
         if (rootView != null) {
             overlay.setPeerInfo(peerLabel, peerCount)
-            overlay.setWaitingForPeer(false) //pri added by zhuyang,Releases the panel: it now plays its own entrance in place,20261014
+            if (!heldForPreview) overlay.setWaitingForPeer(false) //pri added by zhuyang,Releases the panel: it now plays its own entrance in place,20261014
         }
+        //pri modify by zhuyang,Live switch: a page held for the peer preview stays held - only updatePhoto or the fallback may reveal it,20261020,end
     }
 
     /** 两张图都在后台线程解码 —— 大图放主线程会把首帧卡住。 */
@@ -610,6 +650,7 @@ class OverlayService : Service() {
     /** 「停止演示」：摘掉窗口、停掉时间轴，服务不动（视图树留着，下次直接复用）。 */
     private fun hideDemo(intent: Intent? = null) {
         hideFailBanner()
+        cancelReceiveEntranceFallback() //pri added by zhuyang,The page is going away: a pending receive reveal has nothing left to reveal,20261020
         //pri added by zhuyang,E5: ACTION_HIDE may carry EXTRA_FADE_MS: fade the panel out, then detach,20261014,start
         val fadeMs = intent?.getLongExtra(EXTRA_FADE_MS, 0L) ?: 0L
         if (fadeMs > 0L && attached) {
@@ -775,6 +816,7 @@ class OverlayService : Service() {
      * 用 startService 而不是进程内回调：服务可能刚被冷启，走 intent 不会丢事件。
      */
     private fun notifyNfc(action: String) {
+        if (action == ACTION_UI_SEND_CONFIRMED) Log.i(TAG, "动效: 上滑确认,回执 NFC 层") //pri added by zhuyang,Diagnostic: mark the send-confirmed handoff to the NFC layer,20261020
         runCatching { startService(Intent(this, TapService::class.java).setAction(action)) }
             .onFailure { Log.e(TAG, "回执给 TapService 失败：$action", it) }
     }
@@ -858,6 +900,7 @@ class OverlayService : Service() {
 
     /** 摘掉窗口、停掉时间轴，但保留视图树。 */
     private fun detachOverlay() {
+        cancelReceiveEntranceFallback() //pri added by zhuyang,A detached page must not replay its receive entrance,20261020
         val content = rootView ?: return
         startRunnable?.let { overlay.removeCallbacks(it) }
         startRunnable = null
@@ -1112,6 +1155,7 @@ class OverlayService : Service() {
     private fun teardown() {
         //pri added by zhuyang,D1: the banner window must go even if the main view tree was never built,20261014
         hideFailBanner()
+        cancelReceiveEntranceFallback() //pri added by zhuyang,Teardown drops every pending page callback,20261020
         startRunnable?.let { overlay.removeCallbacks(it) }
         startRunnable = null
         cancelReplay()
@@ -1138,6 +1182,7 @@ class OverlayService : Service() {
     }
 
     private fun stopEverything() {
+        cancelReceiveEntranceFallback() //pri added by zhuyang,Stopping for good: no receive reveal may fire afterwards,20261020
         teardown()
         stopForeground(STOP_FOREGROUND_REMOVE)
         stopSelf()
@@ -1326,6 +1371,9 @@ class OverlayService : Service() {
 
         //pri added by zhuyang,E5: total dissolve window = max(panel 150ms, blur release 250ms) + margin; TapService passes it,20261014
         const val DISSOLVE_MS = 260L
+
+        //pri added by zhuyang,Live switch: reveal a held receive page after this long even when no peer preview arrives,20261020
+        private const val RECEIVE_ENTRANCE_FALLBACK_MS = 1500L
 
         //pri added by zhuyang,D1 fail banner: show the top banner window / take it down again,20261014,start
         //pri added by zhuyang,Show the banner; carries EXTRA_FAIL_TITLE / EXTRA_FAIL_DETAIL,20261014
