@@ -17,6 +17,7 @@ import android.graphics.PathMeasure
 import android.graphics.RadialGradient
 import android.graphics.Rect
 import android.graphics.RectF
+import android.graphics.RuntimeShader
 import android.graphics.Shader
 import android.graphics.Typeface
 import android.os.Build
@@ -106,28 +107,231 @@ class OverlayView @JvmOverloads constructor(
          * 而"整张卡在浮"本来就比"图在卡里滑"显眼得多 —— 所以这里直接对齐**绝对位移**：
          * 0.0103 × 360 ≈ ±3.7 设计px。
          *
-         * 想更安静写 0.008；想回到相对比例一致就写回 0.0169（版面间距会自动跟着放宽）。
+         * **按需求"卡片的上下移动幅度稍微大一点"抬到 0.0150** ⇒ 0.0150 × 360 ≈ **±5.4 设计px**
+         * （单边 +46%，一个来回 10.8 设计px）。想更明显继续加（0.017 ≈ ±6.1，就是参考片的相对比例）；
+         * 想更安静写 0.008。注意卡上/卡下两行文字的间距是按同一个幅度留的（见 [drawTransferPanel]），
+         * 改这里它们会自动跟着放宽，不用手改。
          */
-        const val PHOTO_BREATHE_FRAC = 0.0103f
-        // ---- 边缘辉光：两层 ----
-        // 1 核心高光线：**呼吸就在这条线上** —— 铺满之后粗细缓慢起伏（[LINE_THIN_PX] + [LINE_SWING_PX]），
-        //   而且沿边**逐点不同步**（见 [LINE_JITTER_BLOCKS]）。
-        // 2 内侧辉光：宽度和 alpha **全程恒定**，不参与呼吸；**离白线越远越浅**
-        //   （一条平滑曲线铺满整圈，见 [GLOW_STOPS] / [GLOW_COLORS]）。
+        const val PHOTO_BREATHE_FRAC = 0.0150f
+        // ---- 屏幕边缘（全是 alpha 混合，底下背景透得出来）----
+        // 1 半透明白光晕：贴边最亮（[GLOW_PEAK_ALPHA] 的纯白），往里单调淡到 0（[GLOW_DEPTH_PX]）。
+        //   见 [glowProfile] / [edgeHalo] / [cornerHalo]。
+        // 2 左右两条边的流光：一道亮光沿边往上跑（见 [drawSideFlow]），**只有左右有**。
+        // 3 上下两条边的**浮动**：光晕的内沿在起伏（见 [GLOW_BREATHE_TRADE]），左右两条边不参与。
         // 单位是设计宽度 380px 下的 px，绘制时乘 k。
         //
-        // 白线**不贴着屏幕边缘**：它内缩 [LINE_INSET_PX]，两侧都有辉光 ——
-        // 屏幕边缘 → 外侧辉光 → 白线（正好压在辉光的脊线上）→ 内侧辉光。
+        // 从屏幕边缘往里：0.53（纯白）→ 单调淡到 0（38 设备 px @1080）。屏幕上**没有描上去的线**。
+        // 四角：光晕用**显示圆角原半径**（再往外多给 [CORNER_COVER_PX] 当保险），
+        // 铺小了会在圆角外侧露出一条没光的暗缝（见 [cornerHalo]）。
+        //
+        // 白线那一整层（[drawLineMesh] / [LINE_*] / [lineJellyAt] 那套）**已经不再被调用**，
+        // 代码还留着但没有任何地方画它 —— 需求是"不要白线"。
+
+        // ---- 左右两条边的流光（[drawSideFlow]）----
+        // 一道扁长的亮光沿边往上跑；上下两条边没有。全是 alpha 混合，底下背景透得出来。
+
+        /** 流光的开关（false = 完全没有，只剩静态光晕）。 */
+        const val SIDE_FLOW_ON = true
+
+        /** 一道光从底走到顶要多久（真实 ms）。 */
+        const val SIDE_FLOW_PERIOD_MS = 5200f
+
+        /** 右侧比左侧晚多少（真实 ms）—— 两边错开，看起来是光绕着一圈在走。 */
+        const val SIDE_FLOW_LAG_MS = 1100f
 
         /**
-         * 核心高光线的**中线**离屏幕边缘的距离（设计 px ≈ dp）。
+         * 流光的形状：横向半径（屏宽比例）与纵向半径（屏高比例）。
          *
-         * **1~2dp**：白线就贴在屏幕边缘内侧一点点，它和屏幕边缘之间那一小条就是
-         * "贴着屏幕的外侧辉光"（见 [glowProfile] 里 0 → 这个值 的那半个剖面）——
-         * 所以看上去是"屏幕 → 一层薄唇光 → 白线"，白线并不是压在屏幕边上、
-         * 也不是离得很远。给大了那条贴着屏幕的唇光就会变宽，白线会显得"缩进来"。
+         * 圆心压在屏幕边缘上，所以横向只有一半在屏内：0.09 × 屏宽 ≈ 48px @1080，
+         * 正好是光晕那条带宽；纵向拉长到 0.18 × 屏高 ≈ 430px，是一道"扁长的光"而不是一个点。
+         */
+        const val SIDE_FLOW_RX_FRAC = 0.09f
+        const val SIDE_FLOW_RY_FRAC = 0.10f
+
+        /** 流光峰值 alpha（叠在光晕之上；0.40 时合成约 0.72，仍然半透明）。 */
+        const val SIDE_FLOW_PEAK_ALPHA = 0.40f
+
+        /**
+         * 流光**只走直边**：离上下圆角这么远（占屏高比例）开始淡出，到圆角处刚好为 0。
          *
-         * 改这个值，辉光脊线会跟着线一起挪；角上同理，线的圆角半径取 [cornerR] − 内缩，
+         * 之前行程覆盖整条竖边（屏外 → 屏外），光带的尾巴会扫进上下圆角，四角亮度跟着变。
+         * 现在圆角区域一点不参与。想更早收起来就调大（0.15），想贴得更近就调小（0.06）。
+         */
+        const val SIDE_FLOW_END_FRAC = 0.08f
+
+        /**
+         * 流光让**圆角**一起动：起步（在下缘）和到头（在上缘）时圆角扩到最大，
+         * 走到中间时收回到基准。占屏高... 单位是**设计 px**（× k 变成设备 px）。
+         *
+         * 为什么这么做：光带走到端点时，它的影响正好压在圆角上，角会"变化"得突然；
+         * 让圆角在这两个时刻先胀开，光带就是从一个更宽的圆角里出来/进去的，读起来顺。
+         * 想更夸张就调大（20），想几乎看不出就调小（6），给 0 = 关掉。
+         */
+        const val CORNER_FLOW_SWING_PX = 14f
+
+        /** 流光起步的渐入时长（真实 ms）。 */
+        const val SIDE_FLOW_IN_MS = 600f
+
+        /** 边缘是否走"距离场一次画完"的新路径（false = 强制走老的四条边画法，排查用）。 */
+        const val EDGE_SHADER_ON = true
+
+        // ---- 边缘的尺寸和颜色：直接取 EdgeScrimView 的值 ----
+        // 它那边口径很明确：纯白芯 **1..3 物理 px**（当前取 1），渐变段 **30 物理 px**，
+        // 颜色就是纯白，剖面是 `1 − smoothstep`。单位是**物理像素**，不乘 k、不跟分辨率走 ——
+        // 因为这几像素本来就是"贴屏幕边缘的一道亮"，换成 dp 反而在高分屏上会变粗。
+
+        /** 左右两侧纯白芯宽（物理 px，范围 1..3）。 */
+        const val EDGE_WHITE_LR_PX = 1f
+
+        /** 上下两侧纯白芯宽（物理 px，范围 1..3）。 */
+        const val EDGE_WHITE_TB_PX = 1f
+
+        /** 白 → 透明的渐变段长度（物理 px），四边一致。 */
+        const val EDGE_FADE_PX = 30f
+
+        /**
+         * 边缘峰值覆盖度（1 = 芯上纯白不透明，和 EdgeScrimView 一致）。
+         *
+         * 透明感是**渐变段**给的：芯只有 1px，往外 30px 里覆盖度从 1 一路收到 0，
+         * 底下内容在那一段始终透得出来。想整体压淡就把这里调小（比如 0.8）。
+         */
+        /**
+         * 显形波前的**过渡带宽度**（占屏宽的比例）。
+         *
+         * 决定"跑出来"读得像不像：越窄，波前越像一道在前头跑的亮边；太宽就是整圈一起淡入。
+         * 参考工程是 0.38（那是配"到中点的直线距离"的）；现在波前改为**沿边界走**，
+         * 路程变成约 1.7 屏宽，所以收到 0.14 才读得出来。
+         */
+        const val EDGE_REVEAL_SPAN_FRAC = 0.14f
+
+        /**
+         * 边缘**完全显形之后**，上下浮动和左右流光再渐入的时长（真实 ms）。
+         *
+         * 显形跑到 ~1100ms 才铺满四边；这两样动画必须等它跑完才起来，否则会看到
+         * "边还没亮完，光带已经在跑、上下已经在鼓"。
+         */
+        const val EDGE_ANIM_IN_MS = 380f
+
+        const val EDGE_PEAK = 1f
+
+        /**
+         * 边缘那一层的 AGSL（参考 GoogleTest 的 `EdgeScrimView`）。
+         *
+         * 结构就是它的那一条：每个像素只由"到圆角矩形边界的距离 `d`"决定 ——
+         * `d < 纯白芯宽` 给峰值，接着 `uFade`（30 物理 px）用 `1 − smoothstep` 淡到 0，再往里不画。
+         * 直边和圆角是同一套式子，所以角上不会有硬缝/断层。
+         *
+         * 动画是**我们自己的**，全是 uniform：
+         * - `uReveal` = (波前半径, 波前内沿)：逐像素复刻 [waveReached]；
+         * - `uPeak` 含 [arrivalBoost]；
+         * - `uFloatK` = 上下浮动系数，只乘在**上下两条边**的淡出长度上（`lat` = 离左右边近为 1）；
+         * - `uFlowY*` = 左右两条边上那道流光的位置（[sideFlowY]）。
+         *
+         * 返回值是**预乘**的半透明白：`half4(a, a, a, a)`。
+         */
+        val EDGE_SHADER = """
+            uniform float2 uSize;
+            uniform float uRadius;
+            uniform float uWhiteLR;
+            uniform float uWhiteTB;
+            uniform float uFade;
+            uniform float uPeak;
+            uniform float uFloatK;
+            uniform float2 uReveal;
+            uniform float uRevealSpan;
+            uniform float uFlowAlpha;
+            uniform float uFlowYL;
+            uniform float uFlowYR;
+            uniform float uFlowRy;
+            uniform float uCornerR;
+            uniform float uFlowEnd;
+
+            float sdRoundRect(float2 p, float2 halfSize, float r) {
+                float2 q = abs(p) - halfSize + r;
+                float2 outside = max(q, float2(0.0));
+                return length(outside) + min(max(q.x, q.y), 0.0) - r;
+            }
+
+            half4 main(float2 coord) {
+                float2 p = coord - uSize * 0.5;
+                float d = -sdRoundRect(p, uSize * 0.5, uRadius);
+                if (d <= 0.0) {
+                    return half4(0.0);
+                }
+                // 离哪条边更近：lat = 1 靠左右，0 靠上下，圆角处在 uFade 范围内软混合。
+                float dx = min(coord.x, uSize.x - coord.x);
+                float dy = min(coord.y, uSize.y - coord.y);
+                float lat = (clamp((dy - dx) / max(uFade, 1.0), -1.0, 1.0) + 1.0) * 0.5;
+                // 显形：**沿边界走多远**（不是到中点的直线距离）。
+                // sProx = |x − 屏宽/2| + y 正好等价于"从顶边中点沿边走过来的长度"：
+                // 顶边上是横向距离、左边上是 W/2 + y、右下角最大 = W/2 + H。
+                // 于是波前一定是"顶边中点 → 左右两个角 → 顺着左右两边往下"，不会整圈一起亮。
+                // 圆角/角上把过渡带按老画法的 CORNER_SOFTEN(1.4) 加宽，慢慢化开。
+                float sProx = abs(coord.x - uSize.x * 0.5) + coord.y;
+                float cornerness = 1.0 - abs(lat * 2.0 - 1.0);
+                float span = uRevealSpan * (1.0 + 1.4 * cornerness);
+                float reached = 1.0 - smoothstep(0.0, 1.0,
+                        clamp((sProx - uReveal.x) / max(span, 1.0), 0.0, 1.0));
+                // 芯宽和淡出长度都按方向取，上下两条边跟着卡片那枚时钟变宽变窄。
+                // **关键**：两者都再乘 reached —— 波前扫到哪一段，那一段的光才"长"到满宽。
+                // 只乘 alpha 的话永远不像"跑出来"：芯上 alpha 本来就是 1，没地方再叠。
+                float grow = 0.25 + 0.75 * reached;
+                float whiteW = mix(uWhiteTB, uWhiteLR, lat) * grow;
+                float fade = mix(uFade * uFloatK, uFade, lat) * grow;
+                // 左右两条边上的流光：同样走**几何**（带宽鼓起来），不是叠 alpha。
+                // 高斯亮带沿 y 跑，只作用在 lat 大的地方（左右两条边）。
+                float crestY = coord.x < uSize.x * 0.5 ? uFlowYL : uFlowYR;
+                float dyy = coord.y - crestY;
+                // 光带**不碰上下圆角**：离圆角 uCornerR 以内归零，往外 uFlowEnd 的过渡带淡出。
+                // 过渡带要长（0.08 屏高 ≈ 190px），否则看起来是"啪"地切断。
+                float vTop = smoothstep(0.0, 1.0,
+                        clamp((coord.y - uCornerR) / max(uFlowEnd, 1.0), 0.0, 1.0));
+                float vBot = smoothstep(0.0, 1.0,
+                        clamp((uSize.y - uCornerR - coord.y) / max(uFlowEnd, 1.0), 0.0, 1.0));
+                float g = exp(-(dyy * dyy) / max(uFlowRy * uFlowRy, 1.0)) * lat * vTop * vBot;
+                float bulge = uFlowAlpha * g;
+                whiteW *= 1.0 + 0.8 * bulge;
+                fade *= 1.0 + 1.2 * bulge;
+                float t = clamp((d - whiteW) / max(fade, 1.0), 0.0, 1.0);
+                float white = 1.0 - t * t * (3.0 - 2.0 * t);
+                float a = clamp(uPeak * white * reached * (1.0 + 0.5 * bulge), 0.0, 1.0);
+                return half4(a, a, a, a);
+            }
+        """.trimIndent()
+
+        /**
+         * **左右两条边上的亮度波浪**深度（相对亮芯亮度，0 = 关掉，回到纯静态）。
+         *
+         * 复用原来那套果冻相位（[lineJellyAt] / [lineFlowPhase] / [lineSideLag]）：
+         * 相位由**沿边走的位置**决定，所以波峰沿着边一路往上移（[LINE_FLOW_CYCLES] = 1 表示
+         * 一条边摊一个完整周期），右边再整体晚 [LINE_SIDE_LAG_MS]（0.2s），两条边不同步。
+         *
+         * **只给左右两条边**（[lineWaveGate]）：上下的法线竖直、权重恒为 0 —— 上下两条边
+         * 整条一起变亮变暗（和之前一样是"呼吸"），不会有沿边行进的东西。
+         *
+         * 0.85 ⇒ 亮度在 0.55 ~ 1.5 倍之间来回（亮芯峰值 0.69 → 0.38 ~ 1.0），
+         * 波峰扫过时那一小段直接到纯白 —— 这是"一道亮光沿边往上跑"要看清楚必需的量级。
+         * 想弱一点：0.4；想关掉：0。
+         */
+        const val LINE_WAVE_ALPHA = 0.85f
+
+        /**
+         * 白线（核心线）**中线离屏幕边缘的距离**，也是辉光剖面里"平的那一段"到哪儿结束
+         * （见 [drawLineMesh] / [glowProfile]）。
+         *
+         * 注意白线本身**不压在屏幕边缘上**：整条还要再往内让开 [LINE_EDGE_GAP_PX]，
+         * 这样显示圆角不会把角上的白线咬掉。
+         *
+         * 2 → 2.4 → 4.8 → 3.6 → **1.5**：前几档都是"线体对称偏在中线两侧"，于是只有最粗那一
+         * 瞬间外沿才贴边、最细时留一条缝（2.4 / 3.6 时那条缝有 1~2 设计 px）。改成向外固定偏
+         * 这个值之后，它**必须 ≤ 最细那一档的宽度**（否则内沿会算成负的、线体自交）——
+         * 最细 3.42（见 [LINE_THIN_PX]），所以取 1.5 仍然安全。
+         *
+         * 现在屏幕边缘 → 亮芯之间那圈"外侧唇光"重新露出来了：光晕从贴边 0.53 开始、
+         * 到 1.5（这个值）处还是 0.53，然后才往内衰减 —— 而亮芯被 [LINE_EDGE_GAP_PX] 推到它里面一点，
+         * 于是边缘这一条是"贴边的白光 + 一道更亮的芯"，不是一整块白。
+         *
+         * 改这个值，辉光"平的那一段"会跟着变；角上同理，中线的圆角半径取 [cornerR] − 内缩，
          * 于是**四个角到屏幕边缘的距离和直边一样**。
          *
          * 2 → **2.4**（≈2.3dp，仍在"1~2dp 左右"）：按需求"最大宽度再宽一点"，
@@ -136,7 +340,23 @@ class OverlayView @JvmOverloads constructor(
          * 所以"线更粗"这件事只能靠"中线往里挪"换来：`最大宽度 = 2 × 这个值`，
          * 2.4 时是 4.8 设计 px（原来 2.0 时是 4.0）。
          */
-        const val LINE_INSET_PX = 2.4f
+        const val LINE_INSET_PX = 1.5f
+
+        /**
+         * 白线整体**再往屏幕内侧让开的距离**（设计 px，只影响白线这一层，不动辉光的几何）。
+         *
+         * 为什么要有它：白线的外沿原来是**正好压在屏幕边缘**上的，而手机的显示圆角把角上那一圈
+         * 切掉了 —— 直边贴边没问题，四个**圆角弧**上的外沿却被显示圆角咬掉一部分，于是角上的
+         * 白线看着变细、发虚、甚至断开（"角上断了一截"就是这个）。让开 [LINE_EDGE_GAP_PX] 之后，
+         * 白线的外沿落在**显示圆角里面**，四条边和四个角都不再被裁，整圈连续。
+         *
+         * 同时外沿这一档的 alpha 给 0（见 [LINE_MASK_A] 第一项），所以"让开"不会在屏幕边上
+         * 留下一条硬边：白线现在两侧都淡到全透明，是一块浮在屏幕内侧的白纱，
+         * 而贴着屏幕边缘那一圈亮光交给辉光自己（[LINE_INSET_PX] 那条脊线）。
+         *
+         * 给 0 = 回退到"外沿压边"的老位置。
+         */
+        const val LINE_EDGE_GAP_PX = 2.6f
 
         /**
          * 白线**逐点宽度**的采样步长（设计 px，沿中线量）。
@@ -242,14 +462,16 @@ class OverlayView @JvmOverloads constructor(
         /**
          * 核心高光线**最细那一档**的宽度 —— 白线刚显形、还没开始呼吸时就是这个宽度。
          *
-         * 1.2 → 1.8 → 2.0 → 现在 **2.6**（@720 约 4.9px）。它是呼吸的下限：白线先以这个宽度
-         * （"最浅的状态"）跟着波前铺满整圈，铺满之后才靠 [LINE_SWING_PX] 一下一下变粗。
+         * 1.2 → 1.8 → 2.0 → 2.6 → 5.2 → 2.1 → 2.35 → 现在 **2.70**：
+         * 前一轮按"最细 2.97、最粗 6.0"两个端点解出基准 2.35 + 幅度 1.83；
+         * 这一轮按"白线再宽一点"整体 ×1.15 ⇒ 最细 **3.42**、最粗 **6.90**
+         * （幅度同步到 2.10，见 [LINE_SWING_PX]，两者的比例没变）。
          *
          * 抬下限的同时 [LINE_SWING_PX] 从 1.4 收到 1.1 —— 最**粗**那一档仍然钉在 4.8
          * （几何上限，见那边的推导），也就是抬的是下限、不是整条线。
          * 想让整条线一起变粗，要动 [LINE_INSET_PX]（代价是贴着屏幕那条唇光会跟着变宽）。
          */
-        const val LINE_THIN_PX = 2.6f
+        const val LINE_THIN_PX = 2.70f
 
         /**
          * 核心线变粗的幅度（设计 px）：**呼吸改的就是这个量**。
@@ -260,14 +482,12 @@ class OverlayView @JvmOverloads constructor(
          * `2.6 + 1.1 × [0.34, 2.0]` = **2.97 ~ 4.8 设计 px**（@720 约 5.6 ~ 9.1px）之间走 ——
          * 鼓比缩明显。渐入见 [LINE_SWING_IN_MS]：四边铺满之前这个量一点不起作用。
          *
-         * **上限是几何定死的**：线体沿法线两侧各偏 w/2，而中线只离屏幕边缘
-         * [LINE_INSET_PX]，所以 `(LINE_THIN_PX + 2 × 幅度) / 2 ≤ LINE_INSET_PX`
-         * → 内缩 2.4 时**幅度 ≤ 1.1**（[LINE_THIN_PX] 从 2.0 抬到 2.6 之后，这里就从 1.4
-         * 收到了 1.1，最粗那一档不动）。再大就要么把内缩调大（贴着屏幕那条唇光会跟着变宽），
-         * 要么让线被屏幕边缘切掉。想让呼吸更夸张，先动 [LINE_THIN_PX]（变细 = 相对幅度更大），
-         * 别动这里。
+         * 两边共用同一个粗细范围 **3.42 ~ 6.90 设计 px**（@720 约 6.5 ~ 13.1px）。
+         * 2.35 / 1.83 那一版是 **2.97 ~ 6.0**；这一轮按"白线再宽一点"整体 ×1.15。
+         * 渐入见 [LINE_SWING_IN_MS]：四边铺满之前这个量一点不起作用。
+         * 再注意：外沿固定压边（见 [LINE_INSET_PX]），所以加粗只会往屏幕内侧长。
          */
-        const val LINE_SWING_PX = 1.1f
+        const val LINE_SWING_PX = 2.10f
 
         /**
          * 线宽呼吸的渐入时长（毫秒），从"四边刚好铺满"（= [Timeline.EDGE_START_MS] +
@@ -279,11 +499,27 @@ class OverlayView @JvmOverloads constructor(
         const val LINE_SWING_IN_MS = 600f
 
         /**
+         * 一条边上摊开几个呼吸周期（相位沿边铺开用，见 [lineFlowPhase]）。
+         *
+         * 1 = 一个完整周期铺满一条边：波峰从下往上走一圈正好一条边的长度。
+         */
+        const val LINE_FLOW_CYCLES = 1f
+
+        /**
+         * 圆角段的长度（设计 px）：离角顶点这么近的采样点都归这一个角，
+         * 整段共用顶点那一枚的呼吸值（见 [lineJellyAt]），于是角是等宽圆弧。
+         */
+        const val LINE_CORNER_LEN_PX = 44f
+
+        /** 四个圆角各自的相位偏移（左上 / 右上 / 右下 / 左下），让四个角不同步呼吸。 */
+        val LINE_CORNER_PHASE = floatArrayOf(0f, 0f, 0f, 0f)
+
+        /**
          * 线宽硬下限（兜底）：任何一层抖动把该点宽度压到这个值以下时，就按这个值画。
          *
          * 0.6 → **1.2**：0.6 设计 px 在 @720 上只有约 1.1px，真触发时会细成一根发丝，
-         * 和两侧辉光一起读成"线断了"。正常路径到不了这里（最细一档 [LINE_THIN_PX] = 2.6，
-         * 果冻最负也只到 2.97），它只是防振荡的保险。
+         * 和两侧辉光一起读成"线断了"。正常路径到不了这里（宽度的最小值是 3.42 —— 也就是
+         * [LINE_THIN_PX] 2.70 再加果冻最负那一档），它只是防振荡的保险，不跟着线宽一起放大。
          */
         const val LINE_MIN_PX = 1.2f
 
@@ -301,9 +537,37 @@ class OverlayView @JvmOverloads constructor(
          */
         const val LINE_ALPHA = 0.96f
 
+        /**
+         * 白线的横截面：**中间一道半透明白色亮芯，两端都淡到全透明**（不是等宽的实心白条）。
+         * 它叠在 [edgeHalo] 那层光晕之上，光晕负责"往屏幕内部逐渐衰减"，这一层负责"亮芯"。
+         *
+         * 为什么两端都要淡到 0：外沿原来"压边最亮"，于是贴屏幕边缘有一条始终最亮的窄带，
+         * 读起来就是"描了一圈白边"；而手机的显示圆角又恰好咬在那一圈上，角上就被啃掉一截。
+         * 现在外沿让开 [LINE_EDGE_GAP_PX]、alpha 也从 0 起步，白线就是一块**浮在屏幕内侧、
+         * 两侧都没有边**的白纱，角上也不会被裁。
+         *
+         * 整条线仍然只画一次，剖面靠**顶点色**插值（见 [drawLineMesh]），
+         * 所以沿边、跨宽度都不会出现台阶。
+         *
+         * [LINE_MASK_F] 是横截面上的位置（0 = 外沿，1 = 内沿），[LINE_MASK_A] 是那一点的
+         * 相对亮度（再乘 [LINE_ALPHA]）。现在是 0 → 0.62 → 0.38 → 0.12 → 0：中间突起一道
+         * **亮芯**（这是"核心线"读得出来的原因），两端都收回到 0，所以核心线两侧都没有硬边，
+         * 它只是把下面那层光晕"提亮一道"，不是盖上去的一条实心白。
+         *
+         * 记住这一层的 alpha 是**叠在光晕之上**的：光晕贴边 0.53，亮芯 0.62 压上去 ≈ 0.82，
+         * 底下还有近两成背景透出来 —— 整条边缘仍然是"半透明"的。
+         * 想更亮/更"线"：把第二项往上抬（`0 / 0.85 / 0.45 / 0.12 / 0`）；
+         * 想更柔：往下压（`0 / 0.45 / 0.30 / 0.10 / 0`）；
+         * 想让亮芯更靠外：把 [LINE_MASK_F] 第二项改小（例如 `0, 0.16, 0.38, 0.70, 1`）。
+         * 整条全给 0 = 白线完全不画，只剩辉光（排查"这条线到底是不是白线"用这个）。
+         */
+        val LINE_MASK_F = floatArrayOf(0f, 0.22f, 0.42f, 0.72f, 1f)
+        val LINE_MASK_A = floatArrayOf(0f, 0.72f, 0.44f, 0.14f, 0f)
+
         // ---- 两层边缘辉光 ----
-        // 1 核心高光线：一条闭合的圆角矩形路径、一次画完（见 drawEdgeStroke），
-        //   逐段显形由波前遮罩逐像素完成 —— 没有段，也就没有接缝。
+        // 1 核心高光线：**一条白色透明的遮罩**（见 [LINE_MASK_F] / [drawLineMesh]）：
+        //   整条让开屏幕边缘（[LINE_EDGE_GAP_PX]）、两侧都淡到全透明；整圈一次 drawVertices，
+        //   逐点显形也走顶点 alpha（[waveReached]）—— 没有段，也就没有接缝。
         // 2 内侧辉光：见下面 GLOW_* 那几张表。
         //
         // 之前这里是"核心线 + 一层柔光 + 边缘点亮自带的描边与多层内发光"，
@@ -350,12 +614,14 @@ class OverlayView @JvmOverloads constructor(
          * 往内按 [GLOW_STOPS] 衰减。1 = 外内侧一样亮（看着像整条带子），
          * 0.5~0.6 能读出"光是从线上散出去的、往外只是漏出来一点"。
          *
-         * 0.55 / 0.62 → 0.66 / 0.72 → **0.74**（按需求"亮一点"、"内侧辉光再白再亮一点"）：
-         * 贴着屏幕那条唇光原来只有峰值的一半多一点，整圈看起来像"内亮外忽然断掉"；
-         * 抬上来之后边缘那一线也跟着发光，整圈是一整片连续的白。
-         * （外围散射删掉之后只剩这一项，取的是原来内侧那一档。）
+         * 0.55 / 0.62 → 0.66 / 0.72 → 0.74 → **1（贴着屏幕边最亮）**：
+         *
+         * 取 1 之后剖面从屏幕边缘那一线**单调往内淡**，没有"局部最亮的窄带"：
+         * 光晕自己不再画出一根线，边缘是"贴屏幕最亮、往内渗进去"的一整块半透明白。
+         * 真正的"明亮核心线"由压在它上面的 [drawLineMesh] 那一层给 ——
+         * 两层各管一件事，叠起来才不会在贴边处过曝成一圈硬描边。
          */
-        val GLOW_EDGE_ALPHA = floatArrayOf(0.74f)
+        val GLOW_EDGE_ALPHA = floatArrayOf(1f)
 
         /**
          * 各层峰值 alpha：辉光最亮的地方，就在白线那条脊线上。
@@ -422,15 +688,23 @@ class OverlayView @JvmOverloads constructor(
         val GLOW_BREATHE_PHASE = floatArrayOf(0f)
 
         /**
-         * 各层辉光**宽度**的相对摆幅。**现在全 0：辉光宽度恒定。**
+         * 各层辉光**宽度**的相对摆幅 —— **上下的浮动**就是它（左右两条边不参与）。
          *
-         * 早前这里给的是 0.35 / 0.65，让左右（上下）成对守恒地涌 —— 那是把呼吸放错了地方：
-         * 现在呼吸只改核心白线的粗细，辉光的宽度全程不动，四条边完全一样宽。
+         * 这里的值就是摆幅：宽度 = 基准 × (1 + 这个值 · 浮动)。浮动是**整条边共用**的一枚
+         * （[edgeJelly] = `breathePhase()`），**和卡片绑定**：跟卡片里那张图片的上下浮、
+         * 顶部光斑的变高变矮是同一枚时钟（[PHOTO_BREATHE_MS] = 2s，同频同相，匀速正弦）。
+         * 整条边一起变宽变窄、上下两条边同相（一起变宽 / 一起收窄）——
+         * 这就是之前白线上下两条的浮动逻辑。
          *
-         * 非 0 时会重新打开"沿边逐段给宽度"的那条路径（`glowWidthPx` / `taperAt` /
-         * 逐段噪声都还在，见 [GLOW_JITTER_BLOCK]），语义是：
-         * 宽度 = 基准 × (1 + 摆幅 · 符号 · 果冻)，左/上符号 +1、右/下 −1，于是
-         * `w(左) + w(右) = w(上) + w(下) = 2 × 基准`（一边变宽、对面必然同量变窄）。
+         * **不做逐段抖动**：早前这里是"每段各弹各的"（[sliceJelly]），读起来是边缘在抖、
+         * 波浪不齐 —— 那不是白线的浮动，也不是卡片那枚时钟。
+         *
+         * 现在只给**上、下两条边**：左右两条边的宽度恒定（它们动的是 [drawSideFlow] 那道流光），
+         * 见 [glowWidthPx] 里的 `horizontal` 判断 —— 两边同时动会互相干扰。
+         *
+         * **当前 0：上下两条边不再浮动，整圈辉光宽度恒定。**
+         * 想再打开：给一个 0.15 ~ 0.7（宽度会在 `1−值 ~ 1+值` 倍之间跟着卡片那枚时钟变）；
+         * 给 0.45 时是 `0.55 ~ 1.45 ×`（@1080 约 19 ~ 49 设备 px）。
          */
         val GLOW_BREATHE_TRADE = floatArrayOf(0f)
 
@@ -475,6 +749,18 @@ class OverlayView @JvmOverloads constructor(
          * **周期占比**给的，改周期会同时缩放各段之间的错开时间。
          */
         const val LINE_BREATHE_PERIOD_MS = 4800f
+
+        /**
+         * 左、右两半白线**错开多少真实毫秒**（0 = 完全同步）。
+         *
+         * 200 = 右边比左边晚 0.2s：同一时刻左边正鼓到最大，右边还要再过 0.2s 才到最大。
+         * 注意口径：这是**真实时间**，会按 [LINE_BREATHE_PERIOD_MS] 折算成相位
+         * （见 [LINE_SIDE_LAG_PHASE]）—— 改呼吸周期时这个 0.2s 在周期里的占比会跟着变。
+         */
+        const val LINE_SIDE_LAG_MS = 200f
+
+        /** [LINE_SIDE_LAG_MS] 折算成**周期占比**的相位（右边晚这么多）。 */
+        const val LINE_SIDE_LAG_PHASE = LINE_SIDE_LAG_MS / LINE_BREATHE_PERIOD_MS
 
         /**
          * 果冻弹簧在一个呼吸周期里抖几下。
@@ -578,7 +864,7 @@ class OverlayView @JvmOverloads constructor(
         const val TOP_BLOOM_RY_PX = 64f
 
         /** 光斑峰值 alpha：0.44 → **0.56**（按需求"顶部的凸起也再亮一点"），仍低于白线 0.92。 */
-        const val TOP_BLOOM_PEAK_ALPHA = 0.56f
+        const val TOP_BLOOM_PEAK_ALPHA = 0.74f
 
         /**
          * 光斑色带（**没采到发送图片主色时**用的默认色）：中心浅蓝白 → 中段**更深的蓝** → 透明。
@@ -586,12 +872,19 @@ class OverlayView @JvmOverloads constructor(
          * 中段从原来的 `#9CC9FF` 加深到 `#6FA9FF`（更饱和），中心也从 `#E8F2FF` 压到 `#DCE9FF` ——
          * 整枚大了 2.6 倍之后，中心再给纯白就成了一块白光，中段不够深又会被辉光的灰白尾巴压住。
          *
+         * **中心（贴线那一档）再压深一档**：`#DCE9FF` → **`#C7D9F8`**（RGB 约 −9%）。
+         * 换色那套（[topBloomTintColors]）同步压了 [TOP_BLOOM_TINT_CENTER_MIX]，
+         * 所以有没有采到主色，顶部那一块都是同一个深浅。
+         *
+         * 相对 alpha 是 `0xE6 / 0xCC / 0x00`（0xC0 → **0xCC**：按"整体别那么透"把中段抬了一档，
+         * 让鼓包的主体也厚一点；中心到中段仍有落差，所以自上而下的渐变没被压平）。
+         *
          * 采到主色之后走 [TOP_BLOOM_TINT_*] 那套（同一套相对 alpha，只换 RGB），
          * 见 [topBloomTintColors]。
          */
         val TOP_BLOOM_COLORS = intArrayOf(
-            0xE6DCE9FF.toInt(),
-            0xC06FA9FF.toInt(),
+            0xE6C7D9F8.toInt(),
+            0xCC6FA9FF.toInt(),
             0x006FA9FF.toInt()
         )
 
@@ -617,8 +910,13 @@ class OverlayView @JvmOverloads constructor(
          */
         const val TOP_BLOOM_TINT_MS = 300f
 
-        /** 主色 → 中心那一段的"变浅"量（HSV 里抬 V，见 [PhotoTint.lighten]）。 */
-        const val TOP_BLOOM_TINT_CENTER_MIX = 0.26f
+        /**
+         * 主色 → 中心那一段的"变浅"量（HSV 里抬 V，见 [PhotoTint.lighten]）。
+         *
+         * 0.26 → **0.16**（"光晕的顶部颜色还得稍微深一点"）：中心是离白线最近、最显眼的那一档，
+         * 别把它洗得那么白。想更深继续减（0.10 / 0.05，给 0 = 直接用主色本身）。
+         */
+        const val TOP_BLOOM_TINT_CENTER_MIX = 0.16f
 
         /** 主色 → 中段那一段的"变浅"量：几乎就是主色本身，只比中心深一点。 */
         const val TOP_BLOOM_TINT_MID_MIX = 0.10f
@@ -629,14 +927,16 @@ class OverlayView @JvmOverloads constructor(
          *
          * 0.62 → **0.68**（按需求"顶部的凸起也再亮一点"）：深色照片的主色兜到 0.68 之后
          * 那枚包才真的在发光，而不是一块压暗的色块。
+         * 之后按"顶部颜色还得稍微深一点"回落到 **0.65** —— 深色照片那一档不再那么发白，
+         * 亮照片不受影响（它们本来就在下限之上）。
          */
-        const val TOP_BLOOM_TINT_MIN_VALUE = 0.68f
+        const val TOP_BLOOM_TINT_MIN_VALUE = 0.65f
 
         /** 中心那一段的相对 alpha（和 [TOP_BLOOM_COLORS] 的 `0xE6 / 0xC0` 一一对应）。 */
         const val TOP_BLOOM_TINT_CENTER_ALPHA = 0xE6
 
         /** 中段那一段的相对 alpha。 */
-        const val TOP_BLOOM_TINT_MID_ALPHA = 0xC0
+        const val TOP_BLOOM_TINT_MID_ALPHA = 0xCC
 
         /**
          * 光斑呼吸的摆幅：**只作用在纵向半轴**（横向恒定，见 [drawTopBloom]）。
@@ -805,7 +1105,7 @@ class OverlayView @JvmOverloads constructor(
         const val CORNER_BL = 3
 
         // ---- 屏幕边缘那圈白线的几何 ----
-        // 核心线是**按逐点宽度拼出来的填充路径**（见 LINE_RIBBON_STEP_PX / buildRibbon），
+        // 核心线是**按逐点宽度摊出来的一条三角带**（见 LINE_RIBBON_STEP_PX / drawLineMesh），
         // 走一条圆角矩形中线；辉光的脊线就压在这条中线上（见 LINE_INSET_PX / glowProfile），
         // 于是线两侧都有光：屏幕边缘 → 外侧辉光 → 白线 → 内侧辉光。
 
@@ -825,11 +1125,21 @@ class OverlayView @JvmOverloads constructor(
         const val CORNER_QUIET_FRAC = 0.18f
 
         /**
-         * 圆角半径（设计 px）。
+         * 圆角半径的**兜底设计值**（设计 px）。
          *
-         * 不能用方角：手机的显示圆角会把四个角切掉，线画到那里就是空的。
+         * 只在拿不到系统显示圆角时用（API 31 以下 / 直屏 / 老 OEM）。拿得到就用真实半径 ——
+         * 见 `onSizeChanged` 里那段说明：比真实半径**小**会在角上露出一圈没盖住的暗边，
+         * 比它**大**只是被显示圆角裁掉，不会有事。
          */
         const val EDGE_CORNER_R_PX = 22f
+
+        /**
+         * 圆角半径往外多给的保险（设备 px）：让辉光在角上**略微盖过**显示圆角。
+         *
+         * 铺大一点点是"无害的多余"（多出去的部分在显示圆角之外，系统会裁掉），
+         * 而差一点点就会在角上留一条没有光的缝 —— 两种误差里只有一种是看不见的。
+         */
+        const val CORNER_COVER_PX = 1.5f
 
         /**
          * 把切线的位置对齐到**整数设备像素**：消掉角盘和直边矩形那一列像素的重叠。
@@ -852,22 +1162,6 @@ class OverlayView @JvmOverloads constructor(
 
         /** 四边光晕沿边缘切分的段数（各层共用）。段越细，波前扫过时的过渡越顺滑。 */
         const val GLOW_SLICES = 28
-
-        /**
-         * 波前遮罩的采样点数：把 `1 - smoothstep()` 那段剖面拆成几个色标。
-         *
-         * 整圈白线现在是**一次 `drawPath`**（见 [drawEdgeStroke]），逐段显形改用
-         * 一枚径向渐变当遮罩 —— 渐变只能给色标、给不了 smoothstep 这条曲线，
-         * 于是用 7 个点把曲线采样出来。再多肉眼也看不出，少了拐点会硬折。
-         */
-        const val FRONT_MASK_STOPS = 7
-
-        /**
-         * 遮罩渐变的重建阈值（px）：波前内沿挪动超过它才重建一枚。
-         *
-         * 散开那 1000ms 里大约重建几十次，之后半径不再变，一枚都不再分配。
-         */
-        const val FRONT_MASK_STEP_PX = 6f
 
         // 下面两个常量定义波前的过渡带。
         /**
@@ -1145,11 +1439,10 @@ class OverlayView @JvmOverloads constructor(
      * 每帧**按逐点宽度**拼出来的线体（闭合填充路径），几何全部缓存在下面几个数组里。
      *
      * 中线几何是静态的：`onSizeChanged` 里沿中线等距采样一次，存下位置、**朝屏幕边缘的单位法线**
-     * 和该点的抖动参数（相位/幅度，跟时间无关）；每帧只按当前呼吸算出每点的半宽，
-     * 外沿正向、内沿反向各连一遍就成了一个连续带子 —— 没有分段描边的圆头叠加，
-     * 也没有宽度台阶（对比 [edgeHalo] 那种逐段矩形）。
+     * 和该点的抖动参数（相位/幅度，跟时间无关）；每帧只按当前呼吸算出每点的宽度，
+     * 再把横截面上那几个剖面采样点摊成一条三角带（见 [drawLineMesh]）—— 没有分段描边的圆头
+     * 叠加，也没有宽度台阶（对比 [edgeHalo] 那种逐段矩形）。
      */
-    private val ribbonPath = Path()
     private var lineSigma = 0
     private var linePx = FloatArray(0)
     private var linePy = FloatArray(0)
@@ -1159,15 +1452,21 @@ class OverlayView @JvmOverloads constructor(
     /** 每个采样点的抖动参数（静态）：相位偏置（周期占比）、幅度系数（0..1）。 */
     private var linePh = FloatArray(0)
     private var lineAm = FloatArray(0)
+    /** 每一枚采样点挂在哪一个圆角上（−1 = 不在圆角上）。下标同 [LINE_CORNER_PHASE]。 */
+    private var lineCornerIdx = IntArray(0)
+    /** 四个圆角各自的顶点采样点下标（法线斜 45° 那一枚）。 */
+    private var lineCornerApex = IntArray(4)
 
-    /** 每个采样点当前的半宽（px），每帧重算一次，供外沿/内沿两趟共用。 */
-    private var lineHalf = FloatArray(0)
-
-    // 波前遮罩：圆心在顶边中点、半径固定的径向渐变，用色标把 smoothstep 剖面采样出来。
-    // 只在"波前正在扫、还没盖满整圈"的那段时间存在；常驻状态是纯色一次画完，根本不碰它。
-    private var frontMask: Shader? = null
-    private var frontMaskNear = Float.NaN
-    private var frontMaskFar = Float.NaN
+    /**
+     * 白线的三角带：每个采样点 × [LINE_MASK_F] 的档数，逐点宽度 + 逐点 alpha。
+     *
+     * 顶点位置每帧重写（宽度在呼吸），三角索引只在采样点数变化时排一次。
+     * 顶点色走 [drawVertices]：`Paint.alpha` 不参与，所以 alpha 直接乘进颜色里。
+     */
+    private var lineMeshVerts = FloatArray(0)
+    private var lineMeshColors = IntArray(0)
+    private var lineMeshIdx = ShortArray(0)
+    private val lineMeshPaint = Paint()
 
     // ---- 手势 / 动画状态 ----
     private var dragging = false
@@ -1516,21 +1815,32 @@ class OverlayView @JvmOverloads constructor(
     // （不跟贴边的共用：setLocalMatrix 是否复制矩阵不该赌）。
     private val topBloomMatrix = Matrix()
 
+    // 左右流光：一枚径向渐变（半径 1，每帧用矩阵拉成扁长的光斑再平移），画笔 + 矩阵 + 矩形各一份。
+    private val sideFlowPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val sideFlowMatrix = Matrix()
+    private val sideFlowRect = RectF()
+    private var sideFlowShader: Shader? = null
+
+    // 边缘那一层：距离场一次画完（参考 GoogleTest 的 EdgeScrimView）。
+    // 跑不了 RuntimeShader（API 33 以下 / OEM 裁掉）时退回老的"四条矩形 + 四个角盘"的画法。
+    private val edgePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val edgeRect = RectF()
+    private var edgeShader: Shader? = null
+    private var edgeShaderKey: String? = null
+    private var edgeShaderBroken = false
+
     // 贴边渐变是按"呼吸到最宽"时建的，每帧用这个矩阵把它压到当前宽度
     // （改 shader 的 end 点就得每帧重建，见 scaleEdgeShader）。每层每边各一个，
     // 互不共享 —— 无论 setLocalMatrix 是否复制矩阵都不会串。
     private val glowMatrices = Array(GLOW_LAYERS) { Array(4) { Matrix() } }
 
-    // 整圈白线是**一条闭合路径、一次画完**：没有分段、没有 cap，也就不存在
-    // "相邻两段的圆头在接缝处各叠半个线宽、叠出一排小亮点"这件事。
-    // 线宽要沿边变，描边做不到，所以线体是填充路径（[ribbonPath]）——用这枚 FILL 画笔。
+    // 整圈白线是**一条三角带、一次画完**（见 [drawLineMesh]）：没有分段、没有 cap，
+    // 也就不存在"相邻两段的圆头在接缝处各叠半个线宽、叠出一排小亮点"这件事。
+    // 线宽沿边逐点变、亮度跨宽度渐变，描边和 drawPath 都做不到，所以走 drawVertices。
     private val edgeStroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE
         strokeCap = Paint.Cap.BUTT
         strokeJoin = Paint.Join.ROUND
-    }
-    private val lineRibbon = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.FILL
     }
     private val scrimPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val cardPaint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -1611,8 +1921,6 @@ class OverlayView @JvmOverloads constructor(
         dragY = 0f
         flying = false
         flyT = 0f
-        // 下一次上滑可以重新回报一次确认
-        sendConfirmedNotified = false
         resetRunnable?.let { removeCallbacks(it) }
         resetRunnable = null
         alpha = 1f //pri added by zhuyang,E5: a replayed round must not inherit the dissolve alpha,20261014
@@ -1648,13 +1956,20 @@ class OverlayView @JvmOverloads constructor(
 
         // 整圈白线走一条圆角矩形**中线**：方角版本会一直画到屏幕角上，
         // 而手机的显示圆角把那里切掉了 —— 四个角看上去就是空的。
-        // [cornerR] 是**屏幕显示圆角**的半径（辉光那套几何用它，见 cornerGradient），
-        // 取「系统显示圆角」和「设计值」里的大者；系统取不到（老系统 / 直屏）时用设计值兜底。
-        // 而白线本身内缩 [LINE_INSET_PX]，圆角半径相应减掉一个内缩 ——
-        // 这样它的弧和显示圆角同心，**四个角到屏幕边缘的距离和直边一样**（外侧辉光宽度才均匀）。
+        // [cornerR] 是**屏幕显示圆角**的半径（辉光那套几何用它，见 cornerGradient）。
+        //
+        // 必须贴着真实显示圆角，不能比它小：角上那团光是按这个半径铺的，
+        // 铺小了圆角外侧就有一圈**没有任何一层在盖**的地方 —— 背景直接透出来，
+        // 读起来就是"角上白线和光晕断掉、缺一块"（BL/BR 最明显）。
+        // 铺大了无所谓：多出去的那点在显示圆角之外，本来就会被裁掉。
+        // 所以取**系统给的真实半径**、再往外多给 [CORNER_COVER_PX] 当保险；
+        // 系统取不到（API 31 以下 / 直屏 / 老 OEM）时才用设计值兜底。
+        // 而白线本身内缩 [LINE_INSET_PX] 再让开 [LINE_EDGE_GAP_PX]，
+        // 所以它的弧落在显示圆角里面，**四个角到屏幕边缘的距离和直边一样**。
         val inset = LINE_INSET_PX * k
+        val sysCornerR = systemCornerRadiusPx()
         val rawCornerR = min(
-            max(EDGE_CORNER_R_PX * k, systemCornerRadiusPx()),
+            if (sysCornerR > 0f) sysCornerR + CORNER_COVER_PX else EDGE_CORNER_R_PX * k,
             min(viewW, viewH) * 0.5f - inset
         )
         // 对齐到整数设备像素：切线正好落在一列像素的边界上，角盘和直边矩形就不会各盖一次
@@ -1672,11 +1987,6 @@ class OverlayView @JvmOverloads constructor(
         m.setPath(linePath, false)
         lineLen = m.length
         buildLineSamples(m)
-
-        // 遮罩渐变的几何（圆心、半径、断面位置）全跟着屏幕尺寸走，尺寸一变必须重建
-        frontMask = null
-        frontMaskNear = Float.NaN
-        frontMaskFar = Float.NaN
 
         // 一次性把各层各边的渐变建好（深度和圆角半径都定下来了），
         // 之后每帧只改 Paint.alpha、shader 的局部矩阵 —— 不在绘制路径上分配对象。
@@ -1700,6 +2010,16 @@ class OverlayView @JvmOverloads constructor(
         // 主色那枚渐变的圆心同样按屏宽走，尺寸一变就得重建（下一帧按需建）。
         topBloomTintShader = null
         topBloomTintBuilt = null
+
+        // 左右流光：半径写 1 的径向渐变，形状全靠每帧的局部矩阵（横向 rx、纵向 ry），
+        // 所以"光斑多扁多长"不用重建 shader，改 [SIDE_FLOW_RX_FRAC] / [SIDE_FLOW_RY_FRAC] 即可。
+        // 颜色是从纯白到 0 的一条软边：中心 alpha 由画笔给，渐变只负责"边缘化开"。
+        sideFlowShader = RadialGradient(
+            0f, 0f, 1f,
+            intArrayOf(0xFFFFFFFF.toInt(), 0x9EFFFFFF.toInt(), 0x00FFFFFF),
+            floatArrayOf(0f, 0.45f, 1f),
+            Shader.TileMode.CLAMP
+        )
     }
 
     /** 系统给出的显示圆角半径（px）。API 31 以下或直屏返回 0，由设计值兜底。 */
@@ -1728,21 +2048,199 @@ class OverlayView @JvmOverloads constructor(
         if (edgeReveal > 0f) drawEdgeGlow(canvas)
     }
 
-    // ---------------------------------------------------------- 1. 边缘辉光（核心线 + 内侧辉光）
+    // ---------------------------------------------------------- 1. 边缘辉光（半透明白光晕 + 左右流光）
 
     private fun drawEdgeGlow(c: Canvas) {
-        // 两层，从外到内：内侧辉光 -> 核心高光线。
-        // 核心线最后画，保证它干净；光晕层只改 alpha 和贴边宽度，
-        // 几何（圆角、深度、路径）全程不变。
-        // 强度 = 该层峰值 × 呼吸；「水波抵达后的短暂增强」再乘一下。
         val boost = arrivalBoost()
-        for (layer in GLOW_NEAR until GLOW_LAYERS) {
-            for (side in SIDE_TOP..SIDE_RIGHT) edgeHalo(c, layer, side, boost)
-            for (corner in CORNER_TL..CORNER_BL) cornerHalo(c, layer, corner, boost)
+        // 首选：距离场一次画完（直边/圆角等价，角上不可能有缝）。
+        // 跑不了 RuntimeShader 时退回老的画法 —— 动画参数两边完全一样。
+        if (!drawEdgeScrim(c, boost)) {
+            for (layer in GLOW_NEAR until GLOW_LAYERS) {
+                for (side in SIDE_TOP..SIDE_RIGHT) edgeHalo(c, layer, side, boost)
+                for (corner in CORNER_TL..CORNER_BL) cornerHalo(c, layer, corner, boost)
+            }
+            drawSideFlow(c)
         }
-        // 波源光斑压在辉光**之上**（它要"凸出"）、核心白线**之下**（白线必须仍然干净）。
+        // 波源光斑压在辉光**之上**（它要"凸出"）。
         drawTopBloom(c)
-        drawEdgeStroke(c)
+    }
+
+    /**
+     * 边缘：**一次 `drawRect` 画完整层**（结构参考 GoogleTest 的 `EdgeScrimView`）。
+     *
+     * 每个像素的亮度只由"它到圆角矩形边界的距离"决定：
+     *
+     * ```
+     * d < 纯白芯（1px）         → 峰值 [EDGE_PEAK]（纯白，和 EdgeScrimView 一样）
+     * 芯 ≤ d < 芯 + 30px         → 1 − smoothstep 淡到 0（两端导数为 0，接缝处不会折）
+     * 更里面                  → 0（不画）
+     * ```
+     *
+     * 因为用的是距离场，直边和圆角在数学上完全等价 —— 以前"直边四条矩形 + 圆角四个角盘"
+     * 那套在切线上总要靠取整去凑，角上被显示圆角咬掉/留暗缝的问题从根上没有了。
+     *
+     * **动画全是我们自己的**，只是作为 uniform 传进去：
+     * - 显形：`uReveal` = 我们那枚波前（[frontRadiusPx] / [frontNearPx]），逐像素算 `waveReached`；
+     * - 左右流光：`uFlowYL/uFlowYR` 用 [sideFlowY] 算，和 [drawOneSideFlow] 同一套运动；
+     * - 上下浮动：`uFloatK` = `1 + GLOW_BREATHE_TRADE · breathePhase()`，只改**上下两条边的
+     *   淡出长度**，圆角处按"离左右边近还是离上下边近"平滑过渡，不需要 taper 也不会错位。
+     *
+     * @return true = 已经画好；false = 环境不支持，调用方走老画法。
+     */
+    private fun drawEdgeScrim(c: Canvas, boost: Float): Boolean {
+        if (!EDGE_SHADER_ON || edgeShaderBroken) return false
+        val shader = buildEdgeShader(boost) ?: return false
+        edgePaint.shader = shader
+        edgePaint.alpha = 255
+        edgeRect.set(0f, 0f, viewW, viewH)
+        val ok = runCatching { c.drawRect(edgeRect, edgePaint) }.isSuccess
+        edgePaint.shader = null
+        if (!ok) {
+            // 这台的驱动编译不了这段 AGSL：记下来，之后一直走老画法，不再每帧重试。
+            edgeShaderBroken = true
+            edgeShader = null
+            edgeShaderKey = null
+        }
+        return ok
+    }
+
+    private fun buildEdgeShader(boost: Float): RuntimeShader? {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return null
+        val key = "$viewW|$viewH|$cornerR"
+        val cached = edgeShader as? RuntimeShader
+        if (cached != null && key == edgeShaderKey) {
+            applyEdgeAnim(cached, boost)
+            return cached
+        }
+        val rt = runCatching {
+            RuntimeShader(EDGE_SHADER).also {
+                it.setFloatUniform("uSize", viewW, viewH)
+                it.setFloatUniform("uRadius", cornerR)
+                it.setFloatUniform("uWhiteLR", EDGE_WHITE_LR_PX)
+                it.setFloatUniform("uWhiteTB", EDGE_WHITE_TB_PX)
+                it.setFloatUniform("uFade", EDGE_FADE_PX)
+                it.setFloatUniform("uCornerR", cornerR)
+                it.setFloatUniform("uFlowEnd", SIDE_FLOW_END_FRAC * viewH)
+            }
+        }.getOrNull() ?: return null
+        applyEdgeAnim(rt, boost)
+        edgeShader = rt
+        edgeShaderKey = key
+        return rt
+    }
+
+    /** 边缘**完全铺满**的那一刻（真实 ms）= 显形开始 + 显形时长。 */
+    private fun edgeFullMs(): Float = Timeline.EDGE_START_MS + Timeline.EDGE_REVEAL_MS
+
+    /**
+     * 上下浮动 / 左右流光的**起步系数**（0..1）：显形阶段恒为 0，四边铺满之后
+     * [EDGE_ANIM_IN_MS] 内渐入到 1。
+     *
+     * 式子和参考工程的 `lineSwingGate()` 一样（同为 `EDGE_START_MS + EDGE_REVEAL_MS` 起算、
+     * `smoothStep` 渐入），只是这里的时长换成 [EDGE_ANIM_IN_MS]。
+     */
+    private fun edgeAnimIn(): Float {
+        val t = (elapsed - edgeFullMs()) / EDGE_ANIM_IN_MS
+        return smoothStep(t.coerceIn(0f, 1f))
+    }
+
+    /** 把**我们自己的动画**写进 uniform（每帧只改这几个数，不重建 shader）。 */
+    private fun applyEdgeAnim(rt: RuntimeShader, boost: Float) {
+        val filled = frontMaskFilled()
+        // 显形：uReveal.x = **沿边走多远**（从顶边中点量起，0 → W/2 + H）。
+        // 用它代替"到中点的直线距离"，波前就变成"顶边中点 → 两个角 → 沿左右两边往下"。
+        // 铺满之后给一个极大的值，波前项恒为 1。
+        rt.setFloatUniform(
+            "uReveal",
+            if (filled) 1e6f else edgeReveal * (viewW * 0.5f + viewH),
+            0f
+        )
+        rt.setFloatUniform("uRevealSpan", EDGE_REVEAL_SPAN_FRAC * viewW)
+        // 峰值覆盖度：按 EdgeScrimView 取 1（芯上纯白、靠渐变段透出底下内容）。
+        // [EDGE_PEAK] 调小于 1 时，水波抵达那一下的增强才看得出来。
+        rt.setFloatUniform("uPeak", (EDGE_PEAK * boost).coerceAtMost(1f))
+        // 上下浮动：和卡片图片同一枚时钟（见 edgeJelly）。**等显形跑完才渐入**，
+        // 否则边还没亮完，上下就开始鼓了。
+        val animIn = edgeAnimIn()
+        rt.setFloatUniform("uFloatK", 1f + GLOW_BREATHE_TRADE[0] * breathePhase() * animIn)
+        // 左右流光：和 drawOneSideFlow 完全同一套运动；同样等显形跑完（animIn）才亮。
+        // 流光的**相位也从"铺满"那一刻起算**，否则渐入开始时它已经跑到半路。
+        val since = (elapsed - edgeFullMs()).toFloat()
+        val ry = SIDE_FLOW_RY_FRAC * viewH
+        rt.setFloatUniform("uFlowRy", ry)
+        rt.setFloatUniform(
+            "uFlowAlpha",
+            if (SIDE_FLOW_ON && since > 0f) SIDE_FLOW_PEAK_ALPHA * animIn else 0f
+        )
+        rt.setFloatUniform("uFlowYL", sideFlowY(since, ry))
+        rt.setFloatUniform("uFlowYR", sideFlowY(since - SIDE_FLOW_LAG_MS, ry))
+    }
+
+    /**
+     * 流光中心当前的 y：从屏幕下缘外面走到上缘外面，然后从头再来（`t` 归零那一刻正好
+     * 又在下缘，圆角也在最大值，接得天衣无缝 —— 见 [CORNER_FLOW_SWING_PX]）。
+     */
+    private fun sideFlowY(since: Float, ry: Float): Float {
+        if (since <= 0f) return -1e5f
+        val t = sideFlowPhase(since)
+        return (viewH + ry) - t * (viewH + 2f * ry)
+    }
+
+    /** 流光相位：0 = 在下缘起步，1 = 已从上缘出去。圆角缩放也读它。 */
+    private fun sideFlowPhase(since: Float): Float {
+        if (since <= 0f) return 0f
+        return (since / SIDE_FLOW_PERIOD_MS) % 1f
+    }
+
+    /**
+     * **左右两条边上的流光**：一道扁长的亮光沿边往上跑，走到两端淡出、再从底端进来。
+     *
+     * 为什么是"一枚软光斑跑过去"，而不是"沿线逐段改 alpha"：直边的光晕是一整块矩形，
+     * 沿线切段时相邻两段的 alpha 差会直接变成台阶（那次"方格子"就是这么来的）。
+     * 一枚径向渐变光斑怎么平移都是连续的，也不会碰到圆角那条接缝，上下两条边更是完全不动。
+     *
+     * 全部 alpha 混合，峰值 [SIDE_FLOW_PEAK_ALPHA] 叠在光晕上大约到 0.7 —— 仍然半透明，
+     * 底下的背景和模糊内容一直透得出来。
+     */
+    private fun drawSideFlow(c: Canvas) {
+        if (!SIDE_FLOW_ON) return
+        if (sideFlowShader == null) return
+        val since = (elapsed - Timeline.EDGE_MS).toFloat()
+        if (since <= 0f) return
+        val appear = (since / SIDE_FLOW_IN_MS).coerceIn(0f, 1f)
+        if (appear <= 0f) return
+        // 左边立刻起步，右边晚 [SIDE_FLOW_LAG_MS]：两边不同步，看起来是光绕着一圈走。
+        drawOneSideFlow(c, 0f, since, appear)
+        drawOneSideFlow(c, viewW, since - SIDE_FLOW_LAG_MS, appear)
+    }
+
+    /** 一条边上的那道光：[cx] 是这条边的 x（0 = 左边，[viewW] = 右边）。 */
+    private fun drawOneSideFlow(c: Canvas, cx: Float, since: Float, appear: Float) {
+        if (since <= 0f) return
+        val shader = sideFlowShader ?: return
+        val rx = SIDE_FLOW_RX_FRAC * viewW
+        val ry = SIDE_FLOW_RY_FRAC * viewH
+        if (rx <= 1f || ry <= 1f) return
+
+        // t：0 = 还在屏幕下缘外面，1 = 已经从上缘出去。
+        val t = (since / SIDE_FLOW_PERIOD_MS) % 1f
+        val y = (viewH + ry) - t * (viewH + 2f * ry)
+        // 两端淡出（进入 / 离开那半段），避免光斑在边缘"啪"地出现或消失。
+        val fade = smoothStep((y / ry).coerceIn(0f, 1f)) *
+                smoothStep(((viewH - y) / ry).coerceIn(0f, 1f))
+        // edgeAnimIn()：等边缘完全显形之后流光才起来（和距离场那条路径同一个判据）。
+        val alpha = (SIDE_FLOW_PEAK_ALPHA * appear * fade * edgeAnimIn() * 255f)
+            .toInt().coerceIn(0, 255)
+        if (alpha <= 0) return
+
+        sideFlowPaint.shader = shader
+        sideFlowPaint.alpha = alpha
+        // 渐变半径是 1，这里把它拉成 rx × ry 的椭圆，再平移到 (cx, y)。
+        sideFlowMatrix.setScale(rx, ry)
+        sideFlowMatrix.postTranslate(cx, y)
+        shader.setLocalMatrix(sideFlowMatrix)
+        sideFlowRect.set(cx - rx, y - ry, cx + rx, y + ry)
+        c.drawRect(sideFlowRect, sideFlowPaint)
     }
 
     /**
@@ -1912,7 +2410,10 @@ class OverlayView @JvmOverloads constructor(
 
         // 快速路径：宽度恒定的层 + 已经铺满 → 整条边一个矩形。
         // 各段 alpha 和宽度都一样，切段纯属白干。
-        if (filled && GLOW_BREATHE_TRADE[layer] == 0f) {
+        // 只有上下两条边的宽度会浮动（见 [glowWidthPx]），左右两条边宽度恒定 ——
+        // 所以左边右边照走这条快速路径，一次矩形画完。
+        val widthFloats = GLOW_BREATHE_TRADE[layer] != 0f && !horizontal
+        if (filled && !widthFloats) {
             val depth = edgeBandPx(layer)
             glowPaint.alpha = (alpha * 255f).toInt().coerceIn(0, 255)
             scaleEdgeShader(layer, side, depth / maxEdgeBandPx(layer))
@@ -1970,9 +2471,11 @@ class OverlayView @JvmOverloads constructor(
 
             // 宽度：呼吸的摆幅越靠近两端越小，端点上正好回到基准值 ——
             // 角上那团用的就是那个基准剖面，于是交界处任何时刻都对得上。
-            // 果冻值逐段给：同一条边上每段各弹各的（见 sliceJelly）。
+            // 上下两条边：**整条边共用一个果冻值**（[edgeJelly]），和之前白线上下浮动的节奏一样；
+            // 左右两条边宽度不动（那里是流光，`glowWidthPx` 里 sway 恒为 0）。
             val taper = taperAt(mid, lo, hi)
-            val depth = glowWidthPx(layer, side, taper, sliceJelly(layer, side, i))
+            val jelly = if (horizontal) edgeJelly() else sliceJelly(layer, side, i)
+            val depth = glowWidthPx(layer, side, taper, jelly)
             if (depth <= 0.5f) continue
 
             glowPaint.alpha = (reached * alpha * 255f).toInt().coerceIn(0, 255)
@@ -2065,19 +2568,37 @@ class OverlayView @JvmOverloads constructor(
      * 那样两边的和会变，就成了"整圈一起变粗变细"。
      *
      * [taper] 见 [taperAt]：靠近角时摆幅收敛到 0，端点上正好回到基准宽度，
-     * 与角上那团（固定用基准剖面）严丝合缝。[jelly] 是该段自己的果冻强度（[sliceJelly]）。
+     * 与角上那团（固定用基准剖面）严丝合缝。[jelly] 是该边自己的果冻强度。
      *
-     * **现在 [GLOW_BREATHE_TRADE] 全是 0，所以这个函数恒等于基准宽度** ——
-     * 呼吸已经搬到核心白线的粗细上（[LINE_SWING_PX]），辉光宽度全程不动，四条边一样宽。
-     * 保留这条路径是为了把摆幅调回非 0 就能重新打开（[edgeHalo] 里有对应的快速路径）。
+     * **只有上、下两条边浮动**（`horizontal`），而且和之前白线的上下浮动一样：
+     * - 整条边共用一个果冻值（[edgeJelly]），不是逐段各弹各的；
+     * - 上下两条边**同相、同号** —— 一起变宽、一起变窄（白线那边 `1 + jelly` 也没有按边换符号）；
+     * - 所以不再有"`w(上)+w(下) = 2×基准`"那条守恒：那是辉光自己以前的口径，不是白线的。
+     *
+     * 左/右两条边的宽度恒定（那里动的是 [drawSideFlow] 那道沿边跑的流光），
+     * 宽度再一起变会读成两种运动打架；左右恒定还有个好处：它们照走 [edgeHalo]
+     * 的"整条边一个矩形"快速路径。
      */
     private fun glowWidthPx(layer: Int, side: Int, taper: Float, jelly: Float): Float {
         val base = glowDepthPx(layer)
-        val sign = if (side == SIDE_TOP || side == SIDE_LEFT) 1f else -1f
-        // 铺的宽度 = 白线外侧那半段（恒定）+ 内侧这段（会呼吸）
-        return LINE_INSET_PX * k +
-                base * (1f + GLOW_BREATHE_TRADE[layer] * sign * jelly * taper)
+        val horizontal = side == SIDE_TOP || side == SIDE_BOTTOM
+        val sway = if (horizontal) GLOW_BREATHE_TRADE[layer] * jelly * taper else 0f
+        // 铺的宽度 = 白线外侧那半段（恒定）+ 内侧这段（上下会浮动）
+        return LINE_INSET_PX * k + base * (1f + sway)
     }
+
+    /**
+     * **一整条边共用的浮动值**：**和卡片同一枚时钟** —— [breathePhase]，纯正弦、一圈
+     * [PHOTO_BREATHE_MS]（2s），和卡片里那张图片的上下浮**同频同相**，也和顶部波源光斑
+     * 变高变矮是同一个动作。
+     *
+     * 这就是之前白线上下两条的浮动逻辑（见 [drawTopBloom] 那段说明）：它们不走 [breath]
+     * 那枚 4800ms 的欠阻尼果冻，而是绑在卡片上 —— 图片往下浮的同时，上下两条边一起变宽，
+     * 图片回位时它们一起收窄。所以是**匀速的正弦**，不是"被推一下"的手感。
+     *
+     * 取值 `[−1, 1]`：`1 + 摆幅 · 它` ⇒ 宽度在 `1−摆幅 ~ 1+摆幅` 倍之间。
+     */
+    private fun edgeJelly(): Float = breathePhase()
 
     /** 这一层**往屏幕内**的深度（px）。四条边同一个值。 */
     private fun glowDepthPx(layer: Int): Float = GLOW_DEPTH_PX[layer] * k
@@ -2100,8 +2621,10 @@ class OverlayView @JvmOverloads constructor(
      * 以**白线那条脊线**（距屏幕边缘 [LINE_INSET_PX]）为支点缩，脊线钉在线上不动、
      * 两侧按比例伸缩；端点之外由 CLAMP 收成透明，所以带的内侧不会出现硬边。
      *
-     * 现在 [GLOW_BREATHE_TRADE] 全 0，传进来的 [scale] 恒为 1（矩阵是单位阵），
-     * 这条路径只是备着。
+     * [scale] 由 [edgeHalo] 逐段算出来。**现在 [GLOW_BREATHE_TRADE] 全 0，所以传进来恒为 1**
+     * （矩阵就是单位阵）—— 这条路径只是留着，把摆幅改回非 0 就能重新打开。
+     * 当初写它是因为渐变按"最宽"建、末端透明，放大到 1 以上只是把整条剖面等比拉宽
+     * （端点之外由 CLAMP 收在透明处），带的内侧不会出现硬边。
      */
     private fun scaleEdgeShader(layer: Int, side: Int, scale: Float) {
         val pivot = LINE_INSET_PX * k
@@ -2357,47 +2880,118 @@ class OverlayView @JvmOverloads constructor(
     }
 
     /**
-     * 一整圈白色线条：沿**圆角矩形**的轮廓描边，而不是四条直边。
+     * 一整圈白线：沿**圆角矩形**的轮廓走，而不是四条直边拼。
      *
      * 方角的版本会一直画到屏幕角上，而手机的显示圆角把那里切掉了 —— 四个角是空的；
      * 方角本身也不像手机边缘。
      *
-     * 关键：整条路径**只描边一次**。早先的版本用 `PathMeasure` 按弧长切成 220 段、
-     * 每段单独 `drawPath`，相邻两段各带半个 ROUND cap，叠在一起就是每 ~21px
-     * 一个亮点 / 接缝 —— 常驻状态那圈线一直亮着，所以最明显。现在改成：
+     * **这一层一直画**（没有开关）：屏幕边缘 = 半透明白光晕 + 压在上面的半透明白亮芯线。
      *
-     * - 波前还没铺满 → 给 [lineRibbon] 挂一枚 [frontMask] 径向渐变，
-     *   逐**像素**按 `1 - smoothstep()` 的剖面给 alpha。它和 [waveReached] 同源
-     *   （同一个圆心、同一段过渡带），所以显形顺序一点没变，而且比分段采样更连续；
-     * - 波前铺满 → 连渐变都不用，纯白一次画完，零接缝零亮点。
+     * 线体是一**条白色透明的遮罩**（见 [LINE_MASK_F]），不是一条实心白杠：
+     * 两端都淡到全透明，最亮那一档藏在外沿往里一点。
      *
-     * - **粗细就是呼吸**：[LINE_ALPHA] 亮度恒定，变的是线宽 —— 显形阶段恒为最细的
-     *   [LINE_THIN_PX]，四边铺满之后才渐入地随 [breath] 变粗（见 [LINE_SWING_PX] /
-     *   [LINE_SWING_IN_MS]）；
-     * - **但粗细沿边逐点不同**：每个采样点有自己的相位和幅度（见 [lineJellyAt]），
-     *   所以同一条边上不会整段一起胀 —— "左边从上到下都一样"那种机械感就是这么去掉的。
-     *   代价是描边做不到变宽，线体改成 [buildRibbon] 拼出来的闭合填充路径。
-     * - **亮度**恒定 [LINE_ALPHA]，整圈一致，不参与呼吸。
+     * 画法是**一次 `drawVertices`**：沿中线采样的每个点摊出 [LINE_MASK_F] 那几个剖面顶点，
+     * 顶点色里带 alpha —— 于是宽度逐点连续、亮度也逐点连续，沿边和跨宽度都没有台阶：
+     *
+     * - 波前还没铺满 → 顶点 alpha 再乘 [waveReached]（和散开阶段同一套波前），逐点显形；
+     * - 波前铺满 → 只乘剖面，一次画完，零接缝零亮点。
+     *
+     * - **粗细就是呼吸**：变的是线宽 —— 显形阶段恒为最细的 [LINE_THIN_PX]，
+     *   四边铺满之后才渐入地随 [breath] 变粗（见 [LINE_SWING_PX] / [LINE_SWING_IN_MS]）；
+     * - **粗细沿边逐点不同**：每个采样点有自己的相位和幅度（见 [lineJellyAt]）。
      *
      * 中线内缩 [LINE_INSET_PX]，两侧都有辉光（辉光的脊线正压在这条中线上）。
      */
     private fun drawEdgeStroke(c: Canvas) {
+        // 这一层**不再有开关**：屏幕边缘 = 半透明白光晕 + 半透明白亮芯线（见 [drawLineMesh]）。
+        // （原来那个 `WHITE_LINE_ON` 常量已经删了 —— 有开关就一定有"被关掉之后整条边一动不动"
+        // 这种事故，而这层的流动/亮度全都挂在它上面。）
         if (viewW <= 0f || viewH <= 0f || lineSigma < 3) return
-        val path = buildRibbon()
+        drawLineMesh(c)
+    }
 
-        if (frontMaskFilled()) {
-            // 常驻状态（录屏里被长时间盯着的那段）：纯色 + 一次 drawPath
-            lineRibbon.shader = null
-            lineRibbon.color = withAlpha(0xFFFFFFFF.toInt(), LINE_ALPHA)
-            c.drawPath(path, lineRibbon)
-            return
+    /** 白线三角带的缓冲（采样点数变了才重排一次）：顶点、顶点色各 [LINE_MASK_F] 份。 */
+    private fun buildLineMeshBuffers(count: Int) {
+        val rows = LINE_MASK_F.size
+        lineMeshVerts = FloatArray(count * rows * 2)
+        lineMeshColors = IntArray(count * rows)
+        // 每对采样点之间摊 rows − 1 个四边形（每格两个三角形）。末尾那枚和首枚重合，
+        // 所以不需要额外绕回的索引。
+        val quads = max(count - 1, 0) * (rows - 1)
+        lineMeshIdx = ShortArray(quads * 6)
+        var w = 0
+        for (i in 0 until count - 1) {
+            for (r in 0 until rows - 1) {
+                val a0 = i * rows + r
+                val a1 = (i + 1) * rows + r
+                lineMeshIdx[w++] = a0.toShort()
+                lineMeshIdx[w++] = a1.toShort()
+                lineMeshIdx[w++] = (a1 + 1).toShort()
+                lineMeshIdx[w++] = a0.toShort()
+                lineMeshIdx[w++] = (a1 + 1).toShort()
+                lineMeshIdx[w++] = (a0 + 1).toShort()
+            }
         }
+    }
 
-        val shader = frontMaskShader() ?: return
-        lineRibbon.shader = shader
-        // 挂着 shader 时颜色被忽略，但它的 alpha 通道会乘上去 —— 必须是全不透明
-        lineRibbon.color = 0xFFFFFFFF.toInt()
-        c.drawPath(path, lineRibbon)
+    /**
+     * 把白线铺成一条三角带：沿中线每点一个宽度，横截面上按 [LINE_MASK_F] 摊成几档，
+     * 每档的 alpha 取 [LINE_MASK_A]（乘 [LINE_ALPHA]，显形阶段再乘 [waveReached]）。
+     *
+     * 宽度沿边逐点连续、alpha 跨宽度线性插值 ⇒ 无论怎么呼吸沿边都不会有台阶，
+     * 内沿也不会留下硬边（最后一档 alpha = 0）。
+     *
+     * **左右两条边的亮度波浪**也在这里：顶点 alpha 再乘一个逐点的 `waveGain`
+     * （[lineJellyAt] 的相位随沿边位置错开 ⇒ 波峰沿边往上跑；权重由 [lineWaveGate] 给，
+     * 上下两条边恒为 0）。逐点写顶点色，所以波浪是连续的，不会像切片那样露出格子。
+     */
+    private fun drawLineMesh(c: Canvas) {
+        val n = lineSigma
+        val rows = LINE_MASK_F.size
+        val verts = lineMeshVerts
+        val colors = lineMeshColors
+        if (verts.size < n * rows * 2 || lineMeshIdx.size == 0) return
+
+        val swing = lineSwingGate() * LINE_SWING_PX
+        val outPx = LINE_INSET_PX * k
+        // 整条白纱再往屏幕内侧让开这么多：外沿不再压在屏幕圆角上，角上就不会被显示圆角咬掉。
+        val gapPx = LINE_EDGE_GAP_PX * k
+        val filled = frontMaskFilled()
+        // 波前还没够到任何一处（前几百 ms）：整圈 alpha 都是 0，没必要铺。
+        if (!filled && frontNearPx() <= 0f) return
+        for (i in 0 until n) {
+            // 果冻（沿边的相位错开）只用一次：左边这份管线宽，右边这份管亮度。
+            val jelly = lineJellyAt(i)
+            val w = (LINE_THIN_PX + swing * (1f + jelly)).coerceAtLeast(LINE_MIN_PX)
+            // 外侧固定偏 outPx（中线到屏幕边缘的距离），内侧长到 (厚度 − 外偏)：多出来的厚度全往内长。
+            val inner = (w * k - outPx).coerceAtLeast(0f)
+            val reveal = if (filled) 1f else waveReached(linePx[i], linePy[i])
+            // **左右两条边的亮度波浪**（上下权重为 0，见 [lineWaveGate]）：波峰沿边往上走。
+            val waveGain = (1f + LINE_WAVE_ALPHA * jelly * lineWaveGate(i)).coerceAtLeast(0f)
+            val cx = linePx[i]
+            val cy = linePy[i]
+            val nx = lineNx[i]
+            val ny = lineNy[i]
+            for (r in 0 until rows) {
+                // 距离中线（沿外法线）：外沿 = +outPx，内沿 = −inner，中间按剖面档位插。
+                // 整条再整体外移 gapPx（= 往屏幕内侧让开），宽度不变。
+                val d = (outPx - gapPx) - LINE_MASK_F[r] * (outPx + inner)
+                val vi = (i * rows + r) * 2
+                verts[vi] = cx + nx * d
+                verts[vi + 1] = cy + ny * d
+                val a = LINE_ALPHA * LINE_MASK_A[r] * reveal * waveGain
+                colors[i * rows + r] = ((a * 255f).toInt().coerceIn(0, 255) shl 24) or 0x00FFFFFF
+            }
+        }
+        c.drawVertices(
+            Canvas.VertexMode.TRIANGLES,
+            n * rows,
+            verts, 0,
+            null, 0,
+            colors, 0,
+            lineMeshIdx, 0, lineMeshIdx.size,
+            lineMeshPaint
+        )
     }
 
     /**
@@ -2423,7 +3017,8 @@ class OverlayView @JvmOverloads constructor(
             lineNy = FloatArray(count)
             linePh = FloatArray(count)
             lineAm = FloatArray(count)
-            lineHalf = FloatArray(count)
+            lineCornerIdx = IntArray(count) { -1 }
+            buildLineMeshBuffers(count)
         }
 
         val pos = FloatArray(2)
@@ -2457,6 +3052,42 @@ class OverlayView @JvmOverloads constructor(
             lineAm[i] = LINE_JITTER_AMP_FLOOR +
                     (1f - LINE_JITTER_AMP_FLOOR) * ringNoise(SEED_LINE_AMP, u)
         }
+
+        // ---- 四个圆角：各挑一枚"顶点"，并把角上的采样点挂到它上面 ----
+        // 顶点 = 法线正好斜 45° 的那一枚（|nx·ny| 最大）。象限按法线符号分：
+        // 左上 / 右上 / 右下 / 左下（Android 的 y 向下，所以"上"那两条边 ny < 0）。
+        val apexBest = FloatArray(4) { -1f }
+        for (i in 0 until count) {
+            val q = when {
+                lineNx[i] < 0f && lineNy[i] < 0f -> 0
+                lineNx[i] > 0f && lineNy[i] < 0f -> 1
+                lineNx[i] > 0f && lineNy[i] > 0f -> 2
+                else -> 3
+            }
+            val score = abs(lineNx[i] * lineNy[i])
+            if (score > apexBest[q]) {
+                apexBest[q] = score
+                lineCornerApex[q] = i
+            }
+        }
+        // 离顶点 [LINE_CORNER_LEN_PX] 以内的点都归这个角（整段后来会共用一个宽度）。
+        val cornerLen = (LINE_CORNER_LEN_PX * k).coerceAtLeast(1f)
+        val cornerLen2 = cornerLen * cornerLen
+        for (i in 0 until count) {
+            var hit = -1
+            var bestD = cornerLen2
+            for (q in 0 until 4) {
+                val a = lineCornerApex[q]
+                val dx = linePx[i] - linePx[a]
+                val dy = linePy[i] - linePy[a]
+                val d2 = dx * dx + dy * dy
+                if (d2 <= bestD) {
+                    bestD = d2
+                    hit = q
+                }
+            }
+            lineCornerIdx[i] = hit
+        }
     }
 
     /**
@@ -2484,7 +3115,7 @@ class OverlayView @JvmOverloads constructor(
     /**
      * 第 [i] 个采样点属于哪条边：**看法线的主方向**。
      *
-     * [lineNx] / [lineNy] 是 [buildRibbon] 采样时算好的外法线（指向屏幕外侧），
+     * [lineNx] / [lineNy] 是 [buildLineSamples] 采样时算好的外法线（指向屏幕外侧），
      * 所以这个判断和"路径从哪开始、顺着走还是逆着走"完全无关 —— 以后改中线的画法也不会错位。
      * 返回 `0=上 / 1=右 / 2=下 / 3=左`，和 [EDGE_SWING_AMP] / [EDGE_SWING_PHASE] 的下标一致。
      */
@@ -2511,44 +3142,68 @@ class OverlayView @JvmOverloads constructor(
      * 正好等于 [LINE_INSET_PX]（不会伸出屏幕被切）。[EDGE_SWING_AMP] 仍会整体缩放它。
      */
     private fun lineJellyAt(i: Int): Float {
-        val e = lineEdgeAt(i)
-        val jelly = when (e) {
-            EDGE_TOP, EDGE_BOTTOM -> -breathePhase()
-            else -> breath(linePh[i] + EDGE_SWING_PHASE[e]) * lineAm[i]
+        // 圆角：整段**共用顶点那一枚的呼吸值**，再叠这个角自己的相位偏移 ——
+        // 于是角是一段等宽圆弧，不会因为两侧直边的节奏不同被掰出个台阶。
+        val c = lineCornerIdx[i]
+        if (c >= 0) {
+            val a = lineCornerApex[c]
+            return breath(lineFlowPhase(a) + LINE_CORNER_PHASE[c] + lineSideLag(a)) * lineAm[a]
         }
-        return jelly * EDGE_SWING_AMP[e]
+        // 直边：同一枚果冻，相位沿边单调错开 → 波峰一路往上走；
+        // 右边再整体晚 [LINE_SIDE_LAG_MS]（左半边权重 0，上下两条边权重也是 0）。
+        val e = lineEdgeAt(i)
+        return breath(lineFlowPhase(i) + EDGE_SWING_PHASE[e] + lineSideLag(i)) *
+                lineAm[i] * EDGE_SWING_AMP[e]
     }
 
     /**
-     * 按当前呼吸拼出线体：**外沿正向走一遍、内沿反向走一遍**，再闭合。
+     * 亮度波浪的**按边权重**（0 = 上下两条边，1 = 左右两条边，圆角上平滑过渡）。
      *
-     * 每点的半宽 = `(LINE_THIN_PX + 门 × 幅度 × (1 + 果冻)) / 2`，两侧对称地偏在法线两边，
-     * 于是线宽沿边连续变化、内侧外沿都不会出现台阶（对比 [edgeHalo] 的逐段矩形）。
-     * 半宽最大 `(2.6 + 1.1 × 2) / 2 = 2.4` 设计 px —— 正好等于 [LINE_INSET_PX]（@720 ≈4.5px），
-     * 也就是最粗那一刻线体的外沿刚好贴到屏幕边缘（不越界、不被切）；
-     * 圆角半径比它大得多，所以内沿也不会自交。
+     * 取"法线里横着那一份占多大比例"：`|nx| / (|nx| + |ny|)`。
+     * 上/下 `nx = 0` ⇒ 0；左/右 `ny = 0` ⇒ 1；四个圆角在 0.5 附近，
+     * 再经 [smoothStep] 压到 0 —— 于是波浪从切点进去一点点才开始，角上不会有台阶。
+     *
+     * 上下两条边权重恒为 0：它们的相位沿边本来就不变（[lineFlowPhase] 只看 py），
+     * 于是整条边一起亮暗，就是我们说的"之前那种呼吸"，不会看出有东西在跑。
      */
-    private fun buildRibbon(): Path {
-        val swing = lineSwingGate() * LINE_SWING_PX
-        val n = lineSigma
-        for (i in 0 until n) {
-            val w = (LINE_THIN_PX + swing * (1f + lineJellyAt(i))).coerceAtLeast(LINE_MIN_PX)
-            lineHalf[i] = w * k * 0.5f
-        }
+    private fun lineWaveGate(i: Int): Float {
+        val ax = abs(lineNx[i])
+        val ay = abs(lineNy[i])
+        val denom = ax + ay
+        if (denom <= 0f) return 0f
+        val lateral = ax / denom
+        return smoothStep(((lateral - 0.55f) / 0.35f).coerceIn(0f, 1f))
+    }
 
-        ribbonPath.reset()
-        for (i in 0 until n) {
-            val h = lineHalf[i]
-            val x = linePx[i] + lineNx[i] * h
-            val y = linePy[i] + lineNy[i] * h
-            if (i == 0) ribbonPath.moveTo(x, y) else ribbonPath.lineTo(x, y)
-        }
-        for (i in n - 1 downTo 0) {
-            val h = lineHalf[i]
-            ribbonPath.lineTo(linePx[i] - lineNx[i] * h, linePy[i] - lineNy[i] * h)
-        }
-        ribbonPath.close()
-        return ribbonPath
+    /**
+     * 第 [i] 个采样点相对"左半边"的**相位滞后**（周期占比，0 ~ [LINE_SIDE_LAG_PHASE]）。
+     *
+     * 权重取"法线里朝右那一份占总量的比例" `nx⁺ / (|nx| + |ny|)`：
+     * - 上/下两条边 `nx = 0` ⇒ **恒为 0**，所以它们完全不受这条规则影响；
+     * - 左边 `nx < 0` ⇒ 0，左半边也完全不变；
+     * - 右边 `nx = 1, ny = 0` ⇒ 1，整条边晚满 [LINE_SIDE_LAG_MS]；
+     * - 右上 / 右下两个圆角按这个比例从 0 平滑过渡到 1（顶点处约 0.5），
+     *   所以从顶边绕圆角接到右边时不会撕出一道台阶。
+     */
+    private fun lineSideLag(i: Int): Float {
+        val denom = abs(lineNx[i]) + abs(lineNy[i])
+        if (denom <= 0f) return 0f
+        return max(lineNx[i], 0f) / denom * LINE_SIDE_LAG_PHASE
+    }
+
+    /**
+     * 左/右两条边的果冻相位：由**沿边走的位置**决定（越靠上相位越大）。
+     *
+     * [breath] 里是 `s = frac(t − phase)`，而果冻的"鼓起来"发生在周期前段 —— 相位大的点
+     * 先走完自己那一圈，相位 = `(1 − v) × 周期数` 于是让"已经鼓过的那一段"从上往下排。
+     * 时间往前走，这条鼓包就整体**往上移**（低处晚见到它 ⇒ 从下往上流动）。
+     *
+     * [LINE_FLOW_CYCLES] 决定一条边上摊开几个周期：1 = 一个完整呼吸周期铺满一条边。
+     */
+    private fun lineFlowPhase(i: Int): Float {
+        if (viewH <= 0f) return 0f
+        val v = (linePy[i] / viewH).coerceIn(0f, 1f)   // 0 = 顶、1 = 底
+        return (1f - v) * LINE_FLOW_CYCLES
     }
 
     /** 波前半径（px，圆心在顶边中点）：与 [waveReached] 里 `edgeReveal * glowRadiusScale` 同式。 */
@@ -2564,54 +3219,9 @@ class OverlayView @JvmOverloads constructor(
      * 波前是不是已经盖满整圈（连最远的底角都满亮）。
      *
      * [glowRadiusScale] 在 onSizeChanged 里就是按"edgeReveal=1 时刚好盖满最远点"定的，
-     * 所以常驻状态必然走到这里 —— 那条路径上没有渐变，也就没有采样误差。
+     * 所以常驻状态必然走到这里 —— 那时白线不再逐点算 [waveReached]，整圈 alpha 只由剖面决定。
      */
     private fun frontMaskFilled(): Boolean = frontNearPx() >= frontFarPx() - 0.5f
-
-    /**
-     * 波前遮罩：圆心在顶边中点的径向渐变，色标按 `1 - smoothstep()` 剖面排。
-     *
-     * 渐变半径固定成 [frontFarPx]，变的是各色标的位置 —— 所以只有位置挪够
-     * [FRONT_MASK_STEP_PX] 时才重建一枚：显形那 1000ms 里几十次，常驻段一次都不分配。
-     *
-     * 只保留落在渐变域（0..far）之内的那段剖面：域内的 alpha 就等于该处的剖面值，
-     * 域外由 CLAMP 取端点值，正好是"波前里面满亮、外面全暗"。
-     */
-    private fun frontMaskShader(): Shader? {
-        val far = frontFarPx()
-        val near = frontNearPx()
-        val span = RIPPLE_REVEAL_SPAN * viewW
-        val d0 = near.coerceAtLeast(0f)
-        val d1 = (near + span).coerceAtMost(far)
-        if (d1 - d0 < 0.5f) return null
-
-        if (frontMask == null ||
-            abs(frontMaskNear - near) > FRONT_MASK_STEP_PX ||
-            abs(frontMaskFar - far) > 0.5f
-        ) {
-            val n = FRONT_MASK_STOPS
-            val positions = FloatArray(n)
-            val colors = IntArray(n)
-            for (i in 0 until n) {
-                val d = d0 + (d1 - d0) * i / (n - 1f)
-                // 剖面参数：0 = 内沿（满亮），1 = 外沿（全透明）
-                val u = ((d - near) / span).coerceIn(0f, 1f)
-                positions[i] = d / far
-                colors[i] = withAlpha(0xFFFFFFFF.toInt(), (1f - smoothStep(u)) * LINE_ALPHA)
-            }
-            frontMask = RadialGradient(
-                viewW * 0.5f,
-                0f,
-                far,
-                colors,
-                positions,
-                Shader.TileMode.CLAMP
-            )
-            frontMaskNear = near
-            frontMaskFar = far
-        }
-        return frontMask
-    }
 
     /** 把 [r] 摆成某条边上的一段，从屏幕边缘向内延伸 [depth]。 */
     private fun edgeSlice(r: RectF, side: Int, s0: Float, s1: Float, depth: Float): RectF {
@@ -2735,7 +3345,7 @@ class OverlayView @JvmOverloads constructor(
         // 这里用的是 fit 之前的卡片高，偏保守（fit 之后卡片只会更矮、浮量更小）。
         val bobAmp = cardH * PHOTO_BREATHE_FRAC
         // 信息与卡片之间留一口气，贴太紧会读成"卡片标题"。**20dp**（原来 14dp）——
-        // 这个值是"卡片浮到最高点时仍要剩下的间距"，所以静止时看起来是 20 + bobAmp ≈ 23.7dp。
+        // 这个值是"卡片浮到最高点时仍要剩下的间距"，所以静止时看起来是 20 + bobAmp（约 25.4dp）。
         val infoGap = 20f * k + bobAmp
         val infoH = lineH + infoGap
         val tipGap = 18f * k + bobAmp
@@ -2802,6 +3412,8 @@ class OverlayView @JvmOverloads constructor(
             // （层序照 v6：光晕 → 卡片 → 粒子，闪光/白洗都在 drawCard 里面）。
             val f = receiverFrame
             if (f != null) {
+                // 接收端：卡片按 v6 的「小卡片落下 → 等比长大」画，
+                // 落光柱和粒子尾迹都在这个方法里（层序：光柱 → 卡片 → 粒子）。
                 receiverRenderer.drawCard(c, f, cardPhoto, k, viewW / k, viewH / k)
                 receiverRenderer.drawActions(c, f, k, viewW / k)
                 // 接收后的反馈照主线来：两枚按钮自己淡出 + 卡片轻放大（不再交叉淡入成「取消」胶囊）
@@ -2814,7 +3426,6 @@ class OverlayView @JvmOverloads constructor(
                     fm1, lineH, textAlpha * recvAlpha
                 )
             }
-            // v6 的提示条画在 84.5% 高度，我们的底部状态行在 46dp 处，两者不重叠
             if (receiverToast.isNotEmpty()) {
                 receiverRenderer.drawToast(c, k, viewW / k, viewH / k, receiverToast)
             }
@@ -2894,7 +3505,7 @@ class OverlayView @JvmOverloads constructor(
         // 所以改成**卡片整体移动**：图片和轮廓一起走，边缘永远不露，也就不需要"画大一圈再裁"。
         // 上面那行"发送给 xxx"、下面那行"上滑发送"照旧不动。
         //
-        // 幅度见 [PHOTO_BREATHE_FRAC]（已从"相对比例"改成对齐参考片的绝对位移）。
+        // 幅度见 [PHOTO_BREATHE_FRAC]（现在是卡高的 1.50%，约 ±5.4 设计px）。
         // 版面上 [drawTransferPanel] 会按同一个幅度给卡上/卡下两行文字留间距 —— 改这里要一起改。
         val cardBob = breathePhase() * cardRect.height() * PHOTO_BREATHE_FRAC
 
@@ -3491,8 +4102,6 @@ class OverlayView @JvmOverloads constructor(
         flyT = 0f
         flyProgress = 0f
         dragY = 0f
-        // 这一轮发送结束（`onSendFinished` 是复位语义，这里只是让下一次上滑能再回报一次确认）
-        sendConfirmedNotified = false
         // 交回给宿主：复位时间轴，回到照片界面
         onSendFinished?.invoke()
         invalidate()
