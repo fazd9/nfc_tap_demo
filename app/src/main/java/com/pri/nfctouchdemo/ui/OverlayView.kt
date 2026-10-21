@@ -1943,6 +1943,7 @@ class OverlayView @JvmOverloads constructor(
         dragY = 0f
         flying = false
         flyT = 0f
+        sendConfirmedNotified = false //pri added by zhuyang,Restore the per-round reset the animation change dropped: the next round may report a swipe again,20261021
         resetRunnable?.let { removeCallbacks(it) }
         resetRunnable = null
         alpha = 1f //pri added by zhuyang,E5: a replayed round must not inherit the dissolve alpha,20261014
@@ -4126,6 +4127,7 @@ class OverlayView @JvmOverloads constructor(
         flyT = 0f
         flyProgress = 0f
         dragY = 0f
+        sendConfirmedNotified = false //pri added by zhuyang,Restore the per-send reset the animation change dropped: this round's send is over,20261021
         // 交回给宿主：复位时间轴，回到照片界面
         onSendFinished?.invoke()
         invalidate()
