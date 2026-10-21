@@ -253,6 +253,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         }
         // ---- 以下三个分支:动效层(OverlayService)的"用户操作回执",等价于旧 SendPage/ReceivePage 的 Listener ----
         if (intent != null && OverlayService.ACTION_UI_SEND_CONFIRMED.equals(intent.getAction())) {
+            Bus.log("服务: 收到上滑回执 PENDING=" + PENDING.size() + " xfer=" + (sXfer == null ? "null" : "ok") + " mode.send=" + mSendShown + " recv=" + mReceiveShown + " yielded=" + mRoleYielded); //pri added by zhuyang,Diagnostic: dump send-confirmed state before the early returns,20261020
             // 等价于旧 SendPage.Listener.onSwipedSend():上滑过阈值那一刻
             if (sXfer == null || PENDING.isEmpty()) return START_STICKY;
             if (mRoleYielded) { //pri added by zhuyang,Already lost the role race this round: never send,20261017
