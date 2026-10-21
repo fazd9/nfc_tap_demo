@@ -1016,6 +1016,10 @@ class OverlayView @JvmOverloads constructor(
          */
         const val SEND_PROGRESS = 0.70f
 
+        //pri added by zhuyang,Natural swipe: send once the finger travelled this far, independent of the calibrated deformation progress,20261021,start
+        private const val SEND_TRAVEL_PX = 200f   // design px, multiplied by refScale
+        //pri added by zhuyang,Natural swipe: send once the finger travelled this far, independent of the calibrated deformation progress,20261021,end
+
         /**
          * 接收方文字 alpha 的三个拐点（**进度**，不是秒）：前 30% 一动不别，
          * 52% 处淡到 0.56，70% 归零。参考片里它就是这么一条分段折线 ——
@@ -1947,6 +1951,7 @@ class OverlayView @JvmOverloads constructor(
         resetRunnable = null
         alpha = 1f //pri added by zhuyang,E5: a replayed round must not inherit the dissolve alpha,20261014
         receiveEnterAt = -1L //pri modify by zhuyang,A replayed timeline must not inherit the receive entrance restart (see setWaitingForPeer),20261020
+        sendConfirmedNotified = false //pri added by zhuyang,One receipt per round: a used-up flag must not swallow the next round's swipe,20261021
         invalidate()
     }
 
@@ -3894,7 +3899,7 @@ class OverlayView @JvmOverloads constructor(
 
         when (event.actionMasked) {
             MotionEvent.ACTION_DOWN -> {
-                if (!hitCard(event.x, event.y)) return false
+                if (!hitSendSwipeZone(event.x, event.y)) return false
                 cancelAnimators()
                 dragging = true
                 downY = event.y
@@ -3916,7 +3921,9 @@ class OverlayView @JvmOverloads constructor(
                 dragging = false
                 parent?.requestDisallowInterceptTouchEvent(false)
                 // 挤到 70% 以上松手就发出去 —— 和"发送给 xxx"淡没了的刻度是同一个
-                if (deformProgress >= SEND_PROGRESS) startFlyAway() else returnCard()
+                //pri modify by zhuyang,Natural swipe: send once the finger travelled this far, independent of the calibrated deformation progress,20261021,start
+                if (deformProgress >= SEND_PROGRESS || -dragY >= SEND_TRAVEL_PX * refScale) startFlyAway() else returnCard()
+                //pri modify by zhuyang,Natural swipe: send once the finger travelled this far, independent of the calibrated deformation progress,20261021,end
                 return true
             }
         }
@@ -3999,11 +4006,12 @@ class OverlayView @JvmOverloads constructor(
         return super.onTouchEvent(event)
     }
 
-    private fun hitCard(x: Float, y: Float): Boolean {
+    //pri added by zhuyang,A swipe may start anywhere from the card top downwards, so the hint line below the card works too,20261021,start
+    private fun hitSendSwipeZone(x: Float, y: Float): Boolean {
         val pad = 12f * k
-        return x >= cardRect.left - pad && x <= cardRect.right + pad &&
-                y >= cardRect.top - pad && y <= cardRect.bottom + pad
+        return cardRect.width() > 0f && y >= cardRect.top - pad && y <= viewH
     }
+    //pri added by zhuyang,A swipe may start anywhere from the card top downwards, so the hint line below the card works too,20261021,end
 
     /**
      * 卡片里的插画是静态的，渲染一次缓存成 Bitmap。
@@ -4105,7 +4113,8 @@ class OverlayView @JvmOverloads constructor(
             android.util.Log.i("OverlayService", "动效: 卡片上滑过阈值,回调发送确认") //pri added by zhuyang,Diagnostic: same tag as the service side so one filter catches both,20261020
             onSendConfirmed?.invoke()
         }
-        flyProgress = deformProgress   // 先冻住"松手那一刻挤到哪儿了"
+        //pri modify by zhuyang,Start the fly from the calibrated send state so a distance-triggered send still looks like the reference,20261021
+        flyProgress = max(deformProgress, SEND_PROGRESS)   // 先冻住"松手那一刻挤到哪儿了"
         flying = true
         flyAnimator?.cancel()
         flyAnimator = ValueAnimator.ofFloat(0f, 1f).apply {
