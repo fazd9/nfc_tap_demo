@@ -616,10 +616,13 @@ class ReceiverRenderer {
             }
             Decision.REJECTED -> {
                 // v6：卡片、按钮都收掉，蒙层再压暗一档
-                f.cardAlpha = 0f
-                f.actionAlpha = 0f
+                //pri modify by zhuyang,B7: fade the card and both pills out over REJECT_DIM_MS instead of cutting them in one frame,20261023,start
+                val rejectU = smooth(0f, REJECT_DIM_MS, (elapsedMs - decisionAtMs).toFloat())
+                f.cardAlpha *= (1f - rejectU)
+                f.actionAlpha *= (1f - rejectU)
                 f.activeActions = false
-                f.scrimBoost = smooth(0f, REJECT_DIM_MS, (elapsedMs - decisionAtMs).toFloat()) * 0.5f
+                f.scrimBoost = rejectU * 0.5f
+                //pri modify by zhuyang,B7: fade the card and both pills out over REJECT_DIM_MS instead of cutting them in one frame,20261023,end
             }
             Decision.NONE -> Unit
         }

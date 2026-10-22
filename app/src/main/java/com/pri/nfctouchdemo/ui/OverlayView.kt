@@ -3443,7 +3443,10 @@ class OverlayView @JvmOverloads constructor(
             floatArrayOf(0f, 0.48f, 1f),
             Shader.TileMode.CLAMP
         )
-        scrimPaint.alpha = (textAlpha * 255f).toInt().coerceIn(0, 255)
+        //pri modify by zhuyang,B7: feed the receiver's reject scrim boost into the scrim alpha,20261023,start
+        val scrimBoost = if (mode == Mode.RECEIVE) receiverFrame?.scrimBoost ?: 0f else 0f
+        scrimPaint.alpha = ((textAlpha * (1f + scrimBoost)) * 255f).toInt().coerceIn(0, 255)
+        //pri modify by zhuyang,B7: feed the receiver's reject scrim boost into the scrim alpha,20261023,end
         c.drawRect(0f, 0f, viewW, viewH, scrimPaint)
 
         // 版面：接收方信息贴在照片卡片正上方，整块（信息 + 卡片 + 上滑提示）纵向居中
