@@ -1378,14 +1378,22 @@ class OverlayView @JvmOverloads constructor(
         if (v) {
             receiveEnterAt = -1L
         } else {
-            //pri modify by zhuyang,Release replays only the receive entrance: the panel is already on screen and must not flash again,20261020
-            receiveEnterAt = elapsed
-            receiverRenderer.reset()
-            receiverToast = ""
+            //pri modify by zhuyang,The empty-state release runs the same receive entrance as the live switch, so both paths look identical,20261023
+            playReceiveRelease()
         }
         //pri modify by zhuyang,A fresh waiting page follows the panel timeline again,20261020,end
         invalidate()
     }
+
+    //pri added by zhuyang,One receive entrance for every path: reset the receive clock, then fade the title back in only after the card has landed,20261023,start
+    private fun playReceiveRelease() {
+        receiveEnterAt = elapsed
+        receiverRenderer.reset()
+        receiverToast = ""
+        val cardLandsAt = CARD_DELAY_MS.toLong() + receiverRenderer.fallRealMs().toLong()
+        animateHoldFade(1f, cardLandsAt, TITLE_FADE_IN_MS)
+    }
+    //pri added by zhuyang,One receive entrance for every path: reset the receive clock, then fade the title back in only after the card has landed,20261023,end
 
     //pri added by zhuyang,Live switch: hold the card and pills while the receive title fades out,20261022,start
     fun setHoldCardOnly(v: Boolean) {
@@ -1400,13 +1408,8 @@ class OverlayView @JvmOverloads constructor(
             animateHoldFade(0f)
         } else {
             holdTitleText = null //pri added by zhuyang,Live switch: the fade-in must show the new receive title,20261022
-            receiveEnterAt = elapsed
-            receiverRenderer.reset()
-            receiverToast = ""
-            //pri added by zhuyang,Live switch: the title fades in together with the landing card, not ahead of it: wait out the card delay plus its fall, then fade over TITLE_FADE_IN_MS,20261022,start
-            val cardLandsAt = CARD_DELAY_MS.toLong() + receiverRenderer.fallRealMs().toLong()
-            animateHoldFade(1f, cardLandsAt, TITLE_FADE_IN_MS)
-            //pri added by zhuyang,Live switch: the title fades in together with the landing card, not ahead of it: wait out the card delay plus its fall, then fade over TITLE_FADE_IN_MS,20261022,end
+            //pri modify by zhuyang,The live switch and the empty-state release share one entrance,20261023
+            playReceiveRelease()
         }
         invalidate()
     }
