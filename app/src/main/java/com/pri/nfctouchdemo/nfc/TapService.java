@@ -468,7 +468,14 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
                         syncPhotoCount(); //pri added by zhuyang,Pickup cleared the stale selection: refresh the photo count,20261019
                         Bus.log("相册拾取: 相册在前台且可读,但用户没有打开或勾选照片,清掉上一轮留下的选择");
                     } else {
-                        Bus.log("相册拾取: 读不到相册内容(无障碍未开启),沿用上一轮的选择");
+                        //pri modify by zhuyang,Unreadable gallery means no trustworthy selection: clear it instead of keeping the previous round,20261023,start
+                        PENDING.clear();
+                        sPublished = false; //pri added by zhuyang,Cleared from the screen side: nothing is published any more,20261016
+                        savePending();
+                        sGalleryCount = 0; //pri added by zhuyang,The gallery shows no selection: ph goes to 0,20261019
+                        syncPhotoCount(); //pri added by zhuyang,Pickup cleared the stale selection: refresh the photo count,20261019
+                        Bus.log("相册拾取: 读不到相册内容(无障碍未开启),按没有可信选择处理,清空待发");
+                        //pri modify by zhuyang,Unreadable gallery means no trustworthy selection: clear it instead of keeping the previous round,20261023,end
                     }
                     //pri added by zhuyang,The gallery is on screen and readable, and the user has neither opened nor ticked,20261016,end
                     if (bothSidesEmpty(peerCount)) return;
