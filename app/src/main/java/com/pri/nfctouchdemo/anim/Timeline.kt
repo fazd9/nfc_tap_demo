@@ -11,7 +11,6 @@ import android.view.View
  * - **常驻段** [INTRO_MS] 之后：时间轴不停，继续往前走。
  *   四边白线、边缘脉冲、上滑提示的浮动都挂在时间上，所以它们会一直动下去。
  *
- * 常驻段只剩慢动效，没必要跑满刷新率，因此自动把帧间隔放宽到 [AMBIENT_FRAME_MS]（约 30fps）。
  * 手势拖动和卡片飞走由各自的动画驱动，不受这个节流影响。
  */
 class Timeline(private val host: View) {
@@ -104,21 +103,6 @@ class Timeline(private val host: View) {
          * （[EDGE_START_MS] 起、[EDGE_REVEAL_MS] 走完），所以不再需要反解它。
          */
         const val RIPPLE_EASE = 1.18
-
-        /** 常驻段的目标帧间隔，约 30fps。 */
-        private const val AMBIENT_FRAME_MS = 33L
-
-        // 同步自 D:\A17\NFCTouchDemo 动效主线：降帧时点从 INTRO_MS 推迟到接收端那一段之后。
-        /**
-         * 帧率放宽的时点：在这之前一直跟着 vsync 跑满帧率，之后才降到 [AMBIENT_FRAME_MS]。
-         *
-         * 它**比 [INTRO_MS] 更晚**，因为接收端在落定之后还有一长段动效（按现在的速率折算：
-         * 卡片 1600ms 起落 → 2100ms 对焦完成、清晰可见 → 2300ms 收势结束
-         * （= 视频里的 14:40）→ 粒子一直飘到 **3900ms** 才完全消失（视频 16:00））。
-         * 这些原来都掉进了 30fps 区间，落地那一下的闪光/对焦收尾会看着发顿，
-         * 所以放宽时点取到它们之后。改接收端 [ReceiverRenderer] 那几段时间常量时，记得同步这一项。
-         */
-        private const val RELAX_FRAME_MS = 4000L
     }
 
     fun interface OnFrame {
@@ -141,7 +125,6 @@ class Timeline(private val host: View) {
     val introFinished: Boolean get() = elapsedMs >= INTRO_MS
 
     private var startUptime = 0L
-    private var lastEmitUptime = 0L
 
     //pri added by zhuyang,E6: blur release state; -1 = not triggered this round,20261014,start
     private var blurReleaseAt = -1L
@@ -155,13 +138,7 @@ class Timeline(private val host: View) {
             val now = SystemClock.uptimeMillis()
             val e = now - startUptime
 
-            // 常驻段只跑慢动效，限到约 30fps（但要等接收端那段落定动效也走完）
-            if (e > RELAX_FRAME_MS && now - lastEmitUptime < AMBIENT_FRAME_MS) {
-                host.postOnAnimation(this)
-                return
-            }
-            lastEmitUptime = now
-
+            //pri modify by zhuyang,Remove frame-rate throttle so animation always follows vsync,20261023
             elapsedMs = e
             onFrame?.onFrame(elapsedMs, rippleAt(elapsedMs))
             // 不停：四边白线的常驻微颤要一直在
@@ -214,7 +191,6 @@ class Timeline(private val host: View) {
         elapsedMs = 0L
         isPlaying = true
         startUptime = SystemClock.uptimeMillis()
-        lastEmitUptime = 0L
         blurReleaseAt = -1L //pri added by zhuyang,E6: a new round must not inherit the release ramp,20261014
         // 先回到 0 帧，确保上一轮的卡片 / 面板 / 白线状态被清干净。
         onFrame?.onFrame(0L, 0f)
@@ -226,7 +202,6 @@ class Timeline(private val host: View) {
         if (isPlaying) return
         isPlaying = true
         startUptime = SystemClock.uptimeMillis() - elapsedMs
-        lastEmitUptime = 0L
         host.postOnAnimation(ticker)
     }
 
