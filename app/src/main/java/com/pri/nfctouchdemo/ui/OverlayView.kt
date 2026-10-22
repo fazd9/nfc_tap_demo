@@ -3439,18 +3439,28 @@ class OverlayView @JvmOverloads constructor(
         // 发送态下 tailH 恒等于 tipH，下面几行算式一个数都没变。
         val tailH = if (mode == Mode.RECEIVE) receiveActionsHeight() else tipH
 
-        var blockH = infoH + cardH + tipGap + tailH
+        //pri modify by zhuyang,Centre on the send-page tail height in BOTH modes: centring on the taller receive tail (two pills) used to lift the title and the card by ~40px the moment the page switched, which hid the title fade,20261022,start
+        //pri modify by zhuyang,The pills simply extend into the free space below, the way the reference product keeps the title and the card still,20261022
+        val anchorTailH = tipH
+        var blockH = infoH + cardH + tipGap + anchorTailH
         if (blockH > available && available > 0f) {
-            val fit = ((available - infoH - tipGap - tailH) / cardH).coerceIn(0.4f, 1f)
+            val fit = ((available - infoH - tipGap - anchorTailH) / cardH).coerceIn(0.4f, 1f)
             cardW *= fit
             cardH = cardW * aspect
-            blockH = infoH + cardH + tipGap + tailH
+            blockH = infoH + cardH + tipGap + anchorTailH
         }
+        //pri modify by zhuyang,Centre on the send-page tail height in BOTH modes: centring on the taller receive tail (two pills) used to lift the title and the card by ~40px the moment the page switched, which hid the title fade,20261022,end
 
         // 整块（信息 + 卡片 + 上滑提示）纵向居中，但像 OPPO 那样**整体上移**一点（见 [BLOCK_LIFT_FRAC]）。
         // 上移量最多只吃掉一半的上下余量，所以卡片再高也不会顶到 padTop 外面去。
         val slack = ((available - blockH) / 2f).coerceAtLeast(0f)
-        val top = padTop + slack - min(available * BLOCK_LIFT_FRAC, slack)
+        var top = padTop + slack - min(available * BLOCK_LIFT_FRAC, slack)
+        //pri added by zhuyang,Only when a very tall card leaves no room for the pills: lift the whole block by the overflow so the buttons stay on screen,20261022,start
+        if (mode == Mode.RECEIVE) {
+            val overflow = (top + infoH + cardH + tipGap + tailH) - (viewH - padBottom)
+            if (overflow > 0f) top -= overflow
+        }
+        //pri added by zhuyang,Only when a very tall card leaves no room for the pills: lift the whole block by the overflow so the buttons stay on screen,20261022,end
         val cardTop = top + infoH
         cardRect.set(viewW / 2f - cardW / 2f, cardTop, viewW / 2f + cardW / 2f, cardTop + cardH)
 
