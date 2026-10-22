@@ -1218,7 +1218,9 @@ class OverlayView @JvmOverloads constructor(
         const val BRAND_BOTTOM_PX = 20f
 
         //pri added by zhuyang,Live switch: the receive title fades out while the card is held, then fades back in with the card,20261022,start
-        private const val HOLD_FADE_MS = 150L
+        private const val HOLD_FADE_MS = 220L
+        //pri added by zhuyang,Measured from the product video: the receive title needs about half a second to come back,20261022
+        private const val TITLE_FADE_IN_MS = 500L
         //pri added by zhuyang,Live switch: the receive title fades out while the card is held, then fades back in with the card,20261022,end
 
         /** 接收态按中的是哪个按钮（[pressedButton] 用）。 */
@@ -1270,6 +1272,17 @@ class OverlayView @JvmOverloads constructor(
     private var holdCardOnly = false
     //pri added by zhuyang,Live switch: hold the card/pills and fade the receive title while the peer preview is on its way,20261022,end
 
+    //pri added by zhuyang,Live switch: freeze the block's top for this round so the title and the card do not move while the card photo changes,20261022,start
+    private var liveAnchorTop = Float.NaN
+    private var lastSendTop = Float.NaN
+    private var liveAnchorCardTop = Float.NaN
+    private var lastSendCardTop = Float.NaN
+    //pri added by zhuyang,Live switch: freeze the block's top for this round so the title and the card do not move while the card photo changes,20261022,end
+
+    //pri added by zhuyang,Live switch: keep the old send title on screen while it fades out,20261022,start
+    private var holdTitleText: String? = null
+    //pri added by zhuyang,Live switch: keep the old send title on screen while it fades out,20261022,end
+
     //pri added by zhuyang,Live switch: the receive title fades out while the card is held, then fades back in with the card,20261022,start
     private var holdFade = 1f
     private var holdFadeAnimator: ValueAnimator? = null
@@ -1309,9 +1322,21 @@ class OverlayView @JvmOverloads constructor(
      * 改成卡片下面两个按钮（由 [ReceiverRenderer.drawActions] 画，见 [layoutReceiveActions]）。
      */
     fun setMode(mode: Mode) {
+        //pri added by zhuyang,Live switch: remember whether this call is the SEND-to-RECEIVE switch,20261022
+        val liveSwitch = this.mode == Mode.SEND && mode == Mode.RECEIVE
         this.mode = mode
         pressedButton = BUTTON_NONE
         resetSendState() //pri added by zhuyang,Drop a live drag/fly state when the identity switches,20261014
+        //pri added by zhuyang,Live switch: a fresh send page never inherits the frozen top or the held title,20261022,start
+        if (mode == Mode.SEND) {
+            liveAnchorTop = Float.NaN
+            liveAnchorCardTop = Float.NaN
+            holdTitleText = null
+        }
+        //pri added by zhuyang,Live switch: a fresh send page never inherits the frozen top or the held title,20261022,end
+        //pri added by zhuyang,Live switch: capture the old send title before refreshTexts() overwrites it,20261022,start
+        if (liveSwitch) holdTitleText = receiverText
+        //pri added by zhuyang,Live switch: capture the old send title before refreshTexts() overwrites it,20261022,end
         // 标题跟着身份走：发送态「发送给 X」、接收态「来自 X的分享」
         refreshTexts()
         invalidate()
@@ -1368,27 +1393,38 @@ class OverlayView @JvmOverloads constructor(
         holdCardOnly = v
         //pri added by zhuyang,Releasing the hold fades the title back in and replays only the receive entrance, so the card falls in exactly as it does after setWaitingForPeer(false),20261022
         if (v) {
+            //pri added by zhuyang,Live switch: freeze the receive layout on this round's send block top,20261022,start
+            if (mode == Mode.RECEIVE && !lastSendTop.isNaN()) liveAnchorTop = lastSendTop
+            if (mode == Mode.RECEIVE && !lastSendCardTop.isNaN()) liveAnchorCardTop = lastSendCardTop
+            //pri added by zhuyang,Live switch: freeze the receive layout on this round's send block top,20261022,end
             animateHoldFade(0f)
         } else {
+            holdTitleText = null //pri added by zhuyang,Live switch: the fade-in must show the new receive title,20261022
             receiveEnterAt = elapsed
             receiverRenderer.reset()
             receiverToast = ""
-            animateHoldFade(1f)
+            //pri added by zhuyang,Live switch: the title fades in together with the landing card, not ahead of it: wait out the card delay plus its fall, then fade over TITLE_FADE_IN_MS,20261022,start
+            val cardLandsAt = CARD_DELAY_MS.toLong() + receiverRenderer.fallRealMs().toLong()
+            animateHoldFade(1f, cardLandsAt, TITLE_FADE_IN_MS)
+            //pri added by zhuyang,Live switch: the title fades in together with the landing card, not ahead of it: wait out the card delay plus its fall, then fade over TITLE_FADE_IN_MS,20261022,end
         }
         invalidate()
     }
 
     //pri added by zhuyang,Live switch: one animator drives the receive title fade,20261022,start
-    private fun animateHoldFade(target: Float) {
+    //pri modify by zhuyang,Reference timing (measured from the product video): the receive title starts fading in only after the card has landed and takes about half a second,20261022,start
+    private fun animateHoldFade(target: Float, startDelayMs: Long = 0L, durationMs: Long = HOLD_FADE_MS) {
         holdFadeAnimator?.cancel()
         val animator = ValueAnimator.ofFloat(holdFade, target).apply {
-            duration = HOLD_FADE_MS
+            startDelay = startDelayMs
+            duration = durationMs
             interpolator = LinearInterpolator()
             addUpdateListener {
                 holdFade = it.animatedValue as Float
                 invalidate()
             }
         }
+    //pri modify by zhuyang,Reference timing (measured from the product video): the receive title starts fading in only after the card has landed and takes about half a second,20261022,end
         var canceled = false
         animator.addListener(object : AnimatorListenerAdapter() {
             override fun onAnimationCancel(animation: Animator) {
@@ -2005,6 +2041,7 @@ class OverlayView @JvmOverloads constructor(
         holdFadeAnimator?.cancel() //pri added by zhuyang,Live switch: a replayed round must not inherit the title fade,20261022
         holdFadeAnimator = null
         holdFade = 1f
+        holdTitleText = null //pri added by zhuyang,Live switch: a replayed round must not inherit the held title,20261022
         receiveEnterAt = -1L //pri modify by zhuyang,A replayed timeline must not inherit the receive entrance restart (see setWaitingForPeer),20261020
         invalidate()
     }
@@ -2018,6 +2055,9 @@ class OverlayView @JvmOverloads constructor(
         holdFadeAnimator?.cancel() //pri added by zhuyang,Live switch: a new round must not inherit the title fade,20261022
         holdFadeAnimator = null
         holdFade = 1f
+        liveAnchorTop = Float.NaN //pri added by zhuyang,Live switch: a new round re-centres the block instead of inheriting the previous freeze,20261022
+        liveAnchorCardTop = Float.NaN //pri added by zhuyang,Live switch: the card anchor is per round as well,20261022
+        holdTitleText = null //pri added by zhuyang,Live switch: a new round must not inherit the held title,20261022
         receiveEnterAt = -1L //pri added by zhuyang,A new round follows the panel timeline again,20261020
         invalidate()
     }
@@ -3455,14 +3495,26 @@ class OverlayView @JvmOverloads constructor(
         // 上移量最多只吃掉一半的上下余量，所以卡片再高也不会顶到 padTop 外面去。
         val slack = ((available - blockH) / 2f).coerceAtLeast(0f)
         var top = padTop + slack - min(available * BLOCK_LIFT_FRAC, slack)
+        //pri added by zhuyang,Live switch: the receive page keeps this round's send block top, so an aspect change cannot shift the title,20261022,start
+        if (mode == Mode.RECEIVE && !liveAnchorTop.isNaN()) top = liveAnchorTop
+        //pri added by zhuyang,Live switch: the receive page keeps this round's send block top, so an aspect change cannot shift the title,20261022,end
         //pri added by zhuyang,Only when a very tall card leaves no room for the pills: lift the whole block by the overflow so the buttons stay on screen,20261022,start
         if (mode == Mode.RECEIVE) {
             val overflow = (top + infoH + cardH + tipGap + tailH) - (viewH - padBottom)
             if (overflow > 0f) top -= overflow
         }
         //pri added by zhuyang,Only when a very tall card leaves no room for the pills: lift the whole block by the overflow so the buttons stay on screen,20261022,end
-        val cardTop = top + infoH
+        var cardTop = top + infoH
+        //pri added by zhuyang,Live switch: freeze the card top too - infoH follows the card aspect, so an aspect change would still nudge the card a few px,20261022,start
+        if (mode == Mode.RECEIVE && !liveAnchorCardTop.isNaN()) cardTop = liveAnchorCardTop
+        //pri added by zhuyang,Live switch: freeze the card top too - infoH follows the card aspect, so an aspect change would still nudge the card a few px,20261022,end
         cardRect.set(viewW / 2f - cardW / 2f, cardTop, viewW / 2f + cardW / 2f, cardTop + cardH)
+        //pri added by zhuyang,Live switch: remember this round's send block top so a live switch can freeze the receive layout on it,20261022,start
+        if (mode == Mode.SEND) {
+            lastSendTop = top
+            lastSendCardTop = cardTop
+        }
+        //pri added by zhuyang,Live switch: remember this round's send block top so a live switch can freeze the receive layout on it,20261022,end
 
         // 接收端：卡片的位置与形状不吃 layoutCard 那一套，按 v6 的「小椭圆落下 → 长大 →
         // 展开成圆角矩形」单独算一次（见 [ReceiverRenderer]）。**落点就是上面版面算出来的
@@ -3518,10 +3570,12 @@ class OverlayView @JvmOverloads constructor(
             // 信息行画在卡片**之上**：照片是从屏幕顶上落下来的，途中必然经过这一行，
             // 压在下面就会被"吃掉"半个字。落定之后的间距仍然就是卡片的 infoGap。
             if (textAlpha * recvAlpha > 0.003f) {
+                //pri modify by zhuyang,Live switch: draw the held send title while it fades out,20261022,start
                 drawReceiverInfo(
                     c, top + lineH / 2f + recvShiftY - (fm1.ascent + fm1.descent) / 2f,
-                    fm1, lineH, textAlpha * recvAlpha * holdFade //pri modify by zhuyang,Live switch: the receive title fades out while the card is held,20261022
+                    fm1, lineH, holdTitleText ?: receiverText, textAlpha * recvAlpha * holdFade //pri modify by zhuyang,Live switch: the receive title fades out while the card is held,20261022
                 )
+                //pri modify by zhuyang,Live switch: draw the held send title while it fades out,20261022,end
             }
             if (receiverToast.isNotEmpty() && !holdCardOnly) { //pri modify by zhuyang,Live switch: no toast while the card is held,20261022
                 receiverRenderer.drawToast(c, k, viewW / k, viewH / k, receiverToast)
@@ -3533,7 +3587,7 @@ class OverlayView @JvmOverloads constructor(
             if (textAlpha * recvAlpha > 0.003f) {
                 drawReceiverInfo(
                     c, top + lineH / 2f + recvShiftY - (fm1.ascent + fm1.descent) / 2f,
-                    fm1, lineH, textAlpha * recvAlpha
+                    fm1, lineH, receiverText, textAlpha * recvAlpha //pri modify by zhuyang,Pass the title explicitly so the receive branch can draw the held one,20261022
                 )
             }
             drawCard(c)
@@ -3558,7 +3612,7 @@ class OverlayView @JvmOverloads constructor(
     /** 接收方信息：单行、居中，压在照片卡片正上方。 */
     private fun drawReceiverInfo(
         c: Canvas, top: Float,
-        fm: Paint.FontMetrics, lineH: Float, alpha: Float
+        fm: Paint.FontMetrics, lineH: Float, text: String, alpha: Float //pri modify by zhuyang,Draw the caller's title so the receive branch can show the held send title,20261022
     ) {
         // **不用 bold**（需求）：SANS_SERIF.NORMAL，字重和下面"上滑发送"那行统一。
         // 想要"不叫 bold 但略重一点"的系统观感，就把这里换成
@@ -3569,9 +3623,9 @@ class OverlayView @JvmOverloads constructor(
         textPaint.letterSpacing = 0.012f
         textPaint.color = withAlpha(0xFFFFFFFF.toInt(), alpha)
         textPaint.setShadowLayer(12f * k, 0f, 2f * k, withAlpha(0xFF000000.toInt(), 0.55f * alpha))
-        val textW = textPaint.measureText(receiverText)
+        val textW = textPaint.measureText(text) //pri modify by zhuyang,Live switch: measure the title the caller asked for,20261022
         c.drawText(
-            receiverText, viewW / 2f - textW / 2f,
+            text, viewW / 2f - textW / 2f, //pri modify by zhuyang,Live switch: draw the title the caller asked for,20261022
             top + lineH / 2f - (fm.ascent + fm.descent) / 2f,
             textPaint
         )
