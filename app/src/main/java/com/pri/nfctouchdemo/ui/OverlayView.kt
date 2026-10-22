@@ -951,15 +951,9 @@ class OverlayView @JvmOverloads constructor(
         // 发送收尾的时长**不在这里写死**：它和接收端的下落严格同步，
         // 用 [ReceiverRenderer.fallRealMs]（= FALL_MS / TIME_RATE ≈ 324ms）当场取 —— 见 [startFlyAway]。
 
-        /**
-         * 卡片飞走之后，隔多久复位时间轴、重播入场。
-         *
-         * 原来这段时间里屏幕中央会弹一枚「已发送」药丸（`TOAST_DELAY_MS` 260ms 出场、
-         * 250ms 淡入、1.75s 后连它一起收掉）；提示按需求去掉之后，
-         * 这个延迟就只剩下"让飞走那 460ms 自己跑完、再留一小段空屏"的作用。
-         * 给 0 = 卡片刚飞出去就立刻重播。
-         */
-        const val RESET_DELAY_MS = 1750L
+        //pri added by zhuyang,Post-swipe tail: page stays FLY_TAIL_MS after the card has finished flying,20261022,start
+        private const val FLY_TAIL_MS = 150L
+        //pri added by zhuyang,Post-swipe tail: page stays FLY_TAIL_MS after the card has finished flying,20261022,end
 
         // ---- 卡片形变：照参考片量出来的关键帧 ----
         //
@@ -1221,6 +1215,9 @@ class OverlayView @JvmOverloads constructor(
         //pri added by zhuyang,C-3: brand line "一键互联" at the very bottom, below the status line,20261014
         const val BRAND_BOTTOM_PX = 20f
 
+        //pri added by zhuyang,Live switch: crossfade from the send title to the receive title over this long,20261022
+        private const val TITLE_CROSSFADE_MS = 120L
+
         /** 接收态按中的是哪个按钮（[pressedButton] 用）。 */
         const val BUTTON_NONE = 0
         const val BUTTON_PRIMARY = 1
@@ -1265,6 +1262,10 @@ class OverlayView @JvmOverloads constructor(
     private var receiveEnterAt = -1L
     //pri added by zhuyang,Receive entrance clock: -1 follows the panel timeline; >= 0 is the raw elapsed at which it restarted,20261020,end
     //pri added by zhuyang,Empty state: the page is up but every element waits for the peer's offer,20261014,end
+
+    //pri added by zhuyang,Live switch: hold only the card/pills (keep scrim, title and brand) while the peer preview is on its way,20261022,start
+    private var holdCardOnly = false
+    //pri added by zhuyang,Live switch: hold only the card/pills (keep scrim, title and brand) while the peer preview is on its way,20261022,end
 
     /** 接收态两个按钮的矩形（屏幕 px）。**绘制和命中判定读的是同一份**，见 [layoutReceiveActions]。 */
     private val receivePrimaryRect = RectF()
@@ -1352,6 +1353,20 @@ class OverlayView @JvmOverloads constructor(
         //pri modify by zhuyang,A fresh waiting page follows the panel timeline again,20261020,end
         invalidate()
     }
+
+    //pri added by zhuyang,Live switch: hold only the card and pills, keep scrim/title/brand on screen,20261022,start
+    fun setHoldCardOnly(v: Boolean) {
+        if (holdCardOnly == v) return
+        holdCardOnly = v
+        //pri added by zhuyang,Releasing the hold replays only the receive entrance: the card falls in exactly as it does after setWaitingForPeer(false),20261022
+        if (!v) {
+            receiveEnterAt = elapsed
+            receiverRenderer.reset()
+            receiverToast = ""
+        }
+        invalidate()
+    }
+    //pri added by zhuyang,Live switch: hold only the card and pills, keep scrim/title/brand on screen,20261022,end
 
     //pri added by zhuyang,Replay only the receive entrance (card falling in) without rewinding the panel timeline,20261020,start
     fun replayReceiveEntrance() {
@@ -1730,6 +1745,10 @@ class OverlayView @JvmOverloads constructor(
 
     // 当前生效的文案：默认是上面那几条，[setPeerInfo] / [setCardInfo] 会覆盖
     private var receiverText = defaultReceiverText
+    //pri added by zhuyang,Live switch: previous title and the time it changed, used for the TITLE_CROSSFADE_MS crossfade,20261022,start
+    private var prevReceiverText: String? = null
+    private var receiverTextChangedAt = 0L
+    //pri added by zhuyang,Live switch: previous title and the time it changed, used for the TITLE_CROSSFADE_MS crossfade,20261022,end
     private var swipeTipText = defaultSwipeTipText
     // 卡片标题 / 副标题：默认是内置文案，选了照片之后由 [setCardInfo] 换成真文件名和大小
     private var cardTitle = defaultCardTitle
@@ -1768,12 +1787,23 @@ class OverlayView @JvmOverloads constructor(
      */
     private fun refreshTexts() {
         val name = peer
-        receiverText = when {
+        val newReceiverText = when {
             name == null -> defaultReceiverText
             mode == Mode.RECEIVE -> context.getString(R.string.peer_title_receive, name)
             sendTextsFromPeer -> context.getString(R.string.peer_title_send, name)
             else -> defaultReceiverText
         }
+        //pri added by zhuyang,Live switch: remember the replaced title so the receive page can crossfade into it,20261022,start
+        if (newReceiverText != receiverText) {
+            if (mode == Mode.RECEIVE) {
+                prevReceiverText = receiverText
+                receiverTextChangedAt = elapsed
+            } else {
+                prevReceiverText = null
+            }
+        }
+        receiverText = newReceiverText
+        //pri added by zhuyang,Live switch: remember the replaced title so the receive page can crossfade into it,20261022,end
         // 发送页不认「N 张照片」时把张数当 0：上滑提示与卡片副标题都保持 Test 原样
         val count = if (mode == Mode.SEND && !sendTextsFromPeer) 0 else peerCount
         swipeTipText = if (count > 0) {
@@ -2068,7 +2098,7 @@ class OverlayView @JvmOverloads constructor(
         // 白线的显形由 edgeReveal 决定（水波出现 0.5s 后才起步，见 applyTimeline）；
         // 在那之前整圈不画 —— 包括辉光，否则边框会先于水波出现。
         //pri added by zhuyang,Empty state: page up (blur + ripple + edge line only), panel held back until the peer offers,20261014
-        if (!waitingForPeer && panelElapsed >= Timeline.PANEL_MS) drawTransferPanel(canvas)
+        if ((!waitingForPeer || holdCardOnly) && panelElapsed >= Timeline.PANEL_MS) drawTransferPanel(canvas) //pri modify by zhuyang,Live switch: a held-card page still draws the panel (scrim/title/brand),20261022
         if (edgeReveal > 0f) drawEdgeGlow(canvas)
     }
 
@@ -3435,13 +3465,15 @@ class OverlayView @JvmOverloads constructor(
             // 接收端：卡片 + 落光柱 + 落地闪光 + 粒子尾迹 + 两个按钮，一把交给渲染器
             // （层序照 v6：光晕 → 卡片 → 粒子，闪光/白洗都在 drawCard 里面）。
             val f = receiverFrame
-            if (f != null) {
+            //pri modify by zhuyang,Live switch: while holding, skip only the card and the two pills; scrim/title/brand stay,20261022,start
+            if (f != null && !holdCardOnly) {
                 // 接收端：卡片按 v6 的「小卡片落下 → 等比长大」画，
                 // 落光柱和粒子尾迹都在这个方法里（层序：光柱 → 卡片 → 粒子）。
                 receiverRenderer.drawCard(c, f, cardPhoto, k, viewW / k, viewH / k)
                 receiverRenderer.drawActions(c, f, k, viewW / k)
                 // 接收后的反馈照主线来：两枚按钮自己淡出 + 卡片轻放大（不再交叉淡入成「取消」胶囊）
             }
+            //pri modify by zhuyang,Live switch: while holding, skip only the card and the two pills; scrim/title/brand stay,20261022,end
             // 信息行画在卡片**之上**：照片是从屏幕顶上落下来的，途中必然经过这一行，
             // 压在下面就会被"吃掉"半个字。落定之后的间距仍然就是卡片的 infoGap。
             if (textAlpha * recvAlpha > 0.003f) {
@@ -3450,7 +3482,7 @@ class OverlayView @JvmOverloads constructor(
                     fm1, lineH, textAlpha * recvAlpha
                 )
             }
-            if (receiverToast.isNotEmpty()) {
+            if (receiverToast.isNotEmpty() && !holdCardOnly) { //pri modify by zhuyang,Live switch: no toast while the card is held,20261022
                 receiverRenderer.drawToast(c, k, viewW / k, viewH / k, receiverToast)
             }
         } else {
@@ -3494,16 +3526,31 @@ class OverlayView @JvmOverloads constructor(
         textPaint.typeface = normal
         textPaint.textSize = 14f * k
         textPaint.letterSpacing = 0.012f
+        val baseline = top + lineH / 2f - (fm.ascent + fm.descent) / 2f
+        //pri added by zhuyang,Live switch: crossfade the old send title out and the receive title in over TITLE_CROSSFADE_MS,20261022,start
+        val prev = prevReceiverText
+        if (mode == Mode.RECEIVE && prev != null) {
+            val u = ((elapsed - receiverTextChangedAt).toFloat() / TITLE_CROSSFADE_MS).coerceIn(0f, 1f)
+            if (u < 1f) {
+                drawReceiverTextLine(c, prev, baseline, alpha * (1f - u))
+                drawReceiverTextLine(c, receiverText, baseline, alpha * u)
+                return
+            }
+            prevReceiverText = null
+        }
+        //pri added by zhuyang,Live switch: crossfade the old send title out and the receive title in over TITLE_CROSSFADE_MS,20261022,end
+        drawReceiverTextLine(c, receiverText, baseline, alpha)
+    }
+
+    //pri added by zhuyang,Shared single-line draw for the receiver title, also used by the crossfade,20261022,start
+    private fun drawReceiverTextLine(c: Canvas, text: String, baseline: Float, alpha: Float) {
         textPaint.color = withAlpha(0xFFFFFFFF.toInt(), alpha)
         textPaint.setShadowLayer(12f * k, 0f, 2f * k, withAlpha(0xFF000000.toInt(), 0.55f * alpha))
-        val textW = textPaint.measureText(receiverText)
-        c.drawText(
-            receiverText, viewW / 2f - textW / 2f,
-            top + lineH / 2f - (fm.ascent + fm.descent) / 2f,
-            textPaint
-        )
+        val textW = textPaint.measureText(text)
+        c.drawText(text, viewW / 2f - textW / 2f, baseline, textPaint)
         textPaint.clearShadowLayer()
     }
+    //pri added by zhuyang,Shared single-line draw for the receiver title, also used by the crossfade,20261022,end
 
     private fun drawCard(c: Canvas) {
         if (cardRect.width() <= 0f) return
@@ -3936,7 +3983,7 @@ class OverlayView @JvmOverloads constructor(
     private fun onReceiveTouch(event: MotionEvent): Boolean {
         //pri added by zhuyang,Empty state: the pills are not drawn, so they must not be tappable either (the rects below,20261014
         //pri added by zhuyang,would otherwise be recomputed from a stale cardRect of the previous round),20261014
-        if (waitingForPeer) return false
+        if (waitingForPeer || holdCardOnly) return false //pri modify by zhuyang,Live switch: the pills are not drawn while the card is held, so they must not be tappable,20261022
         if (elapsed < Timeline.PANEL_MS) return false
         // 触摸可能先于第一帧到来：按同一套几何补算一次，保证判定用的矩形就是将要画出来的那两个
         layoutReceiveActions()
@@ -4119,7 +4166,10 @@ class OverlayView @JvmOverloads constructor(
             }
             start()
         }
-        resetRunnable = Runnable { finishSend() }.also { postDelayed(it, RESET_DELAY_MS) }
+        //pri modify by zhuyang,Post-swipe tail: reset only FLY_TAIL_MS after the fly-away animator has finished,20261022,start
+        val tailMs = receiverRenderer.fallRealMs().toLong() + FLY_TAIL_MS
+        resetRunnable = Runnable { finishSend() }.also { postDelayed(it, tailMs) }
+        //pri modify by zhuyang,Post-swipe tail: reset only FLY_TAIL_MS after the fly-away animator has finished,20261022,end
     }
 
     private fun finishSend() {

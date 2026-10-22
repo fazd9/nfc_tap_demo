@@ -281,6 +281,8 @@ class OverlayService : Service() {
         hideFailBanner()
         cancelDissolve() //pri added by zhuyang,E5: the new round owns the window,20261014
         cancelReceiveEntranceFallback() //pri added by zhuyang,A send page owns the window: drop any pending receive reveal,20261020
+        //pri added by zhuyang,Live switch: a fresh send page never inherits the held-card state of a previous round,20261022
+        if (rootView != null) overlay.setHoldCardOnly(false)
         waitingForPeer = false //pri added by zhuyang,Empty state: a send page never waits for a peer offer,20261014
         mode = OverlayView.Mode.SEND
         receiveOwnsBackdrop = false //pri modify by zhuyang,A new send page owns its own captured backdrop,20261020
@@ -376,12 +378,16 @@ class OverlayService : Service() {
             waitingForPeer = true
             photoUri = null
             overlay.setCardPhoto(null)
-            overlay.setWaitingForPeer(true)
+            //pri modify by zhuyang,Live switch: hold only the card and pills; the scrim, title and brand stay on screen,20261022,start
+            overlay.setHoldCardOnly(true)
+            //pri modify by zhuyang,Live switch: hold only the card and pills; the scrim, title and brand stay on screen,20261022,end
             armReceiveEntranceFallback()
             //pri added by zhuyang,Live switch: hide this phone's send photo and hold every element until the peer preview arrives,20261020,end
             return
         }
         //pri added by zhuyang,Live switch: a SEND page visible at entry becomes the RECEIVE card in place,20261014,end
+        //pri added by zhuyang,Live switch: every path except the in-place switch starts with the card unheld,20261022
+        if (rootView != null) overlay.setHoldCardOnly(false)
         //pri modify by zhuyang,The empty state captured this phone's own screen: that backdrop belongs to this phone too and must survive the peer photo,20261020
         receiveOwnsBackdrop = waiting
 
@@ -421,6 +427,7 @@ class OverlayService : Service() {
                 waitingForPeer = false
                 overlay.setCardPhoto(null)
                 overlay.setWaitingForPeer(false)
+                overlay.setHoldCardOnly(false) //pri added by zhuyang,Live switch: the fallback reveals the held page, release the card and pills,20261022
                 overlay.replayReceiveEntrance()
             }
         }
@@ -458,6 +465,7 @@ class OverlayService : Service() {
                 decodedPhoto = uri
                 decodedReceive = usePeerAsBackdrop //pri modify by zhuyang,Only mark a receive decode when the peer photo also became the backdrop,20261019
                 overlay.setWaitingForPeer(false) //pri added by zhuyang,Empty state: the peer is sending, so the card may show now,20261014
+                overlay.setHoldCardOnly(false) //pri added by zhuyang,Live switch: the peer preview arrived, release the card and pills,20261022
                 picture?.let { overlay.setCardPhoto(it) }
                 background?.let {
                     backdropUri = uri
@@ -953,6 +961,7 @@ class OverlayService : Service() {
         cancelReceiveEntranceFallback() //pri added by zhuyang,A detached page must not replay its receive entrance,20261020
         cancelBackKeyFallback() //pri added by zhuyang,A detached page must not dismiss again on a stale back DOWN,20261021
         val content = rootView ?: return
+        overlay.setHoldCardOnly(false) //pri added by zhuyang,Live switch: a detached page must not carry the held-card state into the next attach,20261022
         startRunnable?.let { overlay.removeCallbacks(it) }
         startRunnable = null
         cancelDissolve() //pri added by zhuyang,E5: drop a pending dissolve along with the auto-demo callback,20261014
@@ -986,12 +995,15 @@ class OverlayService : Service() {
             .onFailure { Log.e(TAG, "更新悬浮窗布局失败", it) }
     }
 
-    /** 挂上窗口后延迟一小会儿自动演示一遍入场动效。 */
+    /** 挂上窗口后马上自动演示一遍入场动效。 */
     private fun scheduleAutoDemo() {
         startRunnable?.let { overlay.removeCallbacks(it) }
         val runnable = Runnable { replayDemo() }
         startRunnable = runnable
-        overlay.postDelayed(runnable, 420L)
+        //pri modify by zhuyang,Start on the next frame: the 420ms wait is gone, so the first frame carries the wave immediately,20261022,start
+        //pri modify by zhuyang,replayDemo only resets state and calls timeline.play, which posts onFrame(0) and the first ticker via postOnAnimation: safe before the first layout,20261022
+        overlay.post(runnable)
+        //pri modify by zhuyang,Start on the next frame: the 420ms wait is gone, so the first frame carries the wave immediately,20261022,end
     }
 
     private fun uriExtra(intent: Intent?, key: String): Uri? =
