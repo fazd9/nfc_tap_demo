@@ -673,14 +673,22 @@ class OverlayService : Service() {
 
     /** 「停止演示」：摘掉窗口、停掉时间轴，服务不动（视图树留着，下次直接复用）。 */
     private fun hideDemo(intent: Intent? = null) {
+        //pri modify by zhuyang,B6: ACTION_HIDE still carries the fade window; the fade+detach itself is shared by every exit path,20261023,start
+        val fadeMs = intent?.getLongExtra(EXTRA_FADE_MS, 0L) ?: 0L
+        hideDemoWithFade(fadeMs)
+        //pri modify by zhuyang,B6: ACTION_HIDE still carries the fade window; the fade+detach itself is shared by every exit path,20261023,end
+    }
+
+    //pri added by zhuyang,B6: fade the whole root view (canvas and GL backdrop together), then detach,20261023,start
+    private fun hideDemoWithFade(fadeMs: Long) {
         hideFailBanner()
         cancelReceiveEntranceFallback() //pri added by zhuyang,The page is going away: a pending receive reveal has nothing left to reveal,20261020
-        //pri added by zhuyang,E5: ACTION_HIDE may carry EXTRA_FADE_MS: fade the panel out, then detach,20261014,start
-        val fadeMs = intent?.getLongExtra(EXTRA_FADE_MS, 0L) ?: 0L
         if (fadeMs > 0L && attached) {
             timeline.releaseBlur()
-            overlay.fadeOutPanel(PANEL_DISSOLVE_MS)
             cancelDissolve()
+            val content = rootView
+            content?.animate()?.cancel()
+            content?.animate()?.alpha(0f)?.setDuration(fadeMs)?.setInterpolator(android.view.animation.LinearInterpolator())?.start()
             val runnable = Runnable {
                 dissolveRunnable = null
                 detachOverlay()
@@ -690,10 +698,10 @@ class OverlayService : Service() {
             ensureForeground()
             return
         }
-        //pri added by zhuyang,E5: ACTION_HIDE may carry EXTRA_FADE_MS: fade the panel out, then detach,20261014,end
         if (rootView != null) detachOverlay()
         ensureForeground()
     }
+    //pri added by zhuyang,B6: fade the whole root view (canvas and GL backdrop together), then detach,20261023,end
 
     //pri added by zhuyang,E5: a pending dissolve must never detach the next round's window,20261014,start
     private fun cancelDissolve() {
@@ -747,7 +755,7 @@ class OverlayService : Service() {
         //pri modify by zhuyang,Exit sync: both modes report a session cancel; the reject pill keeps its own verdict,20261020,start
         notifyNfc(ACTION_UI_SESSION_CANCELLED)
         //pri modify by zhuyang,Exit sync: both modes report a session cancel; the reject pill keeps its own verdict,20261020,end
-        hideDemo()
+        hideDemoWithFade(PANEL_DISSOLVE_MS) //pri modify by zhuyang,B6: Back / Home exits fade the window over 150ms before detaching,20261023
         //pri added by zhuyang,Drop a live drag / fly / dissolve so the detached view tree does not carry it into the next round,20261014
         overlay.resetSendState()
     }
@@ -762,7 +770,7 @@ class OverlayService : Service() {
         //pri modify by zhuyang,Exit sync: a screen-off is an exit from either page, so both send the session cancel,20261020,start
         notifyNfc(ACTION_UI_SESSION_CANCELLED)
         //pri modify by zhuyang,Exit sync: a screen-off is an exit from either page, so both send the session cancel,20261020,end
-        hideDemo()
+        hideDemoWithFade(PANEL_DISSOLVE_MS) //pri modify by zhuyang,B6: screen-off fades the window over 150ms before detaching,20261023
         overlay.resetSendState()
     }
     //pri modify by zhuyang,Screen-off path: take the page down and tell the peer,20261020,end
@@ -930,6 +938,10 @@ class OverlayService : Service() {
     private fun attachOverlay() {
         val content = rootView ?: return
         cancelDissolve() //pri added by zhuyang,E5: a pending dissolve must not take the fresh window down,20261014
+        //pri added by zhuyang,B6: a new round must not inherit the previous exit fade - also covers reviving an attached window mid-fade,20261023,start
+        content.animate().cancel()
+        content.alpha = 1f
+        //pri added by zhuyang,B6: a new round must not inherit the previous exit fade - also covers reviving an attached window mid-fade,20261023,end
         if (attached) {
             ensureForeground()
             return
