@@ -670,8 +670,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
             Uri u = previewUriOrNull();
             if (u != null) startService(OverlayService.photoIntent(this, u)); // 卡片换成对方刚发来的整图
         }
-        startService(OverlayService.statusIntent(this, "已收到 " + index + "/" + Math.max(total, index) + " 张"
-                + (saved ? ",已存入相册" : "")));
+        //pri modify by zhuyang,Removed per-image receive count status push,20261023
     }
 
     /** 对方发送完毕:把本次收到的全部图交给查看器(用户已确认接收就打开)。 */
@@ -683,7 +682,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         mBmps.clear();
         if (bmps != null) mBmps.addAll(bmps);
         if (mReceiveShown) {
-            startService(OverlayService.statusIntent(this, "已收到 " + mFullCount + " 张,请确认接收"));
+            //pri modify by zhuyang,Removed receive-done count status push,20261023
             if (mAccepted) {
                 mReceiveShown = false;
                 // 用户已经点过"接收":动效层没别的用途了,先摘掉它的窗口再开查看器

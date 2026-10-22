@@ -1305,7 +1305,7 @@ class OverlayView @JvmOverloads constructor(
     /** 本帧渲染器算出来的几何（**设计空间**，380 宽；取用时要乘 [k]）。 */
     private var receiverFrame: ReceiverRenderer.Frame? = null
 
-    /** 底部那条提示（正在接收 / 已接收 / 已拒绝）；空串就不画。 */
+    /** 底部那条提示（正在接收 / 已拒绝）；空串就不画。 */
     private var receiverToast: String = ""
 
     /** 上滑确认是否已经回调过（一次手势只回调一次，见 [startFlyAway]）。 */
@@ -1832,8 +1832,7 @@ class OverlayView @JvmOverloads constructor(
     /** 接收态次按钮文案（「拒绝」）。 */
     private var receiveRejectText = context.getString(R.string.receive_reject)
 
-    /** 「已接收」提示条：有真实张数就用带张数那句，否则退回主线写死"1 张"的 [ReceiverRenderer.TOAST_ACCEPTED]。 */
-    private var receiveToastAcceptedText = ReceiverRenderer.TOAST_ACCEPTED
+    //pri modify by zhuyang,Removed unused accepted toast text field,20261023
 
     /**
      * 发送页要不要用 NFC 层给过来的对端标识 / 张数改写文案。
@@ -1882,13 +1881,9 @@ class OverlayView @JvmOverloads constructor(
         }
         receiveRejectText = context.getString(R.string.receive_reject)
         // 同步自主线接收端：主按钮那一行字现在由 [ReceiverRenderer] 画（它自带的是写死"1 张"的主线文案），
-        // 所以把按**真实张数**算出来的这一句交给它；「已接收」提示条同理，张数未知时退回主线那句。
+        // 所以把按**真实张数**算出来的这一句交给它。
         receiverRenderer.acceptLabel = receiveAcceptText
-        receiveToastAcceptedText = if (peerCount > 0) {
-            context.getString(R.string.receive_toast_accepted_count, peerCount)
-        } else {
-            ReceiverRenderer.TOAST_ACCEPTED
-        }
+        //pri modify by zhuyang,Removed accepted toast text assignment,20261023
     }
 
     /**
@@ -4098,15 +4093,10 @@ class OverlayView @JvmOverloads constructor(
                 parent?.requestDisallowInterceptTouchEvent(false)
                 if (pressed == BUTTON_PRIMARY) {
                     if (receivePrimaryRect.contains(event.x, event.y)) {
-                        // v6 的接收反馈：卡片轻放大 + 两枚按钮淡出，提示先「正在接收」再「已接收」
+                        // v6 的接收反馈：卡片轻放大 + 两枚按钮淡出，提示「正在接收」
                         receiverRenderer.accept(receiveElapsed) //pri modify by zhuyang,Receive entrance clock,20261020
                         receiverToast = ReceiverRenderer.TOAST_RECEIVING
-                        postDelayed({
-                            if (receiverToast == ReceiverRenderer.TOAST_RECEIVING) {
-                                receiverToast = receiveToastAcceptedText
-                            }
-                            invalidate()
-                        }, 850L)
+                        //pri modify by zhuyang,Removed delayed accepted toast,20261023
                         // 事件层归我们：通知 NFC 层打开旧查看器 / 收起窗口
                         onReceiveAccepted?.invoke()
                     }
