@@ -254,6 +254,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         // ---- 以下三个分支:动效层(OverlayService)的"用户操作回执",等价于旧 SendPage/ReceivePage 的 Listener ----
         if (intent != null && OverlayService.ACTION_UI_SEND_CONFIRMED.equals(intent.getAction())) {
             // 等价于旧 SendPage.Listener.onSwipedSend():上滑过阈值那一刻
+            Bus.log("[S] 收到上滑回执 pending=" + PENDING.size() + " xfer=" + (sXfer == null ? "null" : "ok")); //pri added by zhuyang,Diagnostic: send-confirmed receipt,20261021
             if (sXfer == null || PENDING.isEmpty()) return START_STICKY;
             if (mRoleYielded) { //pri added by zhuyang,Already lost the role race this round: never send,20261017
                 Bus.log("服务: 本轮已让出接收,忽略这次上滑");
@@ -261,6 +262,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
             }
             //pri modify by zhuyang,Swipe now declares the sender role and triggers the link negotiation,20261014,start
             mUserWantsSend = true;
+            Bus.log("[S] 上滑 → setSenderRole linkReady=" + mLinkReady + " sendStarted=" + mSendStarted); //pri added by zhuyang,Diagnostic: role declaration,20261021
             if (!sXfer.setSenderRole()) { //pri modify by zhuyang,Peer announced ROLE(S) first: yield instead of sending,20261017
                 Bus.log("服务: 对端先上滑,本机让出,不发送");
                 mUserWantsSend = false;
@@ -270,12 +272,14 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
             }
             if (mLinkReady) {
                 if (!mSendStarted) {
+                    Bus.log("[S] 链路已就绪,直接 sendImages(" + PENDING.size() + ")"); //pri added by zhuyang,Diagnostic: send on the ready link,20261021
                     mSendStarted = true;
                     sXfer.sendImages(new ArrayList<Uri>(PENDING));
                 }
                 return START_STICKY;
             }
             sXfer.startAsSender();
+            Bus.log("[S] 链路未就绪,startAsSender()"); //pri added by zhuyang,Diagnostic: connection strategy requested,20261021
             //pri modify by zhuyang,Swipe now declares the sender role and triggers the link negotiation,20261014,end
         }
         //pri added by zhuyang,Exit sync: the send page went away on this phone (Back / Home / Recents / screen off / gesture),20261020,start
@@ -518,6 +522,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         mBmps.clear();
         //pri added by zhuyang,Reset the receive counters and viewer list so nothing from the previous round leaks in,20261019,end
         //pri added by zhuyang,New round: role flags reset,20261014,end
+        Bus.log("[T] 新轮复位 send=" + mSendShown + " recv=" + mReceiveShown + " pend=" + PENDING.size() + " gallery=" + sGalleryCount + " link=" + mLinkReady); //pri added by zhuyang,Diagnostic: per-round reset snapshot,20261021
     }
     //pri added by zhuyang,Per-round state reset, moved out of onPeerAfterSelection so the gate can run after the gallery pickup,20261020,end
 
@@ -549,6 +554,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         }
         Bus.log("承载: NFC 角色=" + (nfcRole == null ? "缺失" : nfcRole)
                 + " → 本机" + (apOwner ? "是" : "不是") + " AP owner");
+        Bus.log("[T] 本轮角色 role=" + (nfcRole == null ? "null" : nfcRole) + " apOwner=" + apOwner + " localPhotos=" + sGalleryCount + " peerPh=" + field(payload,"ph") + " hasPending=" + hasPending()); //pri added by zhuyang,Diagnostic: per-round role snapshot,20261021
         x.setApOwner(apOwner);
         if (apOwner) {
             x.startHotspot();
@@ -595,6 +601,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
                 final Uri backdrop = (captured != null) ? captured : photo;
                 // 带上对端标识和张数:动效页标题就是产品里那句「发送给 用户XXXX」,
                 // 上滑提示是「上滑发送 N 张照片」(不给 peer 时会退回动效层自带的默认文案)。
+                Bus.log("[S] 拉起发送页 photos=" + PENDING.size() + " peer=" + mPeerLabel); //pri added by zhuyang,Diagnostic: send page raised,20261021
                 startForegroundService(OverlayService.intent(
                         TapService.this, backdrop, photo, mPeerLabel, PENDING.size()));
             }});
@@ -632,6 +639,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
     }
 
     @Override public void onSendStarted(int total) {
+        Bus.log("[R] 对端开始发送 total=" + total + " sendShown=" + mSendShown + " recvShown=" + mReceiveShown); //pri added by zhuyang,Diagnostic: peer offer arrived,20261021
         //pri modify by zhuyang,Receive card appears here (with the real count) instead of at tap time,20261014,start
         if (mUserWantsSend && !mRoleYielded) return; //pri modify by zhuyang,After yielding the send intent no longer blocks the receive card,20261017
         if (mRejected) return;
@@ -650,6 +658,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
 
     @Override
     public void onImageReceived(int index, int total, Bitmap bmp, int bytes, boolean saved) {
+        Bus.log("[R] 收到第 " + index + "/" + total + " 张 " + bytes + "B saved=" + saved); //pri added by zhuyang,Diagnostic: per-image receive,20261021
         cancelReceiveIdleTimeout(); //pri added by zhuyang,Data is flowing: this card is not idle any more,20261020
         mFullCount = index;
         mLastBmp = bmp;
@@ -667,6 +676,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
 
     /** 对方发送完毕:把本次收到的全部图交给查看器(用户已确认接收就打开)。 */
     @Override public void onTransferDone(java.util.List<Bitmap> bmps) {
+        Bus.log("[R] 接收完成 张数=" + (bmps == null ? 0 : bmps.size()) + " accepted=" + mAccepted); //pri added by zhuyang,Diagnostic: receive stream finished,20261021
         mTransferDone = true;
         //pri added by zhuyang,Liveness probe: the round's data is complete, no peer should wait on this page,20261020
         if (sXfer != null) sXfer.setRoundLive(false);
@@ -789,6 +799,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
     }
 
     private void handleTransferError(XferError err) {
+        Bus.log("[T] 传输错误 code=" + err.code + " stage=" + err.stage + " detail=" + err.detail); //pri added by zhuyang,Diagnostic: coded failure entry,20261021
         mLastErrorAt = android.os.SystemClock.elapsedRealtime();
         //pri added by zhuyang,Exit sync: the peer is gone, so this phone closes silently like the peer did,20261020,start
         if (err.code == XferError.PEER_GONE) {
@@ -938,6 +949,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
 
     //pri added by zhuyang,Role convergence UI: peer swiped first / this phone yielded,20261017,start
     @Override public void onPeerSwipedFirst() {
+        Bus.log("[R] onPeerSwipedFirst"); //pri added by zhuyang,Diagnostic: peer announced sender role first,20261021
         Bus.log("服务: 对端先上滑(ROLE=S),本机准备接收");
         mMain.post(new Runnable() { @Override public void run() {
             if (mRejected) return;
@@ -960,6 +972,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
     }
 
     @Override public void onRoleYielded() {
+        Bus.log("[R] onRoleYielded"); //pri added by zhuyang,Diagnostic: this phone lost the role race,20261021
         Bus.log("服务: 角色裁决本机让出(败方),转为接收方");
         mMain.post(new Runnable() { @Override public void run() {
             mRoleYielded = true;
@@ -1021,6 +1034,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
         mAccepted = false; mPreviewCount = 0; mFullCount = 0;
         mTransferDone = false; mBmps.clear();
         //pri modify by zhuyang,Use the real announced count; the bottom status line stays empty until real transfer progress arrives,20261019
+        Bus.log("[R] 拉起接收页 label=" + label + " count=" + count); //pri added by zhuyang,Diagnostic: receive page raised,20261021
         startForegroundService(OverlayService.receiveIntent(this, label, Math.max(1, count), previewUriOrNull()));
         armReceiveIdleTimeout(); //pri added by zhuyang,No Accept/Reject for 30s: close this card on both phones,20261020
     }
@@ -1064,6 +1078,7 @@ public class TapService extends Service implements Bus.Listener, Xfer.Listener {
 
     //pri added by zhuyang,Loser side of the race: the live send page becomes the receive card in place,20261014,start
     private void switchSendPageToReceive() {
+        Bus.log("[R] 发送页就地转接收页 label=" + mPeerLabel + " total=" + mTotalCount); //pri added by zhuyang,Diagnostic: in-place send-to-receive switch,20261021
         mSendShown = false;
         mReceiveShown = true;
         mAccepted = false; mPreviewCount = 0; mFullCount = 0; mTransferDone = false;

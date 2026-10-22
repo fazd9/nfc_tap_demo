@@ -23,6 +23,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
 import android.util.Log
 import android.view.Gravity
@@ -146,6 +147,17 @@ class OverlayService : Service() {
     //pri added by zhuyang,Live switch: one-shot fallback that reveals the held receive page when no peer preview arrives,20261020,start
     private var receiveEntranceFallback: Runnable? = null
     //pri added by zhuyang,Live switch: one-shot fallback that reveals the held receive page when no peer preview arrives,20261020,end
+
+    //pri added by zhuyang,Back key: DOWN is swallowed and remembered, the matching UP dismisses; elapsed=0 means no pending DOWN,20261021,start
+    private var backKeyDownAt = 0L
+    private val backKeyFallback = Runnable {
+        if (backKeyDownAt != 0L) {
+            backKeyDownAt = 0L
+            Log.i(TAG, "[T] 动效: 返回键未收到 UP,兜底收起") //pri added by zhuyang,Diagnostic: back fallback fired,20261021
+            dismissPage()
+        }
+    }
+    //pri added by zhuyang,Back key: DOWN is swallowed and remembered, the matching UP dismisses; elapsed=0 means no pending DOWN,20261021,end
 
     //pri added by chenpengqi,Screen-off path: receiver belongs to the service, not to one round,20261019,start
     private var screenReceiver: BroadcastReceiver? = null
@@ -277,6 +289,7 @@ class OverlayService : Service() {
         // 发送侧的对端标识：NFC 层不给就退回动效层自带的默认文案
         if (intent?.hasExtra(EXTRA_PEER) == true) peerLabel = intent.getStringExtra(EXTRA_PEER)
         peerCount = countExtra(intent, peerCount)
+        Log.i(TAG, "[S] 动效: 开始发送页 photos=${peerCount}") //pri added by zhuyang,Diagnostic: send flow entry,20261021
         //pri added by zhuyang,New round: never inherit the previous status line,20261019
         statusText = null
         if (intent?.hasExtra(EXTRA_STATUS) == true) statusText = intent.getStringExtra(EXTRA_STATUS)
@@ -331,6 +344,7 @@ class OverlayService : Service() {
         if (intent?.hasExtra(EXTRA_PEER) == true) peerLabel = intent.getStringExtra(EXTRA_PEER)
         // 没有新的张数就沿用上一轮（重播时不该把「接收 3 张照片」缩回 1 张）
         peerCount = countExtra(intent, if (peerCount > 0) peerCount else 1)
+        Log.i(TAG, "[R] 动效: 开始接收页 peer=${peerLabel} count=${peerCount} waiting=${intent?.getBooleanExtra(EXTRA_WAITING, false)}") //pri added by zhuyang,Diagnostic: receive flow entry,20261021
         //pri added by zhuyang,New round: never inherit the previous status line or the previous peer photo,20261019,start
         statusText = null
         if (intent?.hasExtra(EXTRA_STATUS) == true) statusText = intent.getStringExtra(EXTRA_STATUS)
@@ -423,6 +437,7 @@ class OverlayService : Service() {
      */
     private fun updatePhoto(intent: Intent?) {
         val uri = uriExtra(intent, EXTRA_PHOTO) ?: return
+        Log.i(TAG, "[R] 动效: 换卡片照片 ${uri}") //pri added by zhuyang,Diagnostic: card photo swap,20261021
         cancelReceiveEntranceFallback() //pri added by zhuyang,The peer preview arrived: a pending fallback reveal must not fire on top of it,20261020
         photoUri = uri
         //pri added by zhuyang,Empty state ends here too: a photo from the peer means this phone is receiving,20261014
@@ -471,6 +486,7 @@ class OverlayService : Service() {
     private fun updatePeer(intent: Intent?) {
         if (intent?.hasExtra(EXTRA_PEER) == true) peerLabel = intent.getStringExtra(EXTRA_PEER)
         peerCount = countExtra(intent, peerCount)
+        Log.i(TAG, "[R] 动效: 更新对端信息 ${peerLabel} x${peerCount}") //pri added by zhuyang,Diagnostic: peer info correction,20261021
         //pri added by zhuyang,Empty state ends here: this action is only sent when the peer actually swipes,20261014
         //pri modify by zhuyang,Live switch: a page held for the peer preview stays held - only updatePhoto or the fallback may reveal it,20261020,start
         val heldForPreview = receiveEntranceFallback != null
@@ -679,16 +695,47 @@ class OverlayService : Service() {
     //pri added by zhuyang,E5: a pending dissolve must never detach the next round's window,20261014,end
 
     //pri added by zhuyang,Exit path: Back on the animation window, the page has no other way out once the round stalls,20261014,start
-    //pri added by zhuyang,Act on ACTION_DOWN: with back-navigation enabled the UP of a window without a back callback arrives cancelled,20261014
+    //pri modify by zhuyang,Consume ACTION_DOWN and dismiss on the matching UP: removing the window on DOWN leaves the UP with no focused window, so the key falls through to the app below and it goes back as well,20261021,start
     private fun handlePageKey(keyCode: Int, event: KeyEvent): Boolean {
         if (keyCode != KeyEvent.KEYCODE_BACK) return false
-        if (event.action == KeyEvent.ACTION_DOWN) dismissPage()
+        when (event.action) {
+            KeyEvent.ACTION_DOWN -> {
+                if (backKeyDownAt == 0L) {
+                    backKeyDownAt = SystemClock.elapsedRealtime()
+                    mainHandler.postDelayed(backKeyFallback, BACK_KEY_UP_FALLBACK_MS)
+                }
+                Log.i(TAG, "[T] 动效: 返回键按下,已吞掉,等 UP") //pri added by zhuyang,Diagnostic: back down swallowed,20261021
+            }
+            KeyEvent.ACTION_UP -> {
+                mainHandler.removeCallbacks(backKeyFallback)
+                backKeyDownAt = 0L
+                Log.i(TAG, "[T] 动效: 返回键抬起,收起页面 canceled=" + event.isCanceled) //pri added by zhuyang,Diagnostic: back up dismisses,20261021
+                dismissPage()
+            }
+        }
         return true
     }
+    //pri modify by zhuyang,Consume ACTION_DOWN and dismiss on the matching UP: removing the window on DOWN leaves the UP with no focused window, so the key falls through to the app below and it goes back as well,20261021,end
+
+    //pri added by zhuyang,Back key fallback: a DOWN that never gets its UP (window lost focus, cancel swallowed upstream) must still dismiss,20261021,start
+    private fun cancelBackKeyFallback() {
+        mainHandler.removeCallbacks(backKeyFallback)
+        backKeyDownAt = 0L
+    }
+    //pri added by zhuyang,Back key fallback: a DOWN that never gets its UP (window lost focus, cancel swallowed upstream) must still dismiss,20261021,end
+    //pri added by zhuyang,Exit path: Back on the animation window, the page has no other way out once the round stalls,20261014,end
 
     //pri modify by zhuyang,Exit sync: whatever way the page goes away, the peer must be told so it drops its side too,20261020,start
     //pri modify by zhuyang,Receiving page still reports the reject pill; the send page now reports a cancel instead of staying silent,20261020
     private fun dismissPage() {
+        //pri added by zhuyang,Back can arrive on two paths (OnBackInvokedCallback and the key events): the second one must not report a second session cancel,20261021,start
+        cancelBackKeyFallback()
+        if (!attached) {
+            Log.i(TAG, "[T] 动效: 页面已收起,忽略重复退出") //pri added by zhuyang,Diagnostic: duplicate dismissal ignored,20261021
+            return
+        }
+        //pri added by zhuyang,Back can arrive on two paths (OnBackInvokedCallback and the key events): the second one must not report a second session cancel,20261021,end
+        Log.i(TAG, "[T] 动效: 收起页面 mode=${mode}") //pri added by zhuyang,Diagnostic: page dismissal,20261021
         //pri modify by zhuyang,Exit sync: both modes report a session cancel; the reject pill keeps its own verdict,20261020,start
         notifyNfc(ACTION_UI_SESSION_CANCELLED)
         //pri modify by zhuyang,Exit sync: both modes report a session cancel; the reject pill keeps its own verdict,20261020,end
@@ -816,7 +863,10 @@ class OverlayService : Service() {
      * 用 startService 而不是进程内回调：服务可能刚被冷启，走 intent 不会丢事件。
      */
     private fun notifyNfc(action: String) {
-        if (action == ACTION_UI_SEND_CONFIRMED) Log.i(TAG, "动效: 上滑确认,回执 NFC 层") //pri added by zhuyang,Diagnostic: mark the send-confirmed handoff to the NFC layer,20261020
+        if (action == ACTION_UI_SEND_CONFIRMED || action == ACTION_UI_RECEIVE_ACCEPT ||
+            action == ACTION_UI_RECEIVE_REJECT || action == ACTION_UI_SESSION_CANCELLED) {
+            Log.i(TAG, "[X] 回执 → NFC: $action") //pri added by zhuyang,Diagnostic: fold every UI verdict handoff into one line,20261021
+        }
         runCatching { startService(Intent(this, TapService::class.java).setAction(action)) }
             .onFailure { Log.e(TAG, "回执给 TapService 失败：$action", it) }
     }
@@ -901,6 +951,7 @@ class OverlayService : Service() {
     /** 摘掉窗口、停掉时间轴，但保留视图树。 */
     private fun detachOverlay() {
         cancelReceiveEntranceFallback() //pri added by zhuyang,A detached page must not replay its receive entrance,20261020
+        cancelBackKeyFallback() //pri added by zhuyang,A detached page must not dismiss again on a stale back DOWN,20261021
         val content = rootView ?: return
         startRunnable?.let { overlay.removeCallbacks(it) }
         startRunnable = null
@@ -1156,6 +1207,7 @@ class OverlayService : Service() {
         //pri added by zhuyang,D1: the banner window must go even if the main view tree was never built,20261014
         hideFailBanner()
         cancelReceiveEntranceFallback() //pri added by zhuyang,Teardown drops every pending page callback,20261020
+        cancelBackKeyFallback() //pri added by zhuyang,Teardown drops the pending back key as well,20261021
         startRunnable?.let { overlay.removeCallbacks(it) }
         startRunnable = null
         cancelReplay()
@@ -1374,6 +1426,9 @@ class OverlayService : Service() {
 
         //pri added by zhuyang,Live switch: reveal a held receive page after this long even when no peer preview arrives,20261020
         private const val RECEIVE_ENTRANCE_FALLBACK_MS = 1500L
+
+        //pri added by zhuyang,Back key: dismiss this long after a swallowed DOWN if its UP never arrives,20261021
+        private const val BACK_KEY_UP_FALLBACK_MS = 600L
 
         //pri added by zhuyang,D1 fail banner: show the top banner window / take it down again,20261014,start
         //pri added by zhuyang,Show the banner; carries EXTRA_FAIL_TITLE / EXTRA_FAIL_DETAIL,20261014

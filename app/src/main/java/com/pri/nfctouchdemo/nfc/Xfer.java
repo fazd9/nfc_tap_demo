@@ -438,6 +438,7 @@ public class Xfer {
         // 否则本轮里 setExpectedPeer 被再调一次（又碰了一下）会把正在用的 socket 和 8988
         // 监听一起关掉，那比不修还糟。
         //pri modify by zhuyang,Round flags always reset; link state only when no live link remains,20261019,start
+        Bus.log("[T] setExpectedPeer round→" + (mRound + 1) + " peerSid=" + (peerSid == null ? "null" : "set") + " peerIp=" + lanIp); //pri added by zhuyang,Diagnostic: new round target snapshot,20261021
         resetRoundFlags();
         if (!hasLiveLink()) resetRoundState();
         //pri modify by zhuyang,Round flags always reset; link state only when no live link remains,20261019,end
@@ -882,6 +883,7 @@ public class Xfer {
                     }
                     mHotspotStarting = false;
                     Bus.log("热点: 开启失败 " + r + "(无 P2P 兜底,等待同 LAN/热点接入)");
+                    Bus.log("[L] 热点开启失败 → 本轮将无法作为 AP owner"); //pri added by zhuyang,Diagnostic: AP owner unavailable,20261021
                     mHotspotActive = false;
                 }
                 @Override public void onStopped() {
@@ -959,6 +961,7 @@ public class Xfer {
 
     /** 接收方入口: 起服务端(同网对方可秒连/对方加入本机热点),P2P 已停用。 */
     public void startAsReceiver() {
+        Bus.log("[R] startAsReceiver canSend=" + mCanSend + " hasPhotos=" + mHasPhotos); //pri added by zhuyang,Diagnostic: receiver entry,20261021
         //pri added by zhuyang,P2P bearer disabled (product decision: same LAN -> hotspot),20261019,start
         mReceiverRole = true;
         startServer();
@@ -986,6 +989,7 @@ public class Xfer {
 
     /** 发送方入口: 同 LAN 直连 → 热点,不再有 P2P 兜底。 */
     public void startAsSender() {
+        Bus.log("[S] startAsSender apOwner=" + mApOwner + " senderWaiting=" + mSenderWaiting); //pri added by zhuyang,Diagnostic: sender entry,20261021
         //pri added by zhuyang,P2P bearer disabled (product decision: same LAN -> hotspot),20261019,start
         mReceiverRole = false;
         //pri added by zhuyang,A wait left over from a round with no live link must not block the new round,20261019,start
@@ -1016,9 +1020,11 @@ public class Xfer {
 
     //pri modify by zhuyang,Role convergence: swipe records the local clock and announces ROLE(S); false = peer already swiped,20261017,start
     public boolean setSenderRole() {
+        Bus.log("[S] setSenderRole peerWants=" + mPeerWantsSend + " localSwiped=" + (mLocalSwipedAt != 0)); //pri added by zhuyang,Diagnostic: role request snapshot,20261021
         mCanSend = false;
         if (mPeerWantsSend) {
             Bus.log("传输: 对端先上滑,本机不再发送(让出),转接收");
+            Bus.log("[R] 本机转为接收方 reason=localSwipeAfterPeer"); //pri added by zhuyang,Diagnostic: receiver transition,20261021
             mReceiverRole = true;
             mYielded = true;
             Link stashed = mStashedSocket;
@@ -1459,6 +1465,7 @@ public class Xfer {
         new Thread(new Runnable() {
             @Override public void run() {
                 //pri added by zhuyang,Batch 6: an established send channel needs no new join or direct connect,20261017
+                Bus.log("[L] 承载决策 sameLan=" + likelySameLan() + " peerIp=" + mPeerLanIp + " apOwner=" + mApOwner); //pri added by zhuyang,Diagnostic: bearer decision snapshot,20261021
                 if (isAlive(mSendSocket)) {
                     Bus.log("传输: 发送通道已就绪,跳过重新加入/直连");
                     return;
@@ -1871,6 +1878,7 @@ public class Xfer {
 
     private boolean waitForAssociation(WifiManager wm, String ssid, long timeoutMs, int gen) {
         final long deadline = SystemClock.elapsedRealtime() + Math.max(200L, timeoutMs);
+        boolean ipWaitLogged = false; //pri added by zhuyang,Diagnostic: the no-IP wait is logged once per call,20261021
         while (mRunning && gen == mWifiGen && SystemClock.elapsedRealtime() < deadline) {
             try {
                 android.net.wifi.WifiInfo wi = wm.getConnectionInfo();
@@ -1884,6 +1892,10 @@ public class Xfer {
                     return true;
                 }
                 //pri modify by zhuyang,The derived SSID repeats every round and getSSID() reports a configured network before it associates: an association only counts once this network holds an IPv4 lease,20261021,end
+                if (!ipWaitLogged && ssid.equals(cur)) {
+                    ipWaitLogged = true;
+                    Bus.log("[L] 已关联但未拿到 IP,继续等待(" + mJoinedNetId + ")"); //pri added by zhuyang,Diagnostic: association without a lease,20261021
+                }
             } catch (Throwable ignored) {}
             try { Thread.sleep(300); } catch (InterruptedException ignored) {}
         }
@@ -2738,6 +2750,7 @@ public class Xfer {
     }
 
     private void yieldToPeer(Link link) {
+        Bus.log("[R] 本机转为接收方 reason=loseArbitration"); //pri added by zhuyang,Diagnostic: receiver transition,20261021
         mYielded = true;
         mReceiverRole = true;
         mCanSend = false;
@@ -3844,6 +3857,7 @@ public class Xfer {
                     Bus.log("传输: 已报价(" + uris.size() + " 张,计划 " + planned
                             + " 字节 + 预览),等对方「接收/拒绝」…("
                             + (VERDICT_WAIT_MS / 1000) + "s 上限)");
+                    Bus.log("[S] 待发清单 " + describeUris(uris)); //pri added by zhuyang,Diagnostic: send manifest by display name and size,20261021
                     //pri added by zhuyang,Arm the dead-peer check now that we are reading for the verdict,20261017
                     send.lastRx.set(SystemClock.elapsedRealtime());
                     send.hbExpectRx = true;
@@ -4242,6 +4256,26 @@ public class Xfer {
         return null;
     }
     //pri added by zhuyang,Query the source display name for FILE_BEGIN name=; null when unavailable,20261019,end
+    //pri added by zhuyang,Diagnostic: one-line send manifest (display name + size), never logs the Uri,20261021,start
+    private String describeUris(java.util.List<Uri> uris) {
+        if (uris == null) return "null";
+        StringBuilder sb = new StringBuilder();
+        for (Uri u : uris) {
+            try {
+                String name = displayNameOf(u);
+                long size = imageSize(u);
+                if (sb.length() > 0) sb.append(',');
+                sb.append(name == null ? "?" : name).append('(');
+                if (size >= 0) sb.append(size); else sb.append('?');
+                sb.append(')');
+            } catch (Throwable t) {
+                if (sb.length() > 0) sb.append(',');
+                sb.append('?');
+            }
+        }
+        return sb.toString();
+    }
+    //pri added by zhuyang,Diagnostic: one-line send manifest (display name + size), never logs the Uri,20261021,end
     //pri added by zhuyang,Wait for DONE_ACK: 0=OK, -1=protocol error, -2=timeout, -3=peer cancel, -4=link dead,20261017,end
 
     //pri added by zhuyang,Wait out the role window while reading frames: a peer ROLE(S) in the window is arbitrated by sid,20261017,start
