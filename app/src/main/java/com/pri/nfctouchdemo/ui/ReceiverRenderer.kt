@@ -460,8 +460,10 @@ class ReceiverRenderer {
     }
 
     /** 按钮能不能点：v6 是 t ≥ 6.9，相对卡片进场就是 800ms 之后。 */
+    //pri modify by zhuyang,Gate actions on the TIME_RATE-scaled clock to match the visual fade,20261023
     fun actionsEnabled(elapsedMs: Long, cardStartMs: Long): Boolean =
-        decision == Decision.NONE && (elapsedMs - cardStartMs).toFloat() >= ACTION_ENABLE_MS
+        decision == Decision.NONE &&
+            (elapsedMs - cardStartMs) * TIME_RATE >= ACTION_ENABLE_MS
 
     /**
      * 接收端卡片的**起点**：屏幕最顶上那个 mini 卡片（设计空间坐标，调用方自己乘 k）。
