@@ -11,7 +11,8 @@ import android.view.View
  * - **常驻段** [INTRO_MS] 之后：时间轴不停，继续往前走。
  *   四边白线、边缘脉冲、上滑提示的浮动都挂在时间上，所以它们会一直动下去。
  *
- * 手势拖动和卡片飞走由各自的动画驱动，不受这个节流影响。
+ * 手势拖动和卡片飞走由各自的动画驱动。
+ *pri modify by zhuyang,The frame throttle is gone: the whole page follows vsync,20261023
  */
 class Timeline(private val host: View) {
 
