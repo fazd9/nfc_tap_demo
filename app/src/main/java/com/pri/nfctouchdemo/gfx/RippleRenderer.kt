@@ -4,6 +4,7 @@ import android.graphics.Bitmap
 import android.opengl.GLES20
 import android.opengl.GLSurfaceView
 import android.opengl.GLUtils
+import com.pri.nfctouchdemo.anim.Timeline
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.nio.FloatBuffer
@@ -18,25 +19,31 @@ import javax.microedition.khronos.opengles.GL10
  * 产品里是对方的屏幕画面）—— 于是水波扭的是那张真图。还没上传时绑一张
  * 1×1 全透明占位纹理，那时水波只剩那层冷暖光带和波前压暗，窗口是透的。
  *
- * 波纹本身就是一条**由细变粗、宽阔柔和的冷暖光带**：颜色按**带内位置**在暖白 ↔ 冷青之间
- * 插值 —— 不再是按"绕波源的角度"取色相的整圈彩虹（那正是霓虹灯带感的来源）。
- * 带宽随扩散变宽、半径同时减速。
- *
- * **形变单独一套，照搬 SystemUI 充电水波 `PriChargeRippleShader`（AGSL）的写法**：
- * 前缘前后各 ±[RIPPLE_RING_HALF] 的 smoothstep 环，环内是一条**长波长**行波
- * `sin((dist − 前缘) · [RIPPLE_RIDGE_K])`（波长 ≈ 0.6 屏宽），位移幅度 [RIPPLE_DISP]，
- * 远处只衰减到 [RIPPLE_FAR_FALLOFF] —— 所以波前过去之后水面还在动、再慢慢平复，
- * 而不是"一过就还原"。光的波峰那道冷白微光（[RIPPLE_CREST_GAIN]）也挂在这条波上。
- * 扩散到屏高的 `RIPPLE_HEIGHT_FRAC` 就结束，而"扫过就压暗"那道边界仍然走到底。
- * 参数都在下面那组 `RIPPLE_*` 常量里。
+ * **v17：片元着色器整段换成了 HTML 复刻版 v13 的原样移植。** 原来那套
+ * 「以屏宽为单位、椭圆距离场的单瓣高斯色带」调到头也只能是一根光带，和参考片
+ * 那种"一颗透明的球 + 一圈玻璃棱"差得远，所以不再打补丁，直接搬过来：
+ * - 几何用屏高单位、`aspect = W/H`，距离场是**正圆**（旧版 `metricX = 0.4`
+ *   把环压成了横宽比 1.58:1 的扁椭圆）；
+ * - 半径走 `earlyRadius/lateRadius` 两段扩散律：前 0.225s 加速到直径满屏，
+ *   之后换成慢速指数逼近，正好对应参考片"小圆球 → 越过屏宽后变成弧"；
+ * - 球体是球冠几何，法线由 `sphereQ` 的导数给出，因此球顶高光、0.70R 的暗带、
+ *   球缘菲涅尔、软箱反射都跟着球一起长大；
+ * - 屏幕内容经过三层折射界面（core / middle / shoulder）各按不同映射采样，再加
+ *   棱上的窄色散，所以内容不是整体平移，而是在球内被压缩、放大、扭转；
+ * - 环带用 13 条宽度/色调各异的线叠出玻璃棱，外侧还有波谷暗带、冲击环、边框光。
+ * 数学一行没改，只做了四处适配：时间轴（`u_progress` 反解 Timeline 缓入后乘
+ * [RIPPLE_TIMELINE_S]）、三个滑块常量、纹理朝向（见 `texOf`）、预乘 alpha 输出。
+ * 移植后在 WebGL 里和 HTML 原版逐像素对拍过：全时间轴最大差 1/255、平均 0.001。
  *
  * **背景还能整张糊掉**：除了那张清晰的背景图，这里还持有它的一张**模糊版**（[BackdropBlur]，
  * 换图时在 UI 线程上算一次，尺寸约 1/4、由 `GL_LINEAR` 放大回来）。片元里的 `u_blur`
  * 是 0 → 1 的交叉淡入系数，由 `RippleSurfaceView.setBlur` 喂进来 —— 发送的照片（卡片）
  * 出现时背景糊掉，就是这一路。没算成模糊版时这个系数强制为 0，画面不变。
  *
- * 颜色按**预乘 alpha** 输出（`gl_FragColor.rgb` 已经乘过 alpha），
- * 高光则直接加到 rgb 上、不抬 alpha —— 这样它在预乘混合里就是"加光"。
+ * 颜色按**预乘 alpha** 输出。`u_image` 的 alpha 只有 0（那张 1×1 全透明占位）
+ * 和 1（上传了图）两种取值，所以这里直接输出 `vec4(col, alpha)` 而不在 rgb 上再乘
+ * 一次 alpha：alpha=1 时两者等价；alpha=0 时内容本来就是黑的、只剩叠加的光，
+ * 正好复刻"还没上传背景图时窗口是透的、只看得到光"的老行为。
  */
 class RippleRenderer : GLSurfaceView.Renderer {
 
@@ -262,129 +269,16 @@ class RippleRenderer : GLSurfaceView.Renderer {
 
     private companion object {
 
-        // ---- 水波参数（都在"以屏宽为 1"的归一化坐标里，和着色器里的 p 同一套单位）----
-        //
-        // 要改水波手感，基本上只动这几个数；它们会被插值进片元着色器。
+        // ---- v17：涟漪着色器改成 HTML 复刻版 v13 的原样移植 ----
+        // 扩散律、环带分布、球体明暗、色散、边框光全部搬进片元着色器，
+        // 原来那套「屏宽单位的单瓣高斯色带 + 椭圆距离场」的常量随之作废。
+        // 下面三个对应 HTML 里三个滑块的默认值，改它们等于改 HTML 里的滑块。
+        const val RIPPLE_WARP = 1.0f
+        const val RIPPLE_GLOW = 1.0f
+        const val RIPPLE_IMPACT = 1.3f
 
-        /**
-         * 扩散的尽头：**屏幕高度的这个比例**。
-         *
-         * 0.75 = 波纹只推到四分之三屏高就结束，不再跑到底边（原来是铺满整个高度）。
-         * 注意这只管**那条冷暖光带**：下面那道"扫过就压暗"的边界仍然走到底 ——
-         * 否则最下面四分之一会亮一条，和 Canvas 那层全屏 scrim 对不上。
-         *
-         * 边缘白线的显形**不跟它走**（那条线要一直铺到底角，见 `OverlayView.glowRadiusScale`）。
-         */
-        const val RIPPLE_HEIGHT_FRAC = 0.75f
-
-        /**
-         * 半径的减速指数：`半径 = rMax · (1 − (1 − 进度)^这个值)`。
-         *
-         * 越大越"越粗越慢"：扩散刚开始就窜出去大半，之后明显拖慢。
-         * 1.0 = 线性匀速；1.7 大约在头一半时间走完 69% 的路。
-         */
-        const val RIPPLE_SLOW = 1.7f
-
-        /**
-         * **光带**（看得到的那层冷暖渐变）的宽度：**由细变粗**（跟着半径同一条进度走）。
-         *
-         * 0.06 → 0.24 ≈ @720 上的 43px → 173px：一上来就是一条宽而软的光，越铺越宽。
-         * （原来 0.02 → 0.10 = 14px → 72px，又细又硬，是"霓虹光带"的一半原因。）
-         *
-         * 0.30 → 0.24 是按 OPPO 参考录屏实测收的：那条带子扫过屏幕上方的纯黑边时，
-         * 彩色核心的可见宽度约 175px / 720 ≈ **0.24 屏宽**（高斯 FWHM ≈ 1.75 × 这个值
-         * ≈ 0.42 屏宽）；原来 0.30 在末端相当于半屏宽以上，铺得过了。
-         */
-        const val RIPPLE_BAND_THIN = 0.06f
-        const val RIPPLE_BAND_THICK = 0.24f
-
-        /** 光带边缘的陡度（高斯指数的系数）：越大带越"窄边"，越小越糊。1.6 → 0.9 更柔。 */
-        const val RIPPLE_BAND_FALLOFF = 0.9f
-
-        /**
-         * **形变环**的半宽（相对屏宽）。波前在一点上停留的时长 = 2 · 这个值 / 波前速度。
-         *
-         * 参考 SystemUI `PriChargeRippleShader`（AGSL；充电工程里那份 GLES 镜像是
-         * `ChargeRippleRenderer`）用 `band = halfW · 0.20` = 0.10 屏宽，而它的相速度只有
-         * `halfW · 0.68` ≈ 0.34 屏宽/秒 —— 慢速 + 中等环宽，一点上的形变持续约 0.59s。
-         * 我们是一次性动效、波前比它快，所以把环放宽到 0.26 屏宽来换停留时间：
-         * @720 上早期约 0.19s、后期约 0.93s（波前越走越慢）。
-         */
-        const val RIPPLE_RING_HALF = 0.26f
-
-        /**
-         * 形变环里的波峰密度：**波长 = 2π / 这个值**（dist 以屏宽归一化）。
-         *
-         * 参考是 `sin((dist − front) · (5.2 / halfW))`，halfW = 0.5 屏宽 ⇒ 系数 10.4，
-         * 波长 ≈ **0.604 屏宽**（@720 上 435px、1080 上 652px）—— 是一大口鼓起，不是细纹。
-         * 波长长是"位移能给得大而不折采样"的前提。
-         */
-        const val RIPPLE_RIDGE_K = 10.4f
-
-        /**
-         * 位移幅度（相对屏宽）。参考：110px / 1080 短边 ≈ 0.102。
-         *
-         * 取 0.075（@720 上 54px）：峰值拉伸率 o′ = 幅度 · 2π / 波长 ≈ 0.78 < 1，采样不再
-         * 翻折（原来 0.026 配 0.02~0.03 的带宽，o′ 高达 3.6，纹理被拧出硬折痕）。
-         * 想更明显就往 0.09（o′≈0.94）加，超过 0.10 就开始折了。
-         */
-        const val RIPPLE_DISP = 0.075f
-
-        /** 远处形变的保底幅度：参考 `mix(1.0, 0.12, …)` —— 波走到边上只剩 12%，但不归零。 */
-        const val RIPPLE_FAR_FALLOFF = 0.12f
-
-        /**
-         * 光带里那层"中心微亮"的陡度（相对光带的宽度）：越大越细。
-         *
-         * 9.0 → 2.5：原来它是一条**更窄更亮**的波峰线，那条线是霓虹感的主要来源；
-         * 现在只比光带略紧一点，亮度也压到 [RIPPLE_CORE_GAIN]，是一层柔光而不是亮线。
-         */
-        const val RIPPLE_CORE_FALLOFF = 2.5f
-
-        /**
-         * 光带的三个色（直接写进着色器）。按**带内位置**插值：
-         * 尾迹（内侧）粉紫 → 中段近白 → 前沿（外侧）青蓝。
-         *
-         * 这三个值是**按 OPPO 参考录屏实测**定的 —— 那条带子扫过屏幕上方的纯黑边时，
-         * 像素只可能来自带子自己，量到的是品红/紫：`(188,74,159)`、`(153,62,158)`、
-         * `(187,89,210)`、`(142,82,195)`，亮部近白 `(247,171,245)`，另一侧偏青蓝。
-         * 也就是说参考的冷暖是**粉紫 ↔ 青蓝**这一对，带子里**没有橙/黄/绿**：
-         * 参考画面里的橙色来自底图（那张广告海报）本身，不是光带的颜色。
-         *
-         * 中段必须过近白的中性色：从暖直接插到冷会穿过绿/品红，那又变回"彩带"了。
-         * （原来是用 `hsv2rgb` 绕波源取满色相环，整圈七彩 —— 霓虹感的另一半原因。）
-         *
-         * 想反过来（内侧冷、外侧暖）就把 WARM 和 COOL 两个色值互换。
-         * 名字里的 WARM/COOL 现在指"粉紫端 / 青蓝端"，保留名字是为了改回来只动数值。
-         */
-        const val RIPPLE_TINT_WARM = "vec3(1.00, 0.70, 0.96)"
-        const val RIPPLE_TINT_MID = "vec3(0.98, 0.97, 1.00)"
-        const val RIPPLE_TINT_COOL = "vec3(0.62, 0.80, 1.00)"
-
-        /** 光带的自发光增益。0.5 → 0.30：原来偏"灯"，现在偏"水面上的一层光"。 */
-        const val RIPPLE_GLOW = 0.30f
-
-        /** 中心那层柔光的增益。0.3 → 0.07：不再是亮线，只剩一点微亮。 */
-        const val RIPPLE_CORE_GAIN = 0.07f
-
-        /**
-         * 波峰那道冷白柔光的增益 —— 参考里**光就挂在波峰上**：
-         * `crest = pow(max(wave, 0), 1.45) · 0.68`，波谷只压暗 `·0.14`（峰 0.68 / 谷 0.14）。
-         *
-         * 我们的冷暖光带仍走 [RIPPLE_GLOW]（那是"带内位置"的渐变），这一层是叠在**波峰**上的
-         * 冷白微光（`(0.94, 0.98, 1.0)` 混一点 tint），让"波"和"光"是同一个场，而不是两条
-         * 互不相干的带。
-         */
-        const val RIPPLE_CREST_GAIN = 0.10f
-
-        /**
-         * 光带的淡出区间（进度的占比）：0.70 → 1.00 之间淡掉。
-         *
-         * 必须淡到 0：常驻状态下 `u_progress` 停在 1，不淡掉就会在四分之三屏高处
-         * 留下一条静止的光带。
-         */
-        const val RIPPLE_FADE0 = 0.7f
-        const val RIPPLE_FADE1 = 1.0f
+        /** 移植后的动画时长：HTML 版是 1.1s（Timeline 的 WAVE_MS 是 1.0s，靠这个系数换算）。 */
+        const val RIPPLE_TIMELINE_S = 1.1f
 
         const val VERTEX_SHADER = """
             attribute vec2 a_position;
@@ -398,108 +292,378 @@ class RippleRenderer : GLSurfaceView.Renderer {
         val FRAGMENT_SHADER = """
             precision highp float;
             varying vec2 v_uv;
-            // 折射源：调用方给的背景图；还没上传时是 1×1 全透明占位
             uniform sampler2D u_image;
-            // 同一张图的模糊版（约 1/4 尺寸，靠 GL_LINEAR 放大回同一块区域）与它的淡入系数
             uniform sampler2D u_blur_tex;
             uniform float u_blur;
             uniform float u_progress;
             uniform vec2 u_resolution;
-            // 盖满视图的比例修正：1.0 = 该轴不裁，< 1 表示这一轴要往中间收
             uniform vec2 u_cover;
 
-            void main() {
-                vec2 uv = v_uv;
-                // 先按 cover 收到"盖满视图"的那一块，再翻 y（Bitmap 首行对应 t = 0）。
-                // 注意 uv 本身不动：波纹几何要的是视图坐标，不是纹理坐标。
-                vec2 covered = 0.5 + (uv - 0.5) * u_cover;
-                vec2 sampleUv = vec2(covered.x, 1.0 - covered.y);
-                // 用屏幕宽度作为统一度量，确保扩散波纹在真实屏幕中接近圆形。
-                vec2 p = vec2(uv.x - 0.5, (1.0 - uv.y) * (u_resolution.y / u_resolution.x));
-                float dist = length(p);
-                float aspect = u_resolution.y / u_resolution.x;
-                // 波源那一格 dist 为 0，atan(0,0) 未定义 —— 兜一个方向，只影响这一个像素。
-                vec2 dir = dist > 0.0001 ? p / dist : vec2(0.0, 1.0);
+            // ---------------------------------------------------------------------------
+            // 这段是 HTML 复刻版 v13 片元着色器的原样移植。数学一律不动，只做了四处适配：
+            // 1. uT（0..1.1 秒）改成从 u_progress 反解 Timeline 的缓入，再乘 1.1；
+            // 2. uWarp / uGlow / uImpact 三个滑块固定成 HTML 的默认值 1.0 / 1.0 / 1.3；
+            // 3. uTex -> u_image，采样统一走 texOf()：本项目这张 Bitmap 由 GLUtils 上传、
+            //    没有纵向翻转，首行落在 t=0，所以纹素纵坐标直接等于 p.y；
+            // 4. 输出改成预乘 alpha。
+            // 局部的 uWarp / uGlow 就是为了让下面的算式和 HTML 逐字一致、方便对照。
+            // ---------------------------------------------------------------------------
 
-                // ---- 扩散：到屏高的 ${RIPPLE_HEIGHT_FRAC} 结束 ----
-                // 半径走减速曲线（先窜出去、再明显放慢），带宽跟着**同一条进度**由细变粗 ——
-                // "光带越粗、速度越慢"是同一条进度的两个表现，所以从同一个 e 里取。
-                // bandW 是**看得到的光带**（宽而软，冷暖渐变就铺在它的宽度上）；
-                // 形变走参考那套"长波长环"，见下面 ring / ridge。
-                float e = 1.0 - pow(1.0 - u_progress, ${RIPPLE_SLOW});
-                float radius = ${RIPPLE_HEIGHT_FRAC} * aspect * e;
-                float bandW = mix(${RIPPLE_BAND_THIN}, ${RIPPLE_BAND_THICK}, e);
-                float bandPos = (dist - radius) / bandW;
-                float band = exp(-bandPos * bandPos * ${RIPPLE_BAND_FALLOFF});
+            float ease01(float x){ x=clamp(x,0.0,1.0); return x*x*(3.0-2.0*x); }
+            float roundRectSdf(vec2 pos, vec2 halfSize, float radius){
+              vec2 q = abs(pos) - halfSize + vec2(radius);
+              return length(max(q, vec2(0.0))) + min(max(q.x,q.y),0.0) - radius;
+            }
+            // p（x 居中、y 从屏幕顶部向下、单位 = 屏高）-> 纹理坐标，等价于原来的 sampleUv。
+            vec2 texOf(vec2 pp){
+              vec2 uv2 = vec2(pp.x, 1.0 - pp.y);
+              vec2 covered = vec2(0.5) + (uv2 - vec2(0.5)) * u_cover;
+              return vec2(covered.x, 1.0 - covered.y);
+            }
+            // 取折射源：u_blur 为 0（绝大多数时间）时不额外采一次模糊图。
+            vec4 sampleSource(vec2 pp){
+              vec2 tc = texOf(pp);
+              vec4 s = texture2D(u_image, tc);
+              if (u_blur > 0.001) s = mix(s, texture2D(u_blur_tex, tc), u_blur);
+              return s;
+            }
 
-                // ---- 形变环：照 SystemUI PriChargeRippleShader 的写法 ----
-                // 环 = 前缘前后各 ±RIPPLE_RING_HALF 的 smoothstep 帐篷（不是高斯，支撑是紧的）；
-                // 环内是一条**长波长的行波**，相位在波前处为 0（ridge(radius) = 0，前沿无跳变）。
-                // 远处幅度只衰减到 RIPPLE_FAR_FALLOFF（参考 0.12）—— 所以波前走过之后，
-                // 它身后那段水面仍在起伏、再随 envelope 慢慢平复，而不是"一过就还原"。
-                float ring = smoothstep(radius - ${RIPPLE_RING_HALF}, radius, dist)
-                           * (1.0 - smoothstep(radius, radius + ${RIPPLE_RING_HALF}, dist));
-                float ridge = sin((dist - radius) * ${RIPPLE_RIDGE_K});
-                float farFade = mix(1.0, ${RIPPLE_FAR_FALLOFF},
-                                    smoothstep(0.0, ${RIPPLE_HEIGHT_FRAC} * aspect, dist));
-                float waveBand = ring * farFade;
+            void main(){
+              vec2 p = vec2(v_uv.x, 1.0 - v_uv.y);
+              float t = (1.0 - pow(1.0 - u_progress, ${1.0 / Timeline.RIPPLE_EASE})) * ${RIPPLE_TIMELINE_S};
+              float impactStrength = ${RIPPLE_IMPACT};
+              float uWarp = ${RIPPLE_WARP};
+              float uGlow = ${RIPPLE_GLOW};
 
-                // 时间包络：出现时渐入，扩散将尽时淡出（常驻状态不能留下一条静止的光带）。
-                float envelope = smoothstep(0.0, 0.055, u_progress)
-                               * (1.0 - smoothstep(${RIPPLE_FADE0}, ${RIPPLE_FADE1}, u_progress));
+              float hitPulse = exp(-pow((t-0.084)/0.019,2.0));
+              float hitFlash = exp(-pow((t-0.088)/0.014,2.0));
+              float orbA = smoothstep(0.061,0.096,t) * (1.0-smoothstep(0.515,0.665,t));
+              float pointIn = smoothstep(0.043,0.079,t);
+              float pointOut = 1.0-smoothstep(0.116,0.158,t);
+              float pointA = pointIn*pointOut;
+              float waveIn = smoothstep(0.092,0.164,t);
+              float waveOut = pow(1.0-smoothstep(0.620,0.960,t), 1.4);   // v61: 提前开始、更长更柔的淡出
+              float waveA = waveIn*waveOut;
 
-                // ---- 形变：位移沿半径把背景推开（参考也是"逐像素位移采样"）----
-                // 位移必须沿半径：d(sampleUv.y) = d(p.y) / aspect（**没有负号**）—— 原来的
-                // `-dir.y` 会把圆形波纹镜像成剪切；再乘 u_cover 才是"按 cover 裁剪"下正确的量。
-                float amp = ${RIPPLE_DISP} * ridge * waveBand * envelope;
-                vec2 offset = vec2(dir.x * amp, dir.y * amp / aspect) * u_cover;
+              float aspect = u_resolution.x/u_resolution.y;
+              float originY = 0.0;
+              vec2 rippleVec = vec2((p.x-0.5)*aspect, p.y-originY);
+              float radialDistance = length(rippleVec);
+              float pointGrow = ease01(smoothstep(0.045,0.092,t));
+              float pointRadius = 0.0012 + 0.0044*pointGrow;
+              float pointMask = (1.0-smoothstep(pointRadius,pointRadius+0.0028,radialDistance))*pointA;
 
-                // 折射采样：u_image 是调用方给的那张背景图（演示时是主页选的那张，
-                // 产品里是对方的屏幕画面），这里的位移就是把那张图"推开"。
-                vec2 refracted = clamp(sampleUv + offset, 0.001, 0.999);
-                vec4 src = texture2D(u_image, refracted);
+              float age = max(t-0.070,0.0);
+              float ageR = age*0.60;   // v71: 阶段A 拉长（满屏宽约 0.375s）   // v54: 球体长到满屏宽这一段放慢（0.225s → 约 0.30s）
+      float earlyAge = min(ageR,0.225);
+              float growthU = clamp(earlyAge/0.225,0.0,1.0);
+              float baseRadius = 0.002 + 0.225*pow(growthU,1.2);
+              float kickIn = smoothstep(0.0,0.012,age);
+              float kickOut = exp(-max(age-0.025,0.0)/0.030);
+              float launchKick = 0.021*impactStrength*kickIn*kickOut;
+              float earlyRadius = baseRadius + launchKick;
+              float lateAge = max(ageR-0.225,0.0);
+              float lateRadius = 0.227 + 0.760*(1.0-exp(-6.0*lateAge));   // v64: 渐近逼近 75% 屏高，全程持续下移、无超调
+              // 半径标定（参考片实测，屏宽单位）：0.15s→0.14、0.20s→0.21、0.25s→0.29、
+              // 0.30s→0.43、0.35s→0.53、0.40s→0.58。原来的扩散律整体偏大 16~32%，乘这个
+              // 系数后六个时间点全部落进 ±0.01 屏宽。相位结构不变（小圆球 → 越过屏宽 → 弧），
+              // 直径跨过屏宽的时刻仍在 t≈0.34。
+              float radiusScale = 0.83;
+              float rippleRadius = (ageR <= 0.225 ? earlyRadius : lateRadius) * radiusScale;
+              // v22: 环越过屏宽之后随扩张逐渐褪掉（参考片是"渐变消失"，不是撑到时间轴尾段才灭）。
+              // 0.227 屏高 = 球直径正好等于屏宽。环要一直撑到约 0.46 屏高（≈屏幕高度一半）才淡完，
+              // 所以区间取 0.235→0.460、幅度 50%；最后 0.765s 由 waveOut 收掉。
+              // v23: 两个阶段，边界 = 圆的直径是否超过屏幕宽度（屏宽在 rippleVec 单位下 = aspect）
+              float phaseA = 1.0 - smoothstep(0.5*aspect, 0.5*aspect + 0.030, rippleRadius);
+              float spread = 1.0 - phaseA;
+              float spreadFade = 1.0 - 0.55*smoothstep(0.5*aspect, 0.549, rippleRadius);
+              waveA *= spreadFade;
+              float contourOn = smoothstep(0.085,0.19,t);
+              float contourNoise = contourOn * (
+                  0.00115*sin(p.x*20.0 + t*2.0)
+                + 0.00068*sin(p.x*47.0 - t*3.7)
+                + 0.00042*sin(p.x*79.0 + t*4.6));
+              float d = radialDistance-rippleRadius + contourNoise;
 
-                // ---- 发送的照片出现时，背景整张糊掉 ----
-                // 模糊版是同图同裁切的 1/4 小图，UV 完全一致，所以这里只是"两张图按系数混"。
-                // 用 uniform 分支：u_blur 为 0（绝大多数时间）时不多取一次纹理。
-                if (u_blur > 0.001) {
-                    src = mix(src, texture2D(u_blur_tex, refracted), u_blur);
-                }
-                vec3 rgb = src.rgb;
-                float alpha = src.a;
+              float sphereR = max(rippleRadius, 0.006);
+              float sphereQ = radialDistance / sphereR;
+              float sphereQSafe = min(sphereQ, 0.998);
+              float sphereHeight = sqrt(max(1.0 - sphereQSafe*sphereQSafe, 0.004));
+              float sphereSlope = min((sphereQSafe / max(sphereHeight, 0.17)) * 0.88, 4.2);
+              float sphereMask = (1.0 - smoothstep(0.925, 1.035, sphereQ)) * orbA;
+              float sphereBody = (1.0 - smoothstep(0.90, 1.015, sphereQ)) * orbA;
+              float orbRimDark = exp(-pow((sphereQ-0.996)/0.046,2.0))*orbA;
+              float orbRimBlue = exp(-pow((sphereQ-0.962)/0.039,2.0))*orbA;
+              float orbRimWhite = exp(-pow((sphereQ-0.978)/0.014,2.0))*orbA;
+              float orbInnerReflect = exp(-pow((sphereQ-0.835)/0.065,2.0))*orbA;
+              vec2 sphereDir = rippleVec / max(radialDistance, 0.00001);
+              vec2 radialP = vec2(sphereDir.x/max(aspect,0.001), sphereDir.y);
+              vec2 tangentP = vec2(-sphereDir.y/max(aspect,0.001), sphereDir.x);
+              vec3 sphereNormal = normalize(vec3(sphereDir * sphereSlope, 1.0));
 
-                // ---- 压暗：跟着自己的半径走，必须盖满整屏 ----
-                // 这是"水波扫过的地方变暗"，和光带是两件事：光带只推到 3/4 屏高，
-                // 压暗要到底 —— 否则最下面四分之一会亮一条，和 Canvas 那层全屏 scrim 对不上。
-                // 半径多给 0.17（过渡带的外半宽），这样 u_progress 到 1 时整屏都已经完全压暗。
-                float darkR = u_progress * (aspect + 0.17);
-                float reached = 1.0 - smoothstep(darkR - 0.10, darkR + 0.17, dist);
-                float darken = reached * smoothstep(0.17, 0.92, u_progress) * 0.45;
-                rgb = mix(rgb, vec3(0.018, 0.026, 0.04), darken);
-                alpha = mix(alpha, 1.0, darken);
+              vec3 viewDir = vec3(0.0, 0.0, 1.0);
+              vec3 lightDirA = normalize(vec3(-0.05, -0.14, 1.0));
+              vec3 lightDirB = normalize(vec3(0.56, -0.22, 0.80));
+              vec3 halfDirA = normalize(lightDirA + viewDir);
+              vec3 halfDirB = normalize(lightDirB + viewDir);
+              float sphereDiffuse = max(dot(sphereNormal, lightDirA), 0.0);
+              float sphereFresnel = pow(1.0 - clamp(sphereNormal.z, 0.0, 1.0), 2.4) * sphereMask;
+              float sphereSpecBroad = pow(max(dot(sphereNormal, halfDirA), 0.0), 22.0) * sphereMask;
+              float sphereSpecSharp = pow(max(dot(sphereNormal, halfDirA), 0.0), 76.0) * sphereMask;
+              float sphereSpecSide = pow(max(dot(sphereNormal, halfDirB), 0.0), 34.0) * sphereMask;
+              float sphereCentre = (1.0 - smoothstep(0.14, 0.94, sphereQ)) * orbA;
+              float sphereSideOcclusion = smoothstep(0.52, 0.99, sphereQ) * sphereMask;
+              float softboxReflection = exp(-pow((p.x - 0.49)/0.105, 2.0)
+                  -pow((p.y - (originY + sphereR*0.27))/max(sphereR*0.18, 0.012), 2.0)) * sphereMask;
 
-                // ---- 柔光本体：一条**宽阔的冷暖渐变**（按参考录屏是 粉紫 ↔ 青蓝）----
-                // 颜色按**带内位置**插值，不再按"绕波源的角度"取色相 —— 绕一圈取色相就是一条
-                // 彩虹灯带；按带内位置取色，这一圈光自己就带一条横跨带宽的冷暖渐变，跟着波
-                // 一起往外铺。bandPos：-1 = 内侧（尾迹，粉紫）、0 = 峰、+1 = 外侧（前沿，青蓝）。
-                float bandT = clamp(bandPos * 0.5 + 0.5, 0.0, 1.0);
-                vec3 tint = mix(${RIPPLE_TINT_WARM}, ${RIPPLE_TINT_MID}, smoothstep(0.0, 0.5, bandT));
-                tint = mix(tint, ${RIPPLE_TINT_COOL}, smoothstep(0.5, 1.0, bandT));
+              vec2 normal = normalize(vec2(rippleVec.x, rippleVec.y));
 
-                float glow = band * envelope;
-                float core = exp(-bandPos * bandPos * ${RIPPLE_CORE_FALLOFF}) * envelope;
-                // 波峰那道冷白柔光（参考：`crest = pow(max(wave,0),1.45)*0.68`）—— 光于是也挂在
-                // 波峰上、和形变共用一个场；波谷只轻微压暗（参考里峰 0.68 / 谷 0.14）。
-                float crest = pow(max(ridge, 0.0), 1.45) * waveBand * envelope;
-                float trough = max(-ridge, 0.0) * waveBand * envelope;
+              float lensDepth = mix(0.002,0.055,smoothstep(0.10,0.38,t));
+              float innerLens = (1.0-smoothstep(-lensDepth,0.025,d))*waveA;
+              float ringWiden = mix(0.30, 1.55, smoothstep(0.16, 0.92, t));   // v68: 末端再宽一档   // v63: 环带随时间逐渐变厚
+      float rim = exp(-abs(d)/(0.045*ringWiden))*waveA;
 
-                // 预乘输出：底色乘 alpha；光只加 rgb、不抬 alpha，在预乘混合里就是"加光"。
-                rgb *= alpha;
-                rgb += tint * glow * ${RIPPLE_GLOW};
-                rgb += mix(vec3(1.0), tint, 0.35) * core * ${RIPPLE_CORE_GAIN};
-                rgb += mix(vec3(0.94, 0.98, 1.0), tint, 0.30) * crest * ${RIPPLE_CREST_GAIN};
-                rgb -= vec3(0.08, 0.10, 0.12) * trough * 0.14;
-                gl_FragColor = vec4(rgb, alpha);
+              float glassMass = exp(-pow((d+0.010)/0.030,2.0))*waveA;
+              float darkUndercut = exp(-pow((d+0.015)/0.010,2.0))*waveA;
+              float deepBlueEdge = exp(-pow((d+0.010)/0.0085,2.0))*waveA;
+              float blueTransmission = exp(-pow((d+0.0055)/0.0090,2.0))*waveA;
+              float innerSpec = exp(-pow((d+0.0047)/0.0025,2.0))*waveA;
+              float coreSpec = exp(-pow(d/0.0020,2.0))*waveA;
+              float outerSpec = exp(-pow((d-0.0030)/0.0036,2.0))*waveA;
+              float outerCaustic = exp(-pow((d-0.0077)/0.009,2.0))*waveA;
+              float softOuterReflection = exp(-pow((d-0.0110)/0.016,2.0))*waveA;
+
+              float shockFade = smoothstep(0.071,0.091,t) * (1.0-smoothstep(0.175,0.255,t));
+              float shockOffset = (0.0034 + 0.0024*exp(-age*20.0))*(0.82+0.18*impactStrength);
+              float shockRadius = rippleRadius + shockOffset;
+              float shockRing = exp(-pow((radialDistance-shockRadius)/0.0026,2.0))*shockFade;
+              float shockUndercut = exp(-pow((radialDistance-(shockRadius-0.0032))/0.0032,2.0))*shockFade;
+
+              float innerInkGroove   = exp(-pow((d+0.032)/0.0065,2.0))*waveA;
+              float innerSilverLine  = exp(-pow((d+0.030)/0.0019,2.0))*waveA;
+              float innerBlueBand    = exp(-pow((d+0.026)/0.0040,2.0))*waveA;
+              float innerWhiteHair   = exp(-pow((d+0.022)/0.0021,2.0))*waveA;
+              float innerDarkGroove  = exp(-pow((d+0.019)/0.0030,2.0))*waveA;
+              float innerCyanEdge    = exp(-pow((d+0.016)/0.0020,2.0))*waveA;
+              float midSilverBand    = exp(-pow((d+0.013)/0.0032,2.0))*waveA;
+              float midBlueHairline  = exp(-pow((d+0.008)/0.0016,2.0))*waveA;
+              float outerWhiteHair   = exp(-pow((d+0.001)/0.0015,2.0))*waveA;
+              float outerBlueLine    = exp(-pow((d-0.006)/0.0024,2.0))*waveA;
+              float outerSilverLine  = exp(-pow((d-0.014)/0.0030,2.0))*waveA;
+              float outerGlintLine   = exp(-pow((d-0.020)/0.0017,2.0))*waveA;
+
+              float shellRelief = (0.62*sin((d+0.034)*236.0 + 0.62*sin(p.x*15.0-t*1.4))
+                                 + 0.38*sin((d+0.015)*365.0 - t*2.8 + sin(p.x*23.0)))
+                                 * exp(-pow((d+0.010)/0.052,2.0))*waveA;
+
+              float facet = 0.70 + 0.30*(0.5 + 0.5*sin(p.x*17.0 + t*1.8 + 0.65*sin(p.x*6.5-t*0.7)));
+              float specPatchA = 0.52 + 0.48*exp(-pow((p.x-0.36)/0.19,2.0));
+              float specPatchB = 0.56 + 0.44*exp(-pow((p.x-0.72)/0.16,2.0));
+              float specVariation = mix(specPatchA,specPatchB,smoothstep(0.35,0.72,p.x))*facet;
+
+              float fineWave = sin(d*142.0 - t*16.0);
+              float edgeEnvelope = exp(-abs(d)*23.0)*waveA;
+              float crestLens = exp(-pow(d/0.026,2.0))*waveA;
+              float rimWarp = fineWave*edgeEnvelope*0.0072
+                            + sin(d*58.0-t*7.5 + p.x*8.0)*exp(-abs(d)*12.0)*0.0030
+                            + shellRelief*0.0022;
+              vec2 tangent = normalize(vec2(-normal.y,normal.x));
+              float bodyBulge = exp(-pow((d+0.014)/0.050,2.0))*waveA;
+              float bevelSlope = exp(-pow((d-0.002)/0.011,2.0))*waveA;
+              vec2 sampleP = p;
+              sampleP += normal * (rimWarp + bodyBulge*0.028 + bevelSlope*0.020 + crestLens*0.030) * uWarp;
+              sampleP += tangent * sin(p.x*25.0+t*5.2) * bodyBulge*0.0026*uWarp;
+              float impulseLens = 0.030*hitPulse*impactStrength*sphereMask*uWarp;
+              sampleP -= radialP*impulseLens;
+
+              float q = clamp(sphereQ, 0.0, 1.4);
+              float coreLayer = (1.0-smoothstep(0.16,0.57,q))*waveA;
+              float middleLayer = smoothstep(0.22,0.43,q)*(1.0-smoothstep(0.69,0.88,q))*waveA;
+              float shoulderLayer = smoothstep(0.58,0.80,q)*(1.0-smoothstep(0.96,1.09,q))*waveA;
+
+              float domeRefraction = sphereMask * sphereSlope * (0.0105 + 0.0050*sphereHeight);
+              sampleP -= radialP * domeRefraction * uWarp;
+              sampleP.x += (p.x-0.5)*innerLens*0.042*uWarp;
+              sampleP.y += innerLens*(0.0055 + 0.0026*sin(p.x*9.0-t*3.2))*uWarp;
+              sampleP = clamp(sampleP,vec2(0.001),vec2(0.999));
+
+              // v18 修重影：原来是三张各自缩放/平移过的采样图叠在一起
+              //（core 的采样坐标压到 0.84×，middle 撑到 1.19×，差 40%），同一段文字于是同时
+              // 出现两份、错开 40~100px —— 这就是球里那道"重影"。真实透镜只有一张像，所以这里
+              // 把三层的缩放/径向位移先按同一组权重合成一条连续剖面，再只采一次。
+              float radialShift = -0.019*sin(min(q,1.0)*3.14159265)*coreLayer
+                                + 0.024*exp(-pow((q-0.57)/0.23,2.0))*middleLayer
+                                - 0.032*exp(-pow((q-0.84)/0.145,2.0))*shoulderLayer;
+              float shearShift = (0.0042*sin(p.x*11.0-t*1.4)+0.0018*sin(p.y*18.0+t))*middleLayer
+                               + 0.0045*sin(p.x*16.0+t*1.7)*shoulderLayer;
+              float pullAmt = -0.160*coreLayer + 0.190*middleLayer + 0.160*shoulderLayer;
+              float pushAmt = -0.055*coreLayer - 0.035*middleLayer + 0.075*shoulderLayer;
+              vec2 refractP = sampleP + radialP*(radialShift*uWarp) + tangentP*(shearShift*uWarp);
+              refractP.x = 0.5 + (refractP.x-0.5)*(1.0+pullAmt*uWarp);
+              refractP.y = originY + (refractP.y-originY)*(1.0+pushAmt*uWarp);
+              // v33: 与球同心、横向同宽的椭圆，纵向 1.30 倍；位移只作用在球外(d>0)，
+              // 直径越过屏宽后随 phaseA 归零，消散成环的一部分。
+              float wakeGate = phaseA*smoothstep(0.10, 0.18, t);
+              float we = (p.x-0.5)/max(rippleRadius/aspect, 0.001);
+              float wh = (p.y-originY)/max(rippleRadius*1.30, 0.001);
+              float wakeE = we*we + wh*wh;
+              float wakeOutside = smoothstep(0.0, 0.006, d);
+              float wakeLens = exp(-wakeE*1.2)*wakeGate*wakeOutside;
+              refractP.x += we*wakeLens*0.035;
+              refractP.y += wh*wakeLens*0.200;
+              // v69: 边缘透镜——大强度折射只压在椭圆边界上，用形变代替颜色
+              float wakeEdgeLens = exp(-pow((wakeE-1.0)/0.22, 2.0))*wakeGate*wakeOutside;
+              refractP.x += we*wakeEdgeLens*0.085;
+              refractP.y += wh*wakeEdgeLens*0.140;
+              refractP = clamp(refractP,vec2(0.001),vec2(0.999));
+              vec3 layeredContent = sampleSource(refractP).rgb;
+              // v26: 球内透镜模糊（越靠球心越糊，球缘为 0）
+              // v72: 球内透镜——阶段A 加强 1.9 倍，阶段B 减到 0.35 倍
+              float lensGain = mix(1.90, 0.35, spread);
+              float lensBlur = clamp(-d/0.28, 0.0, 1.0)*lensGain*0.0022*smoothstep(0.0, 0.045, min(min(p.x,1.0-p.x), min(p.y,1.0-p.y)))*waveA;   // v48: 随涟漪一起消失，否则结束后照片仍发糊
+              layeredContent = (layeredContent
+                + sampleSource(refractP+vec2(lensBlur,0.0)).rgb
+                + sampleSource(refractP-vec2(lensBlur,0.0)).rgb
+                + sampleSource(refractP+vec2(0.0,lensBlur)).rgb
+                + sampleSource(refractP-vec2(0.0,lensBlur)).rgb)*0.2;
+
+              // 色散围绕真正采样的那个点（refractP，和 layeredContent 同一点），
+              // 不是折射前的 sampleP —— 否则彩边会和内容错开一点。
+              // HTML 里是在翻转过的 texUv 上加 normal*ca；这里换算回 p 空间，纵轴取反。
+              float ca = (rim*0.0038 + coreSpec*0.0018)*uWarp;
+              vec2 caP1 = clamp(refractP + vec2(normal.x, -normal.y)*ca, vec2(0.001), vec2(0.999));
+              vec2 caP2 = clamp(refractP - vec2(normal.x, -normal.y)*ca, vec2(0.001), vec2(0.999));
+              float red = sampleSource(caP1).r;
+              float blue = sampleSource(caP2).b;
+              vec3 refracted = vec3(mix(layeredContent.r,red,rim*0.62),layeredContent.g,
+                                    mix(layeredContent.b,blue,rim*0.62));
+              vec3 col = mix(layeredContent,refracted,clamp(rim*1.35,0.0,0.88));
+
+              float bodyDark = exp(-pow((sphereQ - 0.70)/0.34, 2.0));
+              float volumeShade = sphereMask * (0.020 + 0.068*bodyDark + 0.030*(1.0-sphereDiffuse));
+              col *= 1.0-volumeShade;
+              col *= 1.0-0.14*sphereSideOcclusion;
+              col = mix(col, col*vec3(0.62,0.66,0.71)+vec3(0.008,0.009,0.011), sphereMask*0.17);
+              col += vec3(0.026,0.030,0.035)*sphereMask*(0.28+0.42*sphereDiffuse)*uGlow;
+              col += vec3(0.24,0.28,0.32)*sphereFresnel*0.44*uGlow;
+              col += vec3(0.55,0.60,0.65)*sphereSpecBroad*0.26*uGlow;
+              col += vec3(0.86,0.89,0.93)*sphereSpecSide*0.22*uGlow;
+              col += vec3(0.91,0.97,1.0)*sphereSpecSharp*0.95*uGlow;
+              col += vec3(0.96,0.98,1.0)*sphereMask*pow(max(sphereNormal.z,0.0),6.0)*0.34*uGlow;
+      col += vec3(0.40,0.52,0.65)*softboxReflection*0.17*uGlow;
+
+              col = mix(col, col*vec3(0.42,0.47,0.53)+vec3(0.002,0.003,0.004), sphereBody*0.12);
+              col *= 1.0-0.22*orbRimDark;
+              col += vec3(0.10,0.12,0.14)*orbInnerReflect*0.24*uGlow;
+      col += vec3(0.80,0.88,1.00)*orbRimBlue*(0.24+0.14*hitPulse)*impactStrength*uGlow;
+      col += vec3(0.94,0.97,1.00)*orbRimWhite*(0.34+0.24*hitPulse*impactStrength)*uGlow*(1.0+0.30*phaseA);
+              col += vec3(0.35,0.40,0.46)*sphereMask*hitFlash*0.055*impactStrength*uGlow;
+
+              col *= 1.0;  // v42: 启动瞬间的冲击压暗已移除
+              col += vec3(0.72,0.78,0.84)*shockRing*0.19*impactStrength*uGlow;
+              col += vec3(0.88,0.92,0.97)*shockRing*0.10*impactStrength*uGlow;
+
+              col *= 1.0-0.16*pointMask;
+
+              float bodyShade = 0.16*innerLens;
+              col *= 1.0-bodyShade;
+              col *= 1.0-0.38*darkUndercut;
+              col = mix(col,col*vec3(0.72,0.76,0.80)+vec3(0.006,0.008,0.010),glassMass*0.17);
+                            float dimTop = 0.600*smoothstep(0.245,0.555,t);
+              float wakeBand = exp(-pow((p.y-0.615)/0.105, 2.0));
+              float deepZone = smoothstep(0.62, 0.95, p.y);
+              float globalDim = 0.0;   // v41: 按要求不做整体压暗（原来最多压 60%，还按高度分档）
+                            col *= 1.0-globalDim;
+              col *= 1.0 - 0.20*sphereMask*phaseA;   // v52: 球内压暗收轻，保住球里的内容   // v50: 球内加深，接近黑玻璃
+              float lumNow = dot(col, vec3(0.299,0.587,0.114));
+              col = mix(col, vec3(lumNow), 0.10*wakeBand*dimTop);
+              col += vec3(0.050,0.055,0.062)*exp(-pow((p.y-0.500)/0.030,2.0))*wakeBand*dimTop;
+              // v37: 椭圆边 = 细暖白亮线 + 紧贴内侧一道暗刻
+              float wakeLine = exp(-pow((wakeE-1.0)/0.040, 2.0))*wakeGate*wakeOutside;
+              float wakeCut  = exp(-pow((wakeE-0.88)/0.070, 2.0))*wakeGate*wakeOutside;
+              float wakeGain = 0.70+0.65*smoothstep(-0.4,1.0,wh);
+              // v70: 银白色玻璃边去掉，边缘只用透镜形变表现
+      // col += vec3(0.93,0.97,1.00)*wakeLine*0.70*wakeGain;
+      // v51: 椭圆区的大片亮白反光（参考片里那片"湿亮"）
+      float wakeGlare = exp(-wakeE*0.60)*wakeGate*wakeOutside;
+      col += vec3(0.90,0.95,1.00)*wakeGlare*0.025;
+              col *= 1.0 - 0.30*wakeCut;
+
+              col += vec3(0.012,0.014,0.017)*glassMass*0.75*uGlow;
+              col += vec3(0.045,0.052,0.060)*deepBlueEdge*0.92*uGlow;
+              col += vec3(0.090,0.100,0.112)*blueTransmission*0.60*uGlow;
+              col += vec3(0.44,0.47,0.51)*outerCaustic*0.25*uGlow;
+              col += mix(vec3(0.58,0.61,0.65),vec3(0.62,0.46,0.30),spread)*softOuterReflection*0.13*uGlow;
+
+              float layeredFacet = 0.64 + 0.36*(0.5 + 0.5*sin(p.x*26.0 + t*2.2 + 0.7*sin(p.x*8.0)));
+              col *= 1.0 - 0.16*innerInkGroove;
+              col += vec3(0.86,0.90,0.94)*innerWhiteHair*0.38*specVariation*uGlow;
+              col += vec3(0.94,0.97,1.0)*outerGlintLine*0.29*specVariation*uGlow;
+
+              col += vec3(0.88,0.91,0.95)*innerSpec*0.66*specVariation*uGlow;
+              col += vec3(0.96,0.99,1.0)*coreSpec*1.00*specVariation*uGlow;   // v76: 还原为原始强度
+              col += vec3(0.92,0.95,0.98)*outerSpec*0.60*specVariation*uGlow;
+
+              // ---- 环的颜色（v21）：分阶段 ----
+              // 阶段 0 —— 球还没长到屏宽（rippleRadius < 0.24 屏高，即直径 < 屏宽）：
+              //   保持 v18 那版整体冷调（对称高斯 + 球内 0.28 常冷）。这一段实测是对的，不动。
+              // 阶段 1 —— 越过屏宽开始扩散（0.24 → 0.34 屏高）：整体冷调淡到 26%，
+              //   避免大面积扩散时整圈/环内发蓝"太深"（v22：内侧斜坡 σ 0.120→0.085、幅度 70%、
+              //   整体冷调底 38%→26%）；颜色改由两侧承担（内侧青、外侧暖，环峰回到中性白）。
+              //   参考片峰位 R−B 只有 −3，色全在两侧：内侧 −67、外侧 +26。
+              float coolAmt = clamp(exp(-pow(d/0.045,2.0))*waveA + sphereMask*0.28, 0.0, 1.0)
+                            * mix(1.0, 0.26, spread);
+              col *= mix(vec3(1.0), vec3(0.90,0.97,1.18), coolAmt);
+              // v39: 阶段 A（球）几乎去色 -> 中性灰；阶段 B 保留环内侧的蓝
+              float lumA = dot(col, vec3(0.299,0.587,0.114));
+              col = mix(col, vec3(lumA), 0.88*phaseA*sphereMask);   // v45: 只作用在球内，否则整屏发灰
+              float env  = exp(-pow(d/0.085,2.0))*waveA*spread;
+              float envW = exp(-pow(d/0.070,2.0))*waveA*spread;
+              float disp = clamp((d+0.014)/0.050, -1.3, 1.3);
+              float coolW = max(-disp, 0.0)*env;
+              float warmW = max( disp, 0.0)*envW;
+              // 内侧（d<0）：压红抬蓝 —— 青蓝
+              col *= 1.0 - vec3(0.24,0.05,-0.18)*coolW;
+              col += vec3(-0.048,0.020,0.098)*coolW;
+              // 外侧（d>0）：抬红压蓝 —— 琥珀
+              col *= 1.0 + vec3(0.15,0.02,-0.15)*warmW;
+              col += vec3(0.030,0.014,0.0)*warmW;
+
+
+
+                            // v43: 涟漪起来之前原样输出背景，不做任何着色（修启动前整屏发黑）
+              col = mix(sampleSource(p).rgb, col, smoothstep(0.0, 0.06, t));
+              // v56: 环带改宽、柔边、偏冷青；外侧补一道暗槽
+      float ringBandWide = smoothstep(-0.060*ringWiden, 0.0, d)*(1.0 - smoothstep(0.0, 0.080*ringWiden, d))*waveA;
+      // v66: 环带改成莫兰迪三段式调色玻璃（压色，不是发白光）
+      float bandC = clamp((d + 0.060*ringWiden)/(0.140*ringWiden), 0.0, 1.0);  // 0=上缘 1=下缘
+      vec3 bandCol = mix(vec3(0.115,0.105,0.160), vec3(0.300,0.360,0.420), smoothstep(0.00,0.45,bandC)); // 暗紫蓝→暗灰蓝
+      bandCol = mix(bandCol, vec3(0.340,0.400,0.380), smoothstep(0.30,0.60,bandC));                       // →灰青
+      bandCol = mix(bandCol, vec3(0.420,0.380,0.320), smoothstep(0.55,0.85,bandC));                       // →浅灰褐(奶茶)
+      bandCol = mix(bandCol, vec3(0.160,0.130,0.170), smoothstep(0.85,1.00,bandC));                       // →深灰紫
+      bandCol += vec3(0.055,0.038,0.020)*smoothstep(0.10,0.00,bandC);                                     // 上缘暖棕
+      float edgeVig = mix(0.40, 1.0, smoothstep(0.0, 0.24, min(p.x, 1.0-p.x)));                           // 左右暗角
+      bandCol *= edgeVig;
+      float ringGeo = smoothstep(-0.060*ringWiden, 0.0, d)*(1.0 - smoothstep(0.0, 0.080*ringWiden, d));   // v67: 不乘 spreadFade
+      col = mix(col, bandCol, clamp(ringGeo*waveOut*0.92*(0.30/ringWiden + 0.75), 0.0, 0.92));
+      col *= 1.0 - 0.22*exp(-pow((d-0.062)/0.032,2.0))*waveA;
+      col = max(col,vec3(0.0));
+              col = col/(1.0 + max(col-vec3(0.95),vec3(0.0))*0.12);
+
+              // 预乘输出：alpha 只有 0（占位纹理）和 1（真图）两种取值，
+              // alpha=1 时 vec4(col,alpha) 与 vec4(col*alpha,alpha) 等价；
+              // alpha=0 时内容为黑、只剩叠加的光，即"窗口透、只看到光"。
+              float alpha = sampleSource(p).a;
+              // v44: 涟漪启动前整窗全透明，避免首帧纹理未就绪时铺一层黑
+              float alphaGate = smoothstep(0.0, 0.06, t);
+              alpha *= alphaGate;
+              // v46: 照搬原版那层压暗 —— 深蓝黑 + 抬 alpha，边界随进度扫过全屏
+              float darkR = u_progress * (aspect + 0.17);
+              float reached = 1.0 - smoothstep(darkR - 0.10, darkR + 0.17, d);
+              float darkenAmt = reached * smoothstep(0.17, 0.92, u_progress) * 0.45;   // v53: 恢复全屏灰层（sphereMask 会随球体淡出而消失）
+              col = mix(col, vec3(0.018, 0.026, 0.04), darkenAmt);
+              alpha = mix(alpha, 1.0, darkenAmt);
+              gl_FragColor = vec4(col, alpha);
             }
         """
     }
