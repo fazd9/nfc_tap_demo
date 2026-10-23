@@ -178,24 +178,35 @@ class OverlayView @JvmOverloads constructor(
         const val EDGE_SHADER_ON = true
 
         // ---- 边缘的尺寸和颜色：直接取 EdgeScrimView 的值 ----
-        // 它那边口径很明确：纯白芯 **1..3 物理 px**（当前取 1），渐变段 **30 物理 px**，
-        // 颜色就是纯白，剖面是 `1 − smoothstep`。单位是**物理像素**，不乘 k、不跟分辨率走 ——
+        // 它那边口径很明确：纯白芯 **1..3 物理 px**（这里取 10），辉光接在渐变段外面。
+        // 颜色就是纯白。芯宽的单位是**物理像素**，不乘 k、不跟分辨率走 ——
         // 因为这几像素本来就是"贴屏幕边缘的一道亮"，换成 dp 反而在高分屏上会变粗。
 
-        /** 左右两侧纯白芯宽（物理 px，范围 1..3）。 */
-        const val EDGE_WHITE_LR_PX = 1f
+        /** 左右两侧纯白芯宽（物理 px）。 */
+        const val EDGE_WHITE_LR_PX = 10f
 
-        /** 上下两侧纯白芯宽（物理 px，范围 1..3）。 */
-        const val EDGE_WHITE_TB_PX = 1f
+        /** 上下两侧纯白芯宽（物理 px）。 */
+        const val EDGE_WHITE_TB_PX = 10f
 
-        /** 白 → 透明的渐变段长度（物理 px），四边一致。 */
+        /** 白 → 透明（准确说是白 → [EDGE_FADE_FLOOR]）的渐变段长度（物理 px），四边一致。 */
         const val EDGE_FADE_PX = 30f
+
+        /**
+         * 渐变段的**底值**（0..1）：渐变层不再降到 0，而是降到这个值，再由辉光层接手降到 0。
+         *
+         * 0 = 老行为（渐变直接淡到透明）。给正数之后两段在接缝处数值相等，**没有台阶**；
+         * 它同时也是辉光层的峰值（辉光就是"从这个数继续往 0 走"），所以它一降，辉光就更浅。
+         */
+        const val EDGE_FADE_FLOOR = 0.10f
+
+        /** 辉光层宽度（**设计 px**，绘制时乘 k）：48 在 1080 宽屏上约 **136px**。 */
+        const val EDGE_GLOW_DEPTH_DP = 48f
 
         /**
          * 边缘峰值覆盖度（1 = 芯上纯白不透明，和 EdgeScrimView 一致）。
          *
-         * 透明感是**渐变段**给的：芯只有 1px，往外 30px 里覆盖度从 1 一路收到 0，
-         * 底下内容在那一段始终透得出来。想整体压淡就把这里调小（比如 0.8）。
+         * 透明感是**渐变段**给的：芯 10px，往外 30px 里覆盖度从 1 一路收到 [EDGE_FADE_FLOOR]，
+         * 之后再由辉光段收到 0，底下内容在那两段始终透得出来。想整体压淡就把这里调小（比如 0.8）。
          */
         /**
          * 显形波前的**过渡带宽度**（占屏宽的比例）。
@@ -237,6 +248,8 @@ class OverlayView @JvmOverloads constructor(
             uniform float uWhiteLR;
             uniform float uWhiteTB;
             uniform float uFade;
+            uniform float uFloor;
+            uniform float uGlowDepth;
             uniform float uPeak;
             uniform float uFloatK;
             uniform float2 uReveal;
@@ -280,6 +293,8 @@ class OverlayView @JvmOverloads constructor(
                 float grow = 0.25 + 0.75 * reached;
                 float whiteW = mix(uWhiteTB, uWhiteLR, lat) * grow;
                 float fade = mix(uFade * uFloatK, uFade, lat) * grow;
+                // 辉光深度同样是设计 px × k；和 fade 一样吃 "上下浮动(uFloatK)" 和入场 grow。
+                float glowD = uGlowDepth * mix(uFloatK, 1.0, lat) * grow;
                 // 左右两条边上的流光：同样走**几何**（带宽鼓起来），不是叠 alpha。
                 // 高斯亮带沿 y 跑，只作用在 lat 大的地方（左右两条边）。
                 float crestY = coord.x < uSize.x * 0.5 ? uFlowYL : uFlowYR;
@@ -294,9 +309,21 @@ class OverlayView @JvmOverloads constructor(
                 float bulge = uFlowAlpha * g;
                 whiteW *= 1.0 + 0.8 * bulge;
                 fade *= 1.0 + 1.2 * bulge;
+                // 白芯外面是**两段**：先是渐变段（1 → uFloor），再是辉光段（uFloor → 0）。
+                // 渐变段的底是 uFloor 而不是 0，所以两段在接缝处数值相等 —— 没有台阶。
+                // 前一段的形状和以前一样（1 − smoothstep），只是整体被抬高了 uFloor。
+                float fadeEnd = whiteW + fade;
                 float t = clamp((d - whiteW) / max(fade, 1.0), 0.0, 1.0);
-                float white = 1.0 - t * t * (3.0 - 2.0 * t);
-                float a = clamp(uPeak * white * reached * (1.0 + 0.5 * bulge), 0.0, 1.0);
+                float a;
+                if (d < fadeEnd) {
+                    // 白芯 + 渐变段跟着流光鼓宽、提亮。
+                    a = mix(uFloor, 1.0, 1.0 - t * t * (3.0 - 2.0 * t)) * (1.0 + 0.5 * bulge);
+                } else {
+                    // 辉光段**钉死**：宽度不吃 bulge，亮度也不吃 bulge，只随入场 reached 长出来。
+                    float tg = clamp((d - fadeEnd) / max(glowD, 1.0), 0.0, 1.0);
+                    a = uFloor * (1.0 - tg * tg * (3.0 - 2.0 * tg));
+                }
+                a = clamp(uPeak * a * reached, 0.0, 1.0);
                 return half4(a, a, a, a);
             }
         """.trimIndent()
@@ -2191,8 +2218,9 @@ class OverlayView @JvmOverloads constructor(
      * 每个像素的亮度只由"它到圆角矩形边界的距离"决定：
      *
      * ```
-     * d < 纯白芯（1px）         → 峰值 [EDGE_PEAK]（纯白，和 EdgeScrimView 一样）
-     * 芯 ≤ d < 芯 + 30px         → 1 − smoothstep 淡到 0（两端导数为 0，接缝处不会折）
+     * d < 纯白芯（10px）        → 峰值 [EDGE_PEAK]（纯白，和 EdgeScrimView 一样）
+     * 芯 ≤ d < 芯 + 30px         → 渐变段：1 − smoothstep，但从 1 淡到 [EDGE_FADE_FLOOR]（从 0 抬起）
+     * 芯 + 30px ≤ d < 芯 + 166px → 辉光段：[EDGE_FADE_FLOOR] 继续淡到 0（+136px = 48 设计 px × k）
      * 更里面                  → 0（不画）
      * ```
      *
@@ -2239,6 +2267,8 @@ class OverlayView @JvmOverloads constructor(
                 it.setFloatUniform("uWhiteLR", EDGE_WHITE_LR_PX)
                 it.setFloatUniform("uWhiteTB", EDGE_WHITE_TB_PX)
                 it.setFloatUniform("uFade", EDGE_FADE_PX)
+                it.setFloatUniform("uFloor", EDGE_FADE_FLOOR)
+                it.setFloatUniform("uGlowDepth", EDGE_GLOW_DEPTH_DP * (viewW / DESIGN_W))
                 it.setFloatUniform("uCornerR", cornerR)
                 it.setFloatUniform("uFlowEnd", SIDE_FLOW_END_FRAC * viewH)
             }
